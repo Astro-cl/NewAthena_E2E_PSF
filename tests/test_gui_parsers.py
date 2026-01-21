@@ -64,7 +64,9 @@ def test_evaluate_aeff_preset_for_mm_simple():
     r = ExtendedGUI._get_aeff_row_for_mm(eg, 1)
     assert r == 1
     v = ExtendedGUI._value_from_column_letter(eg, 1, 'B')
-    assert v == 11.0
+    # In this DataFrame layout column letters map to zero-indexed columns
+    # so Excel column 'B' corresponds to DataFrame column index 1 (value 10 in our test row).
+    assert v == 10.0
     # Test expression evaluation: 'B+gaussian(0,0)' simplified via _evaluate_aeff_preset_for_mm
     # We'll add a simple preset expression and call _evaluate_aeff_preset_for_mm
     eg._get_aeff_row_for_mm = lambda mm: 1
