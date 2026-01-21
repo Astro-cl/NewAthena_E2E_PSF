@@ -12,6 +12,8 @@ from distributions_rotated import (
     load_psf_matrix_excel,
     eval_psf_matrix_rotated,
 )  # Custom functions for 2D rotated distributions
+import json
+import sys
 
 
 def load_aeff_weight_map(path: str, sheet: str = 'A_eff') -> dict[int, float]:
@@ -524,7 +526,7 @@ def _resolve_custom_psf_path(workbook_path: str, stem: str) -> str | None:
     return None
 
 
-def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None):
+def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None, return_metrics_only: bool = False):
     # Close any existing matplotlib figures to prevent accumulation
     plt.close('all')
 
@@ -777,6 +779,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     r_profile_00, cumulative_00, total_00 = radial_profile(0.0, 0.0, n_r=n_r_final, n_theta=n_theta_final)
     frac_00 = cumulative_00 / total_00 if total_00 > 0 else cumulative_00
     radius_50_00 = np.interp(0.5, frac_00, r_profile_00)
+    # 90% at origin for reference
+    radius_90_00 = np.interp(0.9, frac_00, r_profile_00)
     
     # Compute optimized configuration metrics if provided
     opt_center_x, opt_center_y, opt_radius_50, opt_radius_90 = None, None, None, None
@@ -1112,6 +1116,22 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     hew_best_arcsec = 2 * radius_50 * m_to_arcsec if radius_50 is not None else None
     hew_origin_arcsec = 2 * radius_50_00 * m_to_arcsec if radius_50_00 is not None else None
     eef90_arcsec = 2 * radius_90 * m_to_arcsec if radius_90 is not None else None
+    eef90_origin_arcsec = 2 * radius_90_00 * m_to_arcsec if radius_90_00 is not None else None
+
+    # If caller only requests metrics, return them now without any plotting side-effects.
+    if return_metrics_only:
+        return {
+            'hew_origin_arcsec': hew_origin_arcsec,
+            'hew_best_arcsec': hew_best_arcsec,
+            'eef90_origin_arcsec': eef90_origin_arcsec,
+            'eef90_best_arcsec': eef90_arcsec,
+            'hew_x_arcsec': hew_base_x_arcsec,
+            'hew_y_arcsec': hew_base_y_arcsec,
+            'hew_opt_x_arcsec': hew_opt_x_arcsec,
+            'hew_opt_y_arcsec': hew_opt_y_arcsec,
+            'hew_opt_arcsec': (2 * opt_radius_50 * m_to_arcsec) if opt_radius_50 is not None else None,
+            'eef90_opt_arcsec': (2 * opt_radius_90 * m_to_arcsec) if opt_radius_90 is not None else None,
+        }
     if radius_90 is not None:
         # Add a dashed circle for 90% encircled energy in red
         label_90 = f'EEF 90% centered on best focus ({eef90_arcsec:.4f}" diameter)' if eef90_arcsec is not None else 'EEF 90% centered on best focus'
@@ -1413,6 +1433,15 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         plt.show()  # Display the combined plot
 
 
+def compute_hew_eef_metrics(file: str = 'Distributions/Test_Distribution.xlsx', sheet: str = 'MM_PSF', normalize: bool = True, fast: bool = True, df_optimized: pd.DataFrame = None) -> dict:
+    """Convenience wrapper: load workbook and return HEW/EEF metrics (no plotting).
+
+    Returns a dict matching the CLI JSON output.
+    """
+    df = load_gaussians_from_excel(file, sheet)
+    return plot_sum(df, normalize=normalize, fast=fast, df_optimized=df_optimized, return_metrics_only=True)
+
+
 if __name__ == '__main__':
     # Close all existing figures to ensure clean start
     plt.close('all')
@@ -1449,7 +1478,16 @@ if __name__ == '__main__':
             "'elliptical' (per-row: best MMs toward x, worst toward y)."
         ),
     )
+    parser.add_argument('--return_metrics_only', dest='return_metrics_only', action='store_true', help='Return HEW/EEF metrics only (no plot).')
     args = parser.parse_args()
+
+    # If user requested metrics-only, disable interactive plotting and suppress show().
+    if getattr(args, 'return_metrics_only', False):
+        try:
+            plt.ioff()
+            plt.show = lambda *a, **k: None
+        except Exception:
+            pass
 
     # Load data from Excel
     df = load_gaussians_from_excel(args.file, args.sheet)
@@ -1588,6 +1626,19 @@ if __name__ == '__main__':
             plot_title_suffix = f" (placement: {placement_label})"
     
     # Plot the sum and encircled energy (with optional optimized overlay)
+    if args.return_metrics_only:
+        metrics = plot_sum(
+            df,
+            normalize=args.normalize,
+            output=args.output,
+            fast=(args.mode == 'coarse'),
+            title_suffix=plot_title_suffix,
+            df_optimized=df_optimized,
+            return_metrics_only=True,
+        )
+        print(json.dumps(metrics, indent=2))
+        sys.exit(0)
+
     plot_sum(
         df,
         normalize=args.normalize,

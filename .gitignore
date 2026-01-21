@@ -42,3 +42,7 @@ venv.bak/
 # Environment files
 .env
 .env.*
+
+# Some distribution files
+Distributions/TestDistribution_optimised.xlsx
+Distributions/TestDistribution_placed.xlsx
