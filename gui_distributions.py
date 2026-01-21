@@ -686,9 +686,33 @@ class ExtendedGUI:
         """
         self.aeff_standard_presets = {}
         try:
+            # Try to robustly locate the 'Standard' / 'Values' columns instead of assuming fixed D/E.
+            # Search the top few rows for header-like cells containing 'standard' and 'values'.
             start_row = 0
-            name_col = 3
-            values_col = 4
+            name_col = None
+            values_col = None
+
+            # Search first 3 rows and all columns for header hints
+            for r in range(min(3, df.shape[0])):
+                for c in range(df.shape[1]):
+                    cell = df.iloc[r, c]
+                    try:
+                        s = str(cell).strip().lower()
+                    except Exception:
+                        s = ''
+                    if not s:
+                        continue
+                    if 'standard' in s and name_col is None:
+                        name_col = c
+                    if 'value' in s and values_col is None:
+                        values_col = c
+
+            # Fallback to original D/E if detection failed
+            if name_col is None:
+                name_col = 3
+            if values_col is None:
+                values_col = 4
+
             if df.shape[0] <= start_row + 1 or df.shape[1] <= values_col:
                 return
 
@@ -696,7 +720,8 @@ class ExtendedGUI:
             while row_idx < df.shape[0]:
                 name = df.iloc[row_idx, name_col] if name_col < df.shape[1] else None
                 if pd.isna(name) or str(name).strip() == '':
-                    break
+                    row_idx += 1
+                    continue
                 expr = df.iloc[row_idx, values_col] if values_col < df.shape[1] else None
                 if pd.isna(expr) or str(expr).strip() == '':
                     row_idx += 1
