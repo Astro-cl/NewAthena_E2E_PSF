@@ -1,5 +1,7 @@
 # NewAthenaE2EPSF_v2 - PSF Analysis Toolkit
 
+[![Python CI](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml/badge.svg)](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml)
+
 A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of mirror module configurations with support for multiple distribution types, perturbation analysis, and an interactive GUI.
 
 ## Table of Contents
