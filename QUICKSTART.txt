@@ -1,0 +1,103 @@
+================================================================================
+  NEWATHENAE2EPSF_V2 - QUICK START GUIDE
+================================================================================
+
+INSTALLATION
+------------
+1. Open terminal in project folder
+
+2. Create and activate a virtual environment (recommended):
+  python3 -m venv .venv
+  source .venv/bin/activate
+
+3. Install dependencies:
+  pip install -r requirements.txt
+
+USING THE GUI (Easiest Method)
+-------------------------------
+1. Launch GUI:
+  python3 gui_distributions.py
+
+2. Load Excel file from Distributions/ folder
+
+3. Configure parameters and generate data
+
+4. Export results (saved to Distributions/ folder)
+
+USING / EDITING STANDARD MM_PSF PRESETS (Recommended)
+----------------------------------------------------
+The PSF preset dropdown in the GUI is populated from the **MM_PSF** sheet in the
+currently loaded workbook.
+
+1. Open your workbook in Excel (e.g. Distributions/Test_Mark1.xlsx)
+2. Go to sheet: MM_PSF
+3. Locate the preset table starting at cell K1
+  Columns are:
+    - Preset Name
+    - sigma_rad spec
+    - sigma_azi spec
+    - alpha_rad spec (pseudo-voigt only)
+    - alpha_azi spec (pseudo-voigt only)
+
+4. Enter values as either:
+  - A number (fixed), e.g. 3.397323952
+  - gaussian(mean, sigma), where sigma can include %, e.g. gaussian(3.397, 10%*3.397)
+
+5. Save the Excel file
+6. In the GUI, use “Load Excel File” to load that workbook
+  (the preset dropdown refreshes from the file you load)
+
+Reference values (arcsec):
+  Sym Gaussian 4.3" HEW: sigma = 1.826058874
+  Sym Gaussian 8" HEW:   sigma = 3.397323952
+  Asym Gaussian 4.3" HEW (ratio 4:1): sigma_major=2.963740901247624, sigma_minor=0.740935225311906
+  Asym Gaussian 8" HEW (ratio 7:1):   sigma_major=5.797205089162605, sigma_minor=0.8281721555946578
+
+Pitfalls:
+  - After editing the table in Excel, SAVE and re-load that workbook in the GUI.
+  - Use dot decimals ("3.397"), not comma decimals.
+  - Don’t put units in cells; values are arcsec.
+  - For Gaussian presets, alpha columns should be '-' or blank.
+
+RUNNING ANALYSIS
+----------------
+python3 main.py -f Distributions/Test_Distribution.xlsx
+
+Input workbook requirements (for main.py):
+  - Must include sheet: MM configuration
+  - Must include sheet: A_eff
+      Column A: MM #
+      Column B: weight (numeric)
+    If A_eff is missing (or weights are non-numeric), the analyzer will fail.
+
+Optional runtime modes:
+  python3 main.py -f Distributions/Test_Distribution.xlsx --mode coarse
+  python3 main.py -f Distributions/Test_Distribution.xlsx --mode fine
+  python3 main.py -f Distributions/Test_Distribution.xlsx --mode extra-fine
+
+Placement (writes *_placed.xlsx and overlays it):
+  python3 main.py -f Distributions/Test_Distribution.xlsx --placement cross
+  python3 main.py -f Distributions/Test_Distribution.xlsx --placement x_axis
+  python3 main.py -f Distributions/Test_Distribution.xlsx --placement elliptical
+
+Optimization (writes *_optimised.xlsx):
+  python3 main.py -f Distributions/Test_Distribution.xlsx --optimize
+  (Alias accepted: --optimise)
+  If you don't pass --placement, optimization seeds from: elliptical
+
+Save without opening a window:
+  python3 main.py -f Distributions/Test_Distribution.xlsx -o /tmp/out.png
+
+  (Equivalent long flag: --output /tmp/out.png)
+
+Press 'p' to export PSF plot (saved to Figures/ folder)
+Press 'e' to export Encircled Energy plot (saved to Figures/ folder)
+
+FOLDER STRUCTURE
+----------------
+Distributions/  - Place your Excel files here
+Figures/        - Exported plots are saved here
+
+For full documentation, see README.md
+
+================================================================================

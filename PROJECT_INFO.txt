@@ -1,0 +1,158 @@
+================================================================================
+  NEWATHENAE2EPSF_V2 - PROJECT INFORMATION
+================================================================================
+
+INCLUDED FILES
+--------------
+Core Python Files:
+  ✓ distributions_rotated.py  - 2D Gaussian and Pseudo-Voigt distributions
+  ✓ main.py                   - Command-line analyzer and plotter
+  ✓ optimize_mm_rows.py        - Row-wise optimizer + placement strategies + Excel writer
+  ✓ gui_distributions.py      - Interactive GUI application
+  ✓ requirements.txt          - Python dependencies
+
+Documentation:
+  ✓ README.md                 - Comprehensive user guide
+  ✓ QUICKSTART.txt           - Quick start instructions
+  ✓ PROJECT_INFO.txt         - This file
+
+Sample Data:
+  ✓ Distributions/Test_Distribution.xlsx - Example Excel file with MM configuration and PSF data
+
+Directories:
+  ✓ Distributions/           - For Excel files (load/save)
+  ✓ Figures/                 - For exported plots (auto-save)
+
+EXCLUDED FILES (Not Copied)
+----------------------------
+Test Files (for development only):
+  ✗ test_pseudo_voigt.py
+  ✗ test_fixed_distribution.py
+  ✗ test_fixed_gui_flow.py
+  ✗ test_*.xlsx
+
+Obsolete Files:
+  ✗ gui_gaussians.py (replaced by gui_distributions.py)
+  ✗ generate_from_distributions.py (functionality in GUI)
+  ✗ generate_from_distributions (1).py (duplicate)
+
+Documentation (merged into README.md):
+  ✗ ETA_DISTRIBUTION_UPDATE.md
+  ✗ FIXES_SUMMARY.md
+  ✗ IMPLEMENTATION_SUMMARY.md
+  ✗ PSEUDO_VOIGT_USAGE.md
+  ✗ GUI_DISTRIBUTION_GUIDE.md
+  ✗ QUICK_REFERENCE.md
+
+Generated Outputs (examples):
+  ✗ *.png files
+  ✗ Old test files (cleaned up, only Test_Distribution.xlsx retained)
+  ✗ __pycache__/
+
+KEY CHANGES FROM ORIGINAL
+--------------------------
+1. File Dialogs:
+   - Load files: Default to ./Distributions/ folder
+   - Save files: Default to ./Distributions/ folder
+
+2. Figure Export:
+   - All plots saved to ./Figures/ folder automatically
+   - Timestamped filenames: E2E_PSF_YYYYMMDD_HHMMSS.png
+
+3. Default Paths:
+   - main.py: Default Excel path is Distributions/Test_Distribution.xlsx
+
+4. Documentation:
+   - All documentation consolidated into comprehensive README.md
+   - Quick start guide added (QUICKSTART.txt)
+
+USAGE
+-----
+From project root directory:
+
+GUI:        python3 gui_distributions.py
+Analysis:   python3 main.py -f Distributions/your_file.xlsx
+
+Placement:  python3 main.py -f Distributions/your_file.xlsx --placement cross|x_axis|elliptical
+Optimize:   python3 main.py -f Distributions/your_file.xlsx --optimize
+            (Alias accepted: --optimise)
+            Default seed (if --placement omitted): elliptical
+Optimize + seed:
+            python3 main.py -f Distributions/your_file.xlsx --optimize --placement elliptical
+
+All Excel files: Distributions/
+All figure exports: Figures/
+
+TECHNICAL DETAILS
+-----------------
+Code Statistics:
+  • distributions_rotated.py:  318 lines - Core distribution functions
+  • main.py:                  1599 lines - CLI analyzer and plotter  
+  • gui_distributions.py:     2570 lines - Interactive GUI application
+  • optimize_mm_rows.py:      1953 lines - MM optimizer and placement
+
+Total Python Code: ~6,440 lines
+
+Dependencies:
+  • numpy:      Numerical computations and array operations
+  • pandas:     Excel I/O and data manipulation
+  • matplotlib: Plotting and figure generation
+  • openpyxl:   Excel file format support
+
+KEY FEATURES BY MODULE
+----------------------
+
+distributions_rotated.py:
+  ✓ 2D Gaussian distribution with arbitrary rotation
+  ✓ 2D Pseudo-Voigt as product of 1D functions
+  ✓ Custom PSF matrix loading from Excel
+  ✓ Rotation-invariant PSF evaluation
+  ✓ Automatic normalization to unit integral
+
+main.py:
+  ✓ Multi-sheet Excel loading (MM_PSF, Alignment, Gravity, Thermal)
+  ✓ Polar grid HEW computation (rotation-invariant)
+  ✓ Weight mapping from A_eff sheet
+  ✓ Three runtime modes (coarse/fine/extra-fine)
+  ✓ Interactive plotting with keyboard shortcuts
+  ✓ Integration with optimizer and placement strategies
+  ✓ Automatic timestamped figure export
+  ✓ Encircled energy analysis and plotting
+
+gui_distributions.py:
+  ✓ Standard preset mode with Excel table integration
+  ✓ Free mode with full manual control
+  ✓ MM Configuration tab with filtering/sorting
+  ✓ Multi-data type generation (PSF, Alignment, Gravity, Thermal)
+  ✓ Real-time parameter validation
+  ✓ Excel export with formula preservation
+  ✓ macOS trackpad compatibility fixes
+  ✓ Data preview before export
+
+optimize_mm_rows.py:
+  ✓ Row-wise MM# assignment optimization
+  ✓ Three placement strategies (cross, x_axis, elliptical)
+  ✓ Fast incremental HEW approximation
+  ✓ Simulated annealing with adaptive schedule
+  ✓ Multiprocessing for parallel optimization
+  ✓ Excel writer with format preservation
+  ✓ Support for perturbation analysis
+
+VERSION
+-------
+Version: 2.0
+Date: January 2026
+Status: Production Ready
+
+Major Updates in v2.0:
+  ✓ Pseudo-Voigt distribution support
+  ✓ Standard PSF Presets from Excel
+  ✓ Row-wise MM optimization
+  ✓ Placement strategies
+  ✓ Enhanced GUI with preset modes
+  ✓ Rotation-invariant HEW
+  ✓ Multi-mode computation (coarse/fine/extra-fine)
+  ✓ Perturbation analysis integration
+  ✓ macOS compatibility improvements
+
+================================================================================
