@@ -526,7 +526,7 @@ def _resolve_custom_psf_path(workbook_path: str, stem: str) -> str | None:
     return None
 
 
-def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None, return_metrics_only: bool = False):
+def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None, return_metrics_only: bool = False, debug: bool = False, metrics_n_r_final: int | None = None, metrics_n_theta_final: int | None = None, metrics_r_margin: float | None = None):
     # Close any existing matplotlib figures to prevent accumulation
     plt.close('all')
 
@@ -544,10 +544,25 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     quick_mode = bool(fast)
     
     # Calculate the weighted center of mass directly from the Gaussian parameters
-    # This uses the A_eff weights (stored in 'weight' column after loading)
-    total_weight = df['weight'].sum()
-    center_x = (df['mux'] * df['weight']).sum() / total_weight
-    center_y = (df['muy'] * df['weight']).sum() / total_weight
+    # Normalize per-combo weights so they sum to 1 before computing centroids and sums.
+    # This ensures HEW is computed from properly normalized mixture amplitudes.
+    # Use a numpy array to avoid repeatedly accessing the DataFrame.
+    if 'weight' in df.columns:
+        weight_arr_for_center = df['weight'].to_numpy(dtype=float, copy=False)
+    else:
+        weight_arr_for_center = np.ones(len(df), dtype=float) if len(df) > 0 else np.array([], dtype=float)
+    total_weight = float(np.nansum(weight_arr_for_center)) if weight_arr_for_center.size else 0.0
+    if not np.isfinite(total_weight) or total_weight <= 0.0:
+        # Fallback to unweighted centroid when weights are zero/invalid
+        center_x = float(df['mux'].mean()) if 'mux' in df.columns else 0.0
+        center_y = float(df['muy'].mean()) if 'muy' in df.columns else 0.0
+        # keep weight array as ones for later summation
+        weight_arr = np.ones(len(df), dtype=float)
+    else:
+        # normalize so sum(weights) == 1.0
+        weight_arr = weight_arr_for_center / total_weight
+        center_x = (df['mux'].to_numpy(dtype=float, copy=False) * weight_arr).sum()
+        center_y = (df['muy'].to_numpy(dtype=float, copy=False) * weight_arr).sum()
     
     # --- Fast grid summation helpers (threaded) ---
     mux_arr = df['mux'].to_numpy(dtype=float, copy=False)
@@ -555,12 +570,32 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     sigx_arr = df['sigmax'].to_numpy(dtype=float, copy=False)
     sigy_arr = df['sigmay'].to_numpy(dtype=float, copy=False)
     theta_arr = df['theta_degrees'].to_numpy(dtype=float, copy=False)
-    weight_arr = df['weight'].to_numpy(dtype=float, copy=False)
+    # Weight array already computed above as `weight_arr` (normalized). Ensure it's available.
+    try:
+        # if weight_arr defined above, keep it; otherwise derive normalized from df
+        weight_arr
+    except NameError:
+        if 'weight' in df.columns:
+            wtmp = df['weight'].to_numpy(dtype=float, copy=False)
+            wsum = float(np.nansum(wtmp)) if wtmp.size else 0.0
+            weight_arr = (wtmp / wsum) if (wsum and np.isfinite(wsum) and wsum > 0.0) else np.ones(len(df), dtype=float)
+        else:
+            weight_arr = np.ones(len(df), dtype=float)
     dist_raw_arr = df.get('distribution', pd.Series(['gaussian'] * len(df))).astype(str).to_numpy(copy=False)
     dist_arr = pd.Series(dist_raw_arr).astype(str).str.lower().to_numpy(copy=False)
     # alpha_* may contain placeholders like '-' for Gaussian rows; coerce safely.
     alpha_azi_arr = pd.to_numeric(df.get('alpha_azi', pd.Series([0.5] * len(df))), errors='coerce').fillna(0.5).to_numpy(dtype=float, copy=False)
     alpha_rad_arr = pd.to_numeric(df.get('alpha_rad', pd.Series([0.5] * len(df))), errors='coerce').fillna(0.5).to_numpy(dtype=float, copy=False)
+
+    # Prevent numerically zero sigmas which break grid integration (tiny values
+    # from user input or rounding can lead to extremely narrow peaks and unstable
+    # minimal-interval searches). Enforce a small floor in meters.
+    # Small floor for sigma in meters: keep tiny but non-zero to avoid
+    # numerical integration instability. 1e-9 m (1 nm) is small enough to
+    # preserve realistic PSF widths (user inputs are typically 1e-8..1e-6).
+    MIN_SIG_M = 1e-9
+    sigx_arr = np.maximum(sigx_arr, MIN_SIG_M)
+    sigy_arr = np.maximum(sigy_arr, MIN_SIG_M)
 
     # Custom PSF cache (by distribution name/stem)
     builtins = {'gaussian', 'pseudo-voigt', 'voigt'}
@@ -697,7 +732,48 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         radial_energy = np.sum(Zp * R, axis=0) * dtheta  # shape (n_r,)
         cumulative = np.cumsum(radial_energy * dr)
         total_energy = cumulative[-1] if cumulative.size else 1.0
+        if debug:
+            try:
+                frac = cumulative / total_energy if total_energy > 0 else cumulative
+                import numpy as _np
+                print(f"[plot_sum.debug] radial_profile: cx={cx:.6e}, cy={cy:.6e}, r_max={r_max:.6e}, max_sigma={max_sigma:.6e}, max_center_dist={max_center_dist:.6e}, n_r={n_r}, n_theta={n_theta}, total_energy={total_energy:.6e}, frac0={float(frac[0]) if frac.size>0 else None}, frac_end={float(frac[-1]) if frac.size>0 else None}, frac_nans={int(_np.isnan(frac).sum())}")
+            except Exception:
+                pass
         return r, cumulative, total_energy
+
+    def _radius_for_fraction(frac: np.ndarray, r: np.ndarray, target: float = 0.5) -> float:
+        """Estimate radius where cumulative fraction == target using local cubic fit.
+
+        Falls back to linear interpolation when the local window is too small or
+        a valid cubic root cannot be found.
+        """
+        if frac.size == 0:
+            return 0.0
+        frac = np.asarray(frac).ravel()
+        r = np.asarray(r).ravel()
+        if frac.size != r.size or frac.size < 2:
+            return float(np.interp(target, frac, r))
+        idx = int(np.searchsorted(frac, target))
+        start = max(0, idx - 2)
+        end = min(frac.size, idx + 2)
+        if end - start < 2:
+            return float(np.interp(target, frac, r))
+        r_win = r[start:end]
+        f_win = frac[start:end]
+        if f_win.size < 4:
+            return float(np.interp(target, frac, r))
+        try:
+            coeffs = np.polyfit(r_win, f_win, 3)
+            coeffs[-1] -= float(target)
+            roots = np.roots(coeffs)
+            real_roots = roots[np.isreal(roots)].real
+            rmin, rmax = float(r_win.min()), float(r_win.max())
+            for rt in real_roots:
+                if rmin - 1e-12 <= float(rt) <= rmax + 1e-12:
+                    return float(rt)
+        except Exception:
+            pass
+        return float(np.interp(target, frac, r))
 
     def hew_at_center(cx, cy, coarse=False):
         # Use coarser grid during search for speed
@@ -710,7 +786,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             n_theta = 120 if fast else 180
             r, cumulative, total_energy = radial_profile(cx, cy, n_r=n_r, n_theta=n_theta)
         frac = cumulative / total_energy if total_energy > 0 else cumulative
-        return np.interp(0.5, frac, r)
+        # Use local cubic interpolation for the 50% radius, then return HEW diameter
+        radius50 = _radius_for_fraction(frac, r, target=0.5)
+        return 2.0 * radius50
 
     # Find best focus position.
     # In quick_mode (typical when not optimizing), avoid iterative search to keep runtime low.
@@ -765,22 +843,46 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         center_x, center_y = best_cx, best_cy
 
     # Final HEW and EE metrics using fine polar integration at best focus
-    n_r_final = (170 if quick_mode else 220) if fast else 320
-    n_theta_final = (120 if quick_mode else 140) if fast else 240
-    if not fast:
-        n_r_final = 260
-        n_theta_final = 200
-    r_profile, cumulative_profile, total_energy = radial_profile(center_x, center_y, n_r=n_r_final, n_theta=n_theta_final)
+    # Lower final polar-grid for faster runs (target <5s) while increasing
+    # radial margin to capture PSF tails and keep HEW estimate high.
+    if quick_mode:
+        # Coarse: keep radial emphasis but shrink azimuthal samples to meet runtime.
+        n_r_final = 10000
+        n_theta_final = 120
+        final_r_margin = 22.0
+    else:
+        # Increase fine-mode sampling for higher accuracy (budget ~15s).
+        n_r_final = 12000
+        n_theta_final = 1440
+        final_r_margin = 22.0
+
+    # Allow callers to override final metric sampling for speed/experiments
+    if metrics_n_r_final is not None:
+        try:
+            n_r_final = int(metrics_n_r_final)
+        except Exception:
+            pass
+    if metrics_n_theta_final is not None:
+        try:
+            n_theta_final = int(metrics_n_theta_final)
+        except Exception:
+            pass
+    if metrics_r_margin is not None:
+        try:
+            final_r_margin = float(metrics_r_margin)
+        except Exception:
+            pass
+    r_profile, cumulative_profile, total_energy = radial_profile(center_x, center_y, n_r=n_r_final, n_theta=n_theta_final, r_margin_factor=final_r_margin)
     frac_profile = cumulative_profile / total_energy if total_energy > 0 else cumulative_profile
-    radius_50 = np.interp(0.5, frac_profile, r_profile)
-    radius_90 = np.interp(0.9, frac_profile, r_profile)
+    radius_50 = _radius_for_fraction(frac_profile, r_profile, target=0.5)
+    radius_90 = _radius_for_fraction(frac_profile, r_profile, target=0.9)
 
     # Also compute 50% from origin for reference
-    r_profile_00, cumulative_00, total_00 = radial_profile(0.0, 0.0, n_r=n_r_final, n_theta=n_theta_final)
+    r_profile_00, cumulative_00, total_00 = radial_profile(0.0, 0.0, n_r=n_r_final, n_theta=n_theta_final, r_margin_factor=final_r_margin)
     frac_00 = cumulative_00 / total_00 if total_00 > 0 else cumulative_00
-    radius_50_00 = np.interp(0.5, frac_00, r_profile_00)
+    radius_50_00 = _radius_for_fraction(frac_00, r_profile_00, target=0.5)
     # 90% at origin for reference
-    radius_90_00 = np.interp(0.9, frac_00, r_profile_00)
+    radius_90_00 = _radius_for_fraction(frac_00, r_profile_00, target=0.9)
     
     # Compute optimized configuration metrics if provided
     opt_center_x, opt_center_y, opt_radius_50, opt_radius_90 = None, None, None, None
@@ -801,6 +903,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         opt_dist = df_optimized.get('distribution', pd.Series(['gaussian'] * len(df_optimized))).astype(str).str.lower().to_numpy(copy=False)
         opt_alpha_azi = pd.to_numeric(df_optimized.get('alpha_azi', pd.Series([0.5] * len(df_optimized))), errors='coerce').fillna(0.5).to_numpy(dtype=float, copy=False)
         opt_alpha_rad = pd.to_numeric(df_optimized.get('alpha_rad', pd.Series([0.5] * len(df_optimized))), errors='coerce').fillna(0.5).to_numpy(dtype=float, copy=False)
+
+        # Apply same sigma floor to optimized dataset
+        opt_sigx = np.maximum(opt_sigx, MIN_SIG_M)
+        opt_sigy = np.maximum(opt_sigy, MIN_SIG_M)
 
         def _sum_chunk_on_grid_opt(Xg, Yg, idxs: np.ndarray, normalize_flag: bool) -> np.ndarray:
             Zc = np.zeros_like(Xg, dtype=float)
@@ -862,6 +968,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             radial_energy = np.sum(Zp * R, axis=0) * dtheta
             cumulative = np.cumsum(radial_energy * dr)
             total_energy = cumulative[-1] if cumulative.size else 1.0
+            if debug:
+                try:
+                    frac = cumulative / total_energy if total_energy > 0 else cumulative
+                    import numpy as _np
+                    print(f"[plot_sum.debug] radial_profile_opt: cx={cx:.6e}, cy={cy:.6e}, r_max={r_max:.6e}, max_sigma={max_sigma:.6e}, max_center_dist={max_center_dist:.6e}, n_r={n_r}, n_theta={n_theta}, total_energy={total_energy:.6e}, frac0={float(frac[0]) if frac.size>0 else None}, frac_end={float(frac[-1]) if frac.size>0 else None}, frac_nans={int(_np.isnan(frac).sum())}")
+                except Exception:
+                    pass
             return r, cumulative, total_energy
         
         # Find best focus for optimized (simple version - use computed center)
@@ -874,7 +987,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 n_theta = 120 if fast else 180
             r, cumulative, total_energy = radial_profile_opt(cx, cy, n_r=n_r, n_theta=n_theta)
             frac = cumulative / total_energy if total_energy > 0 else cumulative
-            return np.interp(0.5, frac, r)
+            return _radius_for_fraction(frac, r, target=0.5)
         
         # Optimize center position
         if quick_mode:
@@ -925,10 +1038,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             opt_center_x, opt_center_y = best_opt_cx, best_opt_cy
         
         # Compute final optimized metrics
-        opt_r_profile, opt_cumulative_profile, opt_total_energy = radial_profile_opt(opt_center_x, opt_center_y, n_r=n_r_final, n_theta=n_theta_final)
+        opt_r_profile, opt_cumulative_profile, opt_total_energy = radial_profile_opt(opt_center_x, opt_center_y, n_r=n_r_final, n_theta=n_theta_final, r_margin_factor=final_r_margin)
         opt_frac_profile = opt_cumulative_profile / opt_total_energy if opt_total_energy > 0 else opt_cumulative_profile
-        opt_radius_50 = np.interp(0.5, opt_frac_profile, opt_r_profile)
-        opt_radius_90 = np.interp(0.9, opt_frac_profile, opt_r_profile)
+        opt_radius_50 = _radius_for_fraction(opt_frac_profile, opt_r_profile, target=0.5)
+        opt_radius_90 = _radius_for_fraction(opt_frac_profile, opt_r_profile, target=0.9)
     
     # Build plot bounds first (avoid expensive Z recomputation)
     max_radius = max(radius_50 or 0, radius_90 or 0, radius_50_00 or 0)
@@ -1479,6 +1592,10 @@ if __name__ == '__main__':
         ),
     )
     parser.add_argument('--return_metrics_only', dest='return_metrics_only', action='store_true', help='Return HEW/EEF metrics only (no plot).')
+    parser.add_argument('--suppress-output', dest='suppress_output', action='store_true', default=False, help='Do not write placed/optimised Excel outputs when running non-interactively.')
+    parser.add_argument('--metrics-nr-final', type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--metrics-ntheta-final', type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--metrics-r-margin', type=float, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     # If user requested metrics-only, disable interactive plotting and suppress show().
@@ -1527,13 +1644,15 @@ if __name__ == '__main__':
                 optimize=True,
                 time_budget_s=opt_budget_s,
                 start_placement=start_strategy,
+                write_output=(not getattr(args, 'suppress_output', False)),
             )
         except KeyboardInterrupt:
             print("Optimization interrupted (Ctrl+C). The optimised file was not updated.")
             opt_hew = None
         else:
             print(f"Optimization complete. Optimized HEW: {opt_hew:.6e} m")
-            print(f"Optimized configuration saved to: {opt_output}")
+            if not getattr(args, 'suppress_output', False):
+                print(f"Optimized configuration saved to: {opt_output}")
 
             # Make it explicit whether MM configuration actually changed.
             try:
@@ -1589,40 +1708,50 @@ if __name__ == '__main__':
                 input_path=args.file,
                 output_path=opt_output,
                 seed=42,
+                write_output=(not getattr(args, 'suppress_output', False)),
             )
         except KeyboardInterrupt:
             print("Placement interrupted (Ctrl+C). The placed file was not updated.")
             placement_hew = None
         else:
             print(f"Placement complete. Final HEW: {placement_hew:.6e} m")
-            print(f"Placed configuration saved to: {opt_output}")
+            if not getattr(args, 'suppress_output', False):
+                print(f"Placed configuration saved to: {opt_output}")
 
             # Make it explicit how many positions changed
             try:
-                mm_in = pd.read_excel(args.file, sheet_name="MM configuration", engine="openpyxl")
-                mm_out = pd.read_excel(opt_output, sheet_name="MM configuration", engine="openpyxl")
-                a = mm_in["MM #"].astype(int).to_numpy()
-                b = mm_out["MM #"].astype(int).to_numpy()
-                changed = (a != b)
-                print(f"MM configuration changed entries: {int(changed.sum())}")
+                if not getattr(args, 'suppress_output', False) and os.path.exists(opt_output):
+                    mm_in = pd.read_excel(args.file, sheet_name="MM configuration", engine="openpyxl")
+                    mm_out = pd.read_excel(opt_output, sheet_name="MM configuration", engine="openpyxl")
+                else:
+                    mm_in = None
+                    mm_out = None
+                if mm_in is not None and mm_out is not None:
+                    a = mm_in["MM #"].astype(int).to_numpy()
+                    b = mm_out["MM #"].astype(int).to_numpy()
+                    changed = (a != b)
+                    print(f"MM configuration changed entries: {int(changed.sum())}")
 
-                # Print a small sample
-                if changed.any():
-                    idx = np.flatnonzero(changed)[:10].tolist()
-                    sample = pd.DataFrame(
-                        {
-                            "sheet_row_index": idx,
-                            "MM # (input)": a[idx],
-                            "MM # (placed)": b[idx],
-                        }
-                    )
-                    print("Sample MM# changes (first 10):")
-                    print(sample.to_string(index=False))
+                    # Print a small sample
+                    if changed.any():
+                        idx = np.flatnonzero(changed)[:10].tolist()
+                        sample = pd.DataFrame(
+                            {
+                                "sheet_row_index": idx,
+                                "MM # (input)": a[idx],
+                                "MM # (placed)": b[idx],
+                            }
+                        )
+                        print("Sample MM# changes (first 10):")
+                        print(sample.to_string(index=False))
             except Exception:
                 pass
 
-            # Load the placed configuration for overlaying
-            df_optimized = load_gaussians_from_excel(opt_output, args.sheet)
+            # Load the placed configuration for overlaying (only if file was written)
+            if not getattr(args, 'suppress_output', False) and os.path.exists(opt_output):
+                df_optimized = load_gaussians_from_excel(opt_output, args.sheet)
+            else:
+                df_optimized = None
             plot_title_suffix = f" (placement: {placement_label})"
     
     # Plot the sum and encircled energy (with optional optimized overlay)
@@ -1635,6 +1764,9 @@ if __name__ == '__main__':
             title_suffix=plot_title_suffix,
             df_optimized=df_optimized,
             return_metrics_only=True,
+            metrics_n_r_final=args.metrics_nr_final,
+            metrics_n_theta_final=args.metrics_ntheta_final,
+            metrics_r_margin=args.metrics_r_margin,
         )
         print(json.dumps(metrics, indent=2))
         sys.exit(0)

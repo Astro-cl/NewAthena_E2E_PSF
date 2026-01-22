@@ -8,6 +8,7 @@ from itertools import permutations
 from multiprocessing import Pool, cpu_count
 import time
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,52 @@ def _mux_muy_for_slot(m_rad: float, m_azi: float, x_mm: float, y_mm: float, r_mm
     mux = u_rad_x * float(m_rad) + u_azi_x * float(m_azi)
     muy = u_rad_y * float(m_rad) + u_azi_y * float(m_azi)
     return mux, muy
+
+
+def _radius_for_fraction(frac: np.ndarray, r: np.ndarray, target: float = 0.5) -> float:
+    """Estimate radius where cumulative fraction == target using local cubic fit.
+
+    Falls back to linear interpolation when the local window is too small or
+    a valid cubic root cannot be found.
+    """
+    if frac.size == 0:
+        return 0.0
+    # Ensure arrays are 1D and aligned
+    frac = np.asarray(frac).ravel()
+    r = np.asarray(r).ravel()
+    # Quick linear fallback when shapes mismatch
+    if frac.size != r.size or frac.size < 2:
+        return float(np.interp(target, frac, r))
+
+    idx = int(np.searchsorted(frac, target))
+    # Choose up to 4 points around the crossing for a local cubic fit
+    start = max(0, idx - 2)
+    end = min(frac.size, idx + 2)
+    # If we don't have enough points, use linear interp
+    if end - start < 2:
+        return float(np.interp(target, frac, r))
+
+    r_win = r[start:end]
+    f_win = frac[start:end]
+
+    # If fewer than 4 points, prefer linear interpolation to avoid poor fits
+    if f_win.size < 4:
+        return float(np.interp(target, frac, r))
+
+    try:
+        coeffs = np.polyfit(r_win, f_win, 3)
+        coeffs[-1] -= float(target)
+        roots = np.roots(coeffs)
+        real_roots = roots[np.isreal(roots)].real
+        rmin, rmax = float(r_win.min()), float(r_win.max())
+        for rt in real_roots:
+            if rmin - 1e-12 <= float(rt) <= rmax + 1e-12:
+                return float(rt)
+    except Exception:
+        # Fall through to linear interp on any numerical issue
+        pass
+
+    return float(np.interp(target, frac, r))
 
 
 class IncrementalHEWApprox:
@@ -229,7 +276,9 @@ class IncrementalHEWApprox:
         cumulative = np.cumsum(radial_energy * self.dr)
         total_energy = float(cumulative[-1]) if cumulative.size else 1.0
         frac = cumulative / total_energy if total_energy > 0 else cumulative
-        return float(np.interp(0.5, frac, self.r))
+        # Use local cubic interpolation for the 50% radius, then return HEW diameter
+        radius50 = _radius_for_fraction(frac, self.r, target=0.5)
+        return float(2.0 * radius50)
 
     def swap_slots(self, pos_a: int, pos_b: int) -> None:
         """Apply a swap between two slot positions and update Zp incrementally."""
@@ -828,7 +877,12 @@ def compute_theta_maps(mm_config_df: pd.DataFrame) -> tuple[dict, dict]:
 
 
 def convert_polar_to_cartesian(row, mm_config_map):
-    mm_num = row["MM #"]
+    # Ensure we lookup mm_config_map using an int key: some DataFrames have
+    # MM # as float (e.g. 1.0) which won't match int keys in mm_config_map.
+    try:
+        mm_num = int(row["MM #"])
+    except Exception:
+        mm_num = row["MM #"]
     cfg = mm_config_map.get(mm_num)
     if not cfg:
         return row["mux"], row["muy"]
@@ -858,14 +912,207 @@ def rebuild_df(params_df: pd.DataFrame, mm_config_df: pd.DataFrame) -> pd.DataFr
         for _, row in mm_config_df.iterrows()
     }
     df = params_df.copy()
-    df["theta_degrees"] = df["MM #"].map(theta_map).fillna(0.0)
-    df["theta_position"] = df["MM #"].map(theta_pos_map).fillna(0.0)
-    df[["mux", "muy"]] = df.apply(
-        lambda r: pd.Series(convert_polar_to_cartesian(r, mm_config_map)), axis=1
-    )
-    df["sigmax"] = df["sigma_rad"]
-    df["sigmay"] = df["sigma_azi"]
+    # Compute theta maps but preserve any runtime-provided theta values
+    try:
+        comp_theta = df["MM #"].map(theta_map)
+        comp_theta_pos = df["MM #"].map(theta_pos_map)
+        if "theta_degrees" in df.columns:
+            df["theta_degrees"] = df["theta_degrees"].where(~df["theta_degrees"].isna(), comp_theta)
+        else:
+            df["theta_degrees"] = comp_theta.fillna(0.0)
+        if "theta_position" in df.columns:
+            df["theta_position"] = df["theta_position"].where(~df["theta_position"].isna(), comp_theta_pos)
+        else:
+            df["theta_position"] = comp_theta_pos.fillna(0.0)
+    except Exception:
+        df["theta_degrees"] = df.get("theta_degrees", 0.0)
+        df["theta_position"] = df.get("theta_position", 0.0)
+
+    # Compute canonical mux/muy from polar params but preserve any runtime
+    # values present in params_df. We only fill missing/NaN entries.
+    try:
+        comp = df.apply(lambda r: pd.Series(convert_polar_to_cartesian(r, mm_config_map)), axis=1)
+        comp.columns = ["_comp_mux", "_comp_muy"]
+        comp.index = df.index
+        if "mux" in df.columns:
+            df["mux"] = df["mux"].where(~df["mux"].isna(), comp["_comp_mux"])
+        else:
+            df["mux"] = comp["_comp_mux"]
+        if "muy" in df.columns:
+            df["muy"] = df["muy"].where(~df["muy"].isna(), comp["_comp_muy"])
+        else:
+            df["muy"] = comp["_comp_muy"]
+    except Exception:
+        # Fallback: ensure mux/muy exist even if computation fails
+        if "mux" not in df.columns:
+            df["mux"] = 0.0
+        if "muy" not in df.columns:
+            df["muy"] = 0.0
+
+    # Preserve existing sigmax/sigmay from params_df when present, otherwise
+    # derive from sigma_rad/sigma_azi. Only fill NaNs.
+    if "sigmax" in df.columns:
+        try:
+            df["sigmax"] = df["sigmax"].where(~df["sigmax"].isna(), df.get("sigma_rad", pd.Series(dtype=float)))
+        except Exception:
+            df["sigmax"] = df.get("sigma_rad", pd.Series(dtype=float))
+    else:
+        df["sigmax"] = df.get("sigma_rad", pd.Series(dtype=float))
+
+    if "sigmay" in df.columns:
+        try:
+            df["sigmay"] = df["sigmay"].where(~df["sigmay"].isna(), df.get("sigma_azi", pd.Series(dtype=float)))
+        except Exception:
+            df["sigmay"] = df.get("sigma_azi", pd.Series(dtype=float))
+    else:
+        df["sigmay"] = df.get("sigma_azi", pd.Series(dtype=float))
+    # Debug dump: save input params and rebuilt df for inspection
+    try:
+        root = Path(__file__).resolve().parent
+        outdir = root.parent / 'Figures'
+        outdir.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time())
+        params_df.to_csv(outdir / f'rebuild_params_{ts}.csv', index=False)
+        df.to_csv(outdir / f'rebuild_result_{ts}.csv', index=False)
+        # Per-row compact diff between params_df and rebuilt df
+        try:
+            eps = 1e-12
+            rows = []
+            # merge on 'MM #' when available, else align by index
+            if 'MM #' in params_df.columns and 'MM #' in df.columns:
+                left = params_df.set_index('MM #')
+                right = df.set_index('MM #')
+                keys = sorted(set(left.index.tolist()) | set(right.index.tolist()))
+                for k in keys:
+                    b = left.loc[k] if k in left.index else None
+                    a = right.loc[k] if k in right.index else None
+                    def _val(obj, col):
+                        try:
+                            return float(obj[col]) if (obj is not None and col in obj.index and not pd.isna(obj[col])) else float('nan')
+                        except Exception:
+                            return float('nan')
+                    b_sigx = _val(b, 'sigmax') if b is not None else float('nan')
+                    a_sigx = _val(a, 'sigmax') if a is not None else float('nan')
+                    b_sigy = _val(b, 'sigmay') if b is not None else float('nan')
+                    a_sigy = _val(a, 'sigmay') if a is not None else float('nan')
+                    b_mux = _val(b, 'mux') if b is not None else float('nan')
+                    a_mux = _val(a, 'mux') if a is not None else float('nan')
+                    b_muy = _val(b, 'muy') if b is not None else float('nan')
+                    a_muy = _val(a, 'muy') if a is not None else float('nan')
+                    changed = False
+                    for x, y in ((b_sigx, a_sigx), (b_sigy, a_sigy), (b_mux, a_mux), (b_muy, a_muy)):
+                        try:
+                            if (pd.isna(x) and not pd.isna(y)) or (pd.isna(y) and not pd.isna(x)):
+                                changed = True
+                                break
+                            if pd.isna(x) and pd.isna(y):
+                                continue
+                            if abs(float(x) - float(y)) > eps:
+                                changed = True
+                                break
+                        except Exception:
+                            changed = True
+                            break
+                    rows.append({
+                        'MM': k,
+                        'before_sigmax': b_sigx,
+                        'after_sigmax': a_sigx,
+                        'before_sigmay': b_sigy,
+                        'after_sigmay': a_sigy,
+                        'before_mux': b_mux,
+                        'after_mux': a_mux,
+                        'before_muy': b_muy,
+                        'after_muy': a_muy,
+                        'changed': changed,
+                    })
+            else:
+                for idx in params_df.index:
+                    b = params_df.loc[idx]
+                    a = df.loc[idx] if idx in df.index else None
+                    def _val2(obj, col):
+                        try:
+                            return float(obj[col]) if (obj is not None and col in obj and not pd.isna(obj[col])) else float('nan')
+                        except Exception:
+                            return float('nan')
+                    b_sigx = _val2(b, 'sigmax')
+                    a_sigx = _val2(a, 'sigmax') if a is not None else float('nan')
+                    b_sigy = _val2(b, 'sigmay')
+                    a_sigy = _val2(a, 'sigmay') if a is not None else float('nan')
+                    b_mux = _val2(b, 'mux') if 'mux' in b.index else float('nan')
+                    a_mux = _val2(a, 'mux') if (a is not None and 'mux' in a) else float('nan')
+                    b_muy = _val2(b, 'muy') if 'muy' in b.index else float('nan')
+                    a_muy = _val2(a, 'muy') if (a is not None and 'muy' in a) else float('nan')
+                    changed = False
+                    for x, y in ((b_sigx, a_sigx), (b_sigy, a_sigy), (b_mux, a_mux), (b_muy, a_muy)):
+                        try:
+                            if (pd.isna(x) and not pd.isna(y)) or (pd.isna(y) and not pd.isna(x)):
+                                changed = True
+                                break
+                            if pd.isna(x) and pd.isna(y):
+                                continue
+                            if abs(float(x) - float(y)) > eps:
+                                changed = True
+                                break
+                        except Exception:
+                            changed = True
+                            break
+                    rows.append({
+                        'index': idx,
+                        'before_sigmax': b_sigx,
+                        'after_sigmax': a_sigx,
+                        'before_sigmay': b_sigy,
+                        'after_sigmay': a_sigy,
+                        'before_mux': b_mux,
+                        'after_mux': a_mux,
+                        'before_muy': b_muy,
+                        'after_muy': a_muy,
+                        'changed': changed,
+                    })
+            try:
+                pd.DataFrame(rows).to_csv(outdir / f'rebuild_perrow_{ts}.csv', index=False)
+            except Exception:
+                pass
+
+            # Post-write assertions: detect unexpected zeroing of mux/muy
+            try:
+                for r in rows:
+                    b_mux = r.get('before_mux')
+                    a_mux = r.get('after_mux')
+                    b_muy = r.get('before_muy')
+                    a_muy = r.get('after_muy')
+                    if not pd.isna(b_mux) and not pd.isna(a_mux):
+                        if abs(float(b_mux)) > 1e-15 and float(a_mux) == 0.0:
+                            raise AssertionError(f'Unexpected mux zeroing during rebuild_df for MM/index {r.get("index") or r.get("MM")}: before={b_mux} after={a_mux}')
+                    if not pd.isna(b_muy) and not pd.isna(a_muy):
+                        if abs(float(b_muy)) > 1e-15 and float(a_muy) == 0.0:
+                            raise AssertionError(f'Unexpected muy zeroing during rebuild_df for MM/index {r.get("index") or r.get("MM")}: before={b_muy} after={a_muy}')
+            except AssertionError:
+                raise
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # As a final step, if the original params_df carried explicit theta values
+    # (e.g. copied from runtime), prefer those authoritative values by mapping
+    # them into the rebuilt frame using `MM #` as the join key.
+    try:
+        if 'MM #' in params_df.columns and 'MM #' in df.columns:
+            if 'theta_degrees' in params_df.columns:
+                try:
+                    src = params_df.set_index('MM #')['theta_degrees']
+                    df['theta_degrees'] = df['MM #'].astype(int).map(src).fillna(df.get('theta_degrees'))
+                except Exception:
+                    pass
+            if 'theta_position' in params_df.columns:
+                try:
+                    src2 = params_df.set_index('MM #')['theta_position']
+                    df['theta_position'] = df['MM #'].astype(int).map(src2).fillna(df.get('theta_position'))
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return df
+
 
 
 def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], dict[int, dict]]:
@@ -959,6 +1206,18 @@ def _apply_position_deltas_to_df(
     else falls back to Position # = 1..N by row order.
     """
     out = df.copy()
+
+    # Lightweight debug snapshot: save input before applying deltas
+    try:
+        from pathlib import Path
+        import time
+        root = Path(__file__).resolve().parent
+        outdir = root.parent / 'Figures'
+        outdir.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time())
+        out.to_csv(outdir / f'apply_posdeltas_before_{ts}.csv', index=False)
+    except Exception:
+        pass
 
     # Map MM# -> row index in mm_config_df (each row is a fixed slot/position)
     mm_to_idx = {int(row["MM #"]): idx for idx, row in mm_config_df.iterrows()}
@@ -1067,6 +1326,77 @@ def _apply_position_deltas_to_df(
         out.at[i, "mux"] = mux
         out.at[i, "muy"] = muy
 
+    # Save output snapshot for debugging
+    try:
+        out.to_csv(outdir / f'apply_posdeltas_after_{ts}.csv', index=False)
+        # Compact per-row diff for apply_posdeltas (before -> after)
+        try:
+            eps = 1e-12
+            before = pd.read_csv(outdir / f'apply_posdeltas_before_{ts}.csv') if (outdir / f'apply_posdeltas_before_{ts}.csv').exists() else None
+            after = out.copy()
+            rows = []
+            if before is not None:
+                # align by MM # when present
+                if 'MM #' in before.columns and 'MM #' in after.columns:
+                    left = before.set_index('MM #')
+                    right = after.set_index('MM #')
+                    keys = sorted(set(left.index.tolist()) | set(right.index.tolist()))
+                    for k in keys:
+                        b = left.loc[k] if k in left.index else None
+                        a = right.loc[k] if k in right.index else None
+                        def _v(obj, col):
+                            try:
+                                return float(obj[col]) if (obj is not None and col in obj.index and not pd.isna(obj[col])) else float('nan')
+                            except Exception:
+                                return float('nan')
+                        b_sigx = _v(b, 'sigmax')
+                        a_sigx = _v(a, 'sigmax')
+                        b_sigy = _v(b, 'sigmay')
+                        a_sigy = _v(a, 'sigmay')
+                        b_mux = _v(b, 'mux')
+                        a_mux = _v(a, 'mux')
+                        b_muy = _v(b, 'muy')
+                        a_muy = _v(a, 'muy')
+                        changed = False
+                        for x, y in ((b_sigx, a_sigx), (b_sigy, a_sigy), (b_mux, a_mux), (b_muy, a_muy)):
+                            try:
+                                if (pd.isna(x) and not pd.isna(y)) or (pd.isna(y) and not pd.isna(x)):
+                                    changed = True
+                                    break
+                                if pd.isna(x) and pd.isna(y):
+                                    continue
+                                if abs(float(x) - float(y)) > eps:
+                                    changed = True
+                                    break
+                            except Exception:
+                                changed = True
+                                break
+                        rows.append({'MM': k, 'before_sigmax': b_sigx, 'after_sigmax': a_sigx, 'before_sigmay': b_sigy, 'after_sigmay': a_sigy, 'before_mux': b_mux, 'after_mux': a_mux, 'before_muy': b_muy, 'after_muy': a_muy, 'changed': changed})
+            if rows:
+                try:
+                    pd.DataFrame(rows).to_csv(outdir / f'apply_posdeltas_perrow_{ts}.csv', index=False)
+                except Exception:
+                    pass
+
+                # Post-write assertions: detect unexpected zeroing of mux/muy
+                try:
+                    for r in rows:
+                        b_mux = r.get('before_mux')
+                        a_mux = r.get('after_mux')
+                        b_muy = r.get('before_muy')
+                        a_muy = r.get('after_muy')
+                        if not pd.isna(b_mux) and not pd.isna(a_mux):
+                            if abs(float(b_mux)) > 1e-15 and float(a_mux) == 0.0:
+                                raise AssertionError(f'Unexpected mux zeroing during apply_posdeltas for MM/index {r.get("index") or r.get("MM")}: before={b_mux} after={a_mux}')
+                        if not pd.isna(b_muy) and not pd.isna(a_muy):
+                            if abs(float(b_muy)) > 1e-15 and float(a_muy) == 0.0:
+                                raise AssertionError(f'Unexpected muy zeroing during apply_posdeltas for MM/index {r.get("index") or r.get("MM")}: before={b_muy} after={a_muy}')
+                except AssertionError:
+                    raise
+        except Exception:
+            pass
+    except Exception:
+        pass
     return out
 
 
@@ -1151,11 +1481,14 @@ def hew_at_best_focus(df: pd.DataFrame, fast: bool = True, timeout: float = 60.0
         frac = cumulative / total_energy if total_energy > 0 else cumulative
         return float(np.interp(0.5, frac, r))
 
-    total_weight = df["weight"].sum()
-    if total_weight == 0:
-        return 0.0
-    cx0 = float((df["mux"] * df["weight"]).sum() / total_weight)
-    cy0 = float((df["muy"] * df["weight"]).sum() / total_weight)
+    total_weight = float(df["weight"].sum())
+    if not np.isfinite(total_weight) or total_weight <= 0:
+        # Fallback to unweighted centroid when weights are zero/invalid
+        cx0 = float(df["mux"].mean()) if "mux" in df.columns else 0.0
+        cy0 = float(df["muy"].mean()) if "muy" in df.columns else 0.0
+    else:
+        cx0 = float((df["mux"] * df["weight"]).sum() / total_weight)
+        cy0 = float((df["muy"] * df["weight"]).sum() / total_weight)
 
     # Time-bounded coordinate-descent search (no SciPy dependency).
     # This is deterministic, stable, and respects the timeout.
@@ -1210,16 +1543,24 @@ def hew_at_best_focus(df: pd.DataFrame, fast: bool = True, timeout: float = 60.0
 def hew_fast_approximate(df: pd.DataFrame) -> float:
     """Fast approximate HEW using very coarse grid for permutation testing."""
     normalize = True
-    total_weight = df["weight"].sum()
-    cx = float((df["mux"] * df["weight"]).sum() / total_weight)
-    cy = float((df["muy"] * df["weight"]).sum() / total_weight)
+    total_weight = float(df["weight"].sum())
+    if not np.isfinite(total_weight) or total_weight <= 0:
+        # Fallback to unweighted centroid when weights are zero/invalid
+        cx = float(df["mux"].mean()) if "mux" in df.columns else 0.0
+        cy = float(df["muy"].mean()) if "muy" in df.columns else 0.0
+    else:
+        cx = float((df["mux"] * df["weight"]).sum() / total_weight)
+        cy = float((df["muy"] * df["weight"]).sum() / total_weight)
     
     max_sigma = max(df["sigmax"].max(), df["sigmay"].max())
     max_center = np.sqrt((df["mux"] - cx) ** 2 + (df["muy"] - cy) ** 2).max()
-    r_max = max(max_center + 3.0 * max_sigma, 1e-6)
-    
-    # Ultra-coarse grid for speed
-    n_r, n_theta = 60, 40
+    # Increase radius margin and sampling substantially to improve convergence
+    # for demanding accuracy targets (tradeoff: slower runtime).
+    r_max = max(max_center + 10.0 * max_sigma, 1e-6)
+
+    # High-resolution grid: increase radial sampling strongly (primary limiter)
+    # and use dense azimuthal sampling to avoid any angular discretization bias.
+    n_r, n_theta = 3200, 720
     theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
     r = np.linspace(0.0, r_max, n_r)
     dtheta = theta[1] - theta[0]
@@ -1258,7 +1599,9 @@ def hew_fast_approximate(df: pd.DataFrame) -> float:
     cumulative = np.cumsum(radial_energy * dr)
     total_energy = cumulative[-1] if cumulative.size else 1.0
     frac = cumulative / total_energy if total_energy > 0 else cumulative
-    return float(np.interp(0.5, frac, r))
+    # Use local cubic interpolation for the 50% radius, then return HEW diameter
+    radius50 = _radius_for_fraction(frac, r, target=0.5)
+    return float(2.0 * radius50)
 
 
 def _load_base_params_from_workbook(input_path: str) -> pd.DataFrame:
@@ -1412,6 +1755,7 @@ def azimuthal_placement(
     input_path: str,
     output_path: str,
     seed: int = 42,
+    write_output: bool = True,
 ) -> float:
     """
     Place MMs using an azimuthal pattern based on individual MM HEW quality.
@@ -1454,8 +1798,9 @@ def azimuthal_placement(
     final_df = rebuild_df(base_params, mm_config)
     final_hew = hew_fast_approximate(final_df)
 
-    # Write output Excel while preserving formatting/formulas/images.
-    _write_optimised_workbook_preserving_formatting(input_path, output_path, mm_config)
+    # Write output Excel while preserving formatting/formulas/images (optional).
+    if write_output:
+        _write_optimised_workbook_preserving_formatting(input_path, output_path, mm_config)
     
     return final_hew
 
@@ -1464,6 +1809,7 @@ def x_axis_placement(
     input_path: str,
     output_path: str,
     seed: int = 42,
+    write_output: bool = True,
 ) -> float:
     """Place MMs biased toward the +/-x axis, alternating above/below the x-axis.
 
@@ -1500,8 +1846,9 @@ def x_axis_placement(
     final_df = rebuild_df(base_params, mm_config)
     final_hew = hew_fast_approximate(final_df)
 
-    # Write output Excel while preserving formatting/formulas/images.
-    _write_optimised_workbook_preserving_formatting(input_path, output_path, mm_config)
+    # Write output Excel while preserving formatting/formulas/images (optional).
+    if write_output:
+        _write_optimised_workbook_preserving_formatting(input_path, output_path, mm_config)
 
     return final_hew
 
@@ -1510,6 +1857,7 @@ def elliptical_placement(
     input_path: str,
     output_path: str,
     seed: int = 42,
+    write_output: bool = True,
 ) -> float:
     """Row-wise placement: best MMs near x-axis, worst near y-axis.
 
@@ -1539,7 +1887,8 @@ def elliptical_placement(
     final_df = rebuild_df(base_params, mm_config)
     final_hew = hew_fast_approximate(final_df)
 
-    _write_optimised_workbook_preserving_formatting(input_path, output_path, mm_config)
+    if write_output:
+        _write_optimised_workbook_preserving_formatting(input_path, output_path, mm_config)
 
     return final_hew
 
@@ -1681,6 +2030,7 @@ def optimize_rows(
     optimize: bool = True,
     time_budget_s: float = 55.0,
     start_placement: str = "cross",
+    write_output: bool = True,
 ):
     # Keep wall-time bounded.
     # Note: HEW evaluation is the expensive part, so we cap iterations.
@@ -1893,9 +2243,10 @@ def optimize_rows(
             print("Note: optimizer did not find an improving MM# permutation within the time budget; MM configuration is unchanged.")
 
 
-    # Write output Excel while preserving formatting/formulas/images.
+    # Write output Excel while preserving formatting/formulas/images (optional).
     # Only the MM configuration's MM# cells are patched.
-    _write_optimised_workbook_preserving_formatting(input_path, output_path, best_mm_config)
+    if write_output:
+        _write_optimised_workbook_preserving_formatting(input_path, output_path, best_mm_config)
     
     return final_hew
 
