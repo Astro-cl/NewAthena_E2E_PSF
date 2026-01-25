@@ -165,9 +165,23 @@ def generate_values(dist, a, b, count):
         # Return array of fixed value (a parameter)
         return np.full(count, float(a))
     elif dist == 'gaussian':
-        return np.random.normal(float(a), float(b), count)
+        # Default gaussian sampling; callers may apply one-sided logic for
+        # sigmas/alphas. Keep raw normal here for generic uses.
+        rng = np.random.default_rng()
+        return rng.normal(float(a), float(b), count)
+    elif dist == 'gamma':
+        # a = mean, b = std -> derive shape k and scale theta
+        mu = float(a)
+        sigma = float(b)
+        if sigma <= 0 or mu <= 0:
+            return np.full(count, mu if mu > 0 else 1e-6)
+        k = (mu / sigma) ** 2
+        theta = (sigma ** 2) / mu
+        rng = np.random.default_rng()
+        return rng.gamma(shape=k, scale=theta, size=count)
     elif dist == 'uniform':
-        return np.random.uniform(float(a), float(b), count)
+        rng = np.random.default_rng()
+        return rng.uniform(float(a), float(b), count)
     else:
         raise ValueError('Unknown distribution: ' + dist)
 
@@ -183,9 +197,40 @@ def generate_data_from_distributions(params, num_mm, data_type_config):
     for param in data_type_config['params']:
         # Use the full param name (with units) as the column name
         if param in samples:
-            # For PSF, ensure sigmas are positive
-            if 'sigma' in param.lower():
-                df_dict[param] = np.abs(samples[param])
+            # For PSF sigmas and alpha mixing parameters we require positive
+            # one-sided behaviour. Implement truncated-at-zero sampling by
+            # resampling negative draws where necessary. For alpha parameters
+            # we also clip to [0,1].
+            vals = samples[param]
+            if 'sigma' in param.lower() or 'alpha' in param.lower():
+                # vectorized rejection sampling: replace non-positive entries
+                # by resampling up to a small iteration cap.
+                rng = np.random.default_rng()
+                mask = vals <= 0
+                attempts = 0
+                # use the distribution spec for proper resampling
+                dist_spec = params.get(param, ('gaussian', a, b))[0]
+                while mask.any() and attempts < 100:
+                    if dist_spec == 'gaussian':
+                        vals[mask] = rng.normal(loc=float(a), scale=float(b), size=mask.sum())
+                    elif dist_spec == 'gamma':
+                        mu = float(a); sigma = float(b)
+                        if sigma <= 0 or mu <= 0:
+                            vals[mask] = mu if mu > 0 else 1e-6
+                        else:
+                            k = (mu / sigma) ** 2
+                            theta = (sigma ** 2) / mu
+                            vals[mask] = rng.gamma(shape=k, scale=theta, size=mask.sum())
+                    elif dist_spec == 'uniform':
+                        vals[mask] = rng.uniform(low=float(a), high=float(b), size=mask.sum())
+                    else:
+                        vals[mask] = float(a)
+                    mask = vals <= 0
+                    attempts += 1
+                vals[vals <= 0] = 1e-6
+                if 'alpha' in param.lower():
+                    vals = np.clip(vals, 0.0, 1.0)
+                df_dict[param] = vals
             else:
                 df_dict[param] = samples[param]
     
@@ -263,6 +308,11 @@ class ExtendedGUI:
         # Standard Alignment presets (loaded from Alignment sheet columns starting at G1)
         self.alignment_standard_presets = {}  # preset_name -> {param_label: spec_str}
         self.align_mode_var = tk.StringVar(value='standard')  # 'standard' or 'free' - default to standard
+        # Thermal and Gravity standard presets
+        self.thermal_standard_presets = {}
+        self.thermal_mode_var = tk.StringVar(value='standard')
+        self.gravity_standard_presets = {}
+        self.gravity_mode_var = tk.StringVar(value='standard')
 
         # Custom PSF-from-file support (MM_PSF)
         self.CUSTOM_PSF_OPTION = 'Custom PSF (select file...)'
@@ -347,6 +397,29 @@ class ExtendedGUI:
             except Exception as e:
                 print(f"Note: Could not load standard alignment presets: {e}")
                 self.alignment_standard_presets = {}
+            # Load standard Thermal presets table if available
+            try:
+                therm_raw = pd.read_excel(path, sheet_name='Thermal', engine='openpyxl', header=None)
+                self.load_standard_thermal_presets(therm_raw)
+                try:
+                    self.refresh_standard_distribution_controls()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Note: Could not load standard thermal presets: {e}")
+                self.thermal_standard_presets = {}
+
+            # Load standard Gravity offload presets table if available
+            try:
+                grav_raw = pd.read_excel(path, sheet_name='Gravity offload', engine='openpyxl', header=None)
+                self.load_standard_gravity_presets(grav_raw)
+                try:
+                    self.refresh_standard_distribution_controls()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Note: Could not load standard gravity presets: {e}")
+                self.gravity_standard_presets = {}
             
             # Load A_eff weights + standard preset table (headerless)
             self.aeff_raw_df = None
@@ -539,6 +612,38 @@ class ExtendedGUI:
             if cur not in values and values:
                 combo.set(values[0])
 
+        # Thermal standard presets
+        dt = 'Thermal'
+        if dt in self.distribution_widgets and 'therm_std_combo' in self.distribution_widgets[dt]:
+            combo = self.distribution_widgets[dt]['therm_std_combo']
+            values = list(self.thermal_standard_presets.keys())
+            try:
+                combo.config(values=values)
+            except Exception:
+                try:
+                    combo['values'] = values
+                except Exception:
+                    pass
+            cur = str(combo.get()).strip()
+            if cur not in values and values:
+                combo.set(values[0])
+
+        # Gravity standard presets
+        dt = 'Gravity offload'
+        if dt in self.distribution_widgets and 'grav_std_combo' in self.distribution_widgets[dt]:
+            combo = self.distribution_widgets[dt]['grav_std_combo']
+            values = list(self.gravity_standard_presets.keys())
+            try:
+                combo.config(values=values)
+            except Exception:
+                try:
+                    combo['values'] = values
+                except Exception:
+                    pass
+            cur = str(combo.get()).strip()
+            if cur not in values and values:
+                combo.set(values[0])
+
     def _safe_eval_numeric_expr(self, expr: str) -> float:
         """Safely evaluate simple numeric expressions like '12/3' or '1.5*110%'."""
         if expr is None:
@@ -605,12 +710,25 @@ class ExtendedGUI:
         a = self._safe_eval_numeric_expr(left)
         b = self._safe_eval_numeric_expr(right)
 
+        # Note: gaussian specs are sampled as one-sided (truncated at zero)
+        # when used for sigma/alpha parameters in MM_PSF presets. The GUI
+        # continues to accept the familiar 'gaussian(mean,std)' syntax.
         if kind in {'gaussian', 'normal'}:
             return ('gaussian', a, abs(b))
         if kind == 'uniform':
             return ('uniform', a, b)
 
         raise ValueError(f'Unsupported distribution spec: {spec!r}')
+
+    def _is_column_letter_spec(self, spec: str) -> bool:
+        """Return True if spec looks like comma-separated Excel column letters."""
+        if spec is None:
+            return False
+        s = str(spec).strip()
+        if not s:
+            return False
+        # allow groups like 'W' or 'W,X,Y,AB' (letters only, commas, optional spaces)
+        return bool(re.fullmatch(r"[A-Za-z]+(\s*,\s*[A-Za-z]+)*", s))
 
     def load_standard_alignment_presets(self, df: pd.DataFrame) -> None:
         """Load Alignment standard presets from the table starting at G1.
@@ -675,6 +793,122 @@ class ExtendedGUI:
         except Exception as e:
             print(f"Error loading standard alignment presets: {e}")
             self.alignment_standard_presets = {}
+    
+    def load_standard_thermal_presets(self, df: pd.DataFrame) -> None:
+        """Load Thermal standard presets from the table starting at G1.
+
+        Expected layout (0-indexed):
+        - Column G (index 6): preset names
+        - Subsequent columns: variable specs with headers at row 0 (e.g., 'd_therm_x_')
+        """
+        self.thermal_standard_presets = {}
+        try:
+            start_row = 0
+            name_col = 6
+            first_var_col = 7
+            if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
+                return
+
+            headers = {}
+            for c in range(first_var_col, min(df.shape[1], first_var_col + 16)):
+                h = df.iloc[start_row, c]
+                if pd.isna(h) or str(h).strip() == '':
+                    continue
+                headers[c] = str(h).strip()
+
+            param_map = {}
+            for p in DATA_TYPES['Thermal']['params']:
+                base = str(p).split(' ')[0].strip()
+                param_map[base] = p
+
+            row_idx = start_row + 1
+            while row_idx < df.shape[0]:
+                preset_name = df.iloc[row_idx, name_col] if name_col < df.shape[1] else None
+                if pd.isna(preset_name) or str(preset_name).strip() == '':
+                    break
+                preset_name = str(preset_name).strip()
+
+                preset_specs = {}
+                for c, h in headers.items():
+                    if c >= df.shape[1]:
+                        continue
+                    raw_spec = df.iloc[row_idx, c]
+                    if pd.isna(raw_spec) or str(raw_spec).strip() == '':
+                        continue
+                    var = str(h).strip()
+                    if var.endswith('_'):
+                        var = var[:-1]
+                    if var in param_map:
+                        preset_specs[param_map[var]] = str(raw_spec).strip()
+
+                if preset_specs:
+                    self.thermal_standard_presets[preset_name] = preset_specs
+                row_idx += 1
+
+            if self.thermal_standard_presets:
+                self.thermal_mode_var.set('standard')
+                print(f"Loaded {len(self.thermal_standard_presets)} standard thermal presets: {list(self.thermal_standard_presets.keys())}")
+        except Exception as e:
+            print(f"Error loading standard thermal presets: {e}")
+            self.thermal_standard_presets = {}
+
+    def load_standard_gravity_presets(self, df: pd.DataFrame) -> None:
+        """Load Gravity offload standard presets from the table starting at G1.
+
+        Expected layout (0-indexed):
+        - Column G (index 6): preset names
+        - Subsequent columns: variable specs with headers at row 0 (e.g., 'd_grav_x_')
+        """
+        self.gravity_standard_presets = {}
+        try:
+            start_row = 0
+            name_col = 6
+            first_var_col = 7
+            if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
+                return
+
+            headers = {}
+            for c in range(first_var_col, min(df.shape[1], first_var_col + 16)):
+                h = df.iloc[start_row, c]
+                if pd.isna(h) or str(h).strip() == '':
+                    continue
+                headers[c] = str(h).strip()
+
+            param_map = {}
+            for p in DATA_TYPES['Gravity offload']['params']:
+                base = str(p).split(' ')[0].strip()
+                param_map[base] = p
+
+            row_idx = start_row + 1
+            while row_idx < df.shape[0]:
+                preset_name = df.iloc[row_idx, name_col] if name_col < df.shape[1] else None
+                if pd.isna(preset_name) or str(preset_name).strip() == '':
+                    break
+                preset_name = str(preset_name).strip()
+
+                preset_specs = {}
+                for c, h in headers.items():
+                    if c >= df.shape[1]:
+                        continue
+                    raw_spec = df.iloc[row_idx, c]
+                    if pd.isna(raw_spec) or str(raw_spec).strip() == '':
+                        continue
+                    var = str(h).strip()
+                    if var.endswith('_'):
+                        var = var[:-1]
+                    if var in param_map:
+                        preset_specs[param_map[var]] = str(raw_spec).strip()
+
+                if preset_specs:
+                    self.gravity_standard_presets[preset_name] = preset_specs
+                row_idx += 1
+
+            if self.gravity_standard_presets:
+                self.gravity_mode_var.set('standard')
+                print(f"Loaded {len(self.gravity_standard_presets)} standard gravity presets: {list(self.gravity_standard_presets.keys())}")
+        except Exception as e:
+            print(f"Error loading standard gravity presets: {e}")
+            self.gravity_standard_presets = {}
 
     def load_standard_aeff_presets(self, df: pd.DataFrame) -> None:
         """Load A_eff standard presets from the table starting at D1.
@@ -1341,6 +1575,30 @@ class ExtendedGUI:
             base_col = m.group(1).upper()
             return self._value_from_column_letter(row_idx, base_col)
 
+        # Direct gaussian around a column value: support both
+        # 'gaussian(J, mean_expr, sigma_expr)' and the shorthand
+        # 'gaussian(J, sigma_expr)' where mean=0.
+        m = re.match(r'^\s*gaussian\s*\(\s*([A-Za-z]+)\s*,\s*(.+?)\s*,\s*(.+?)\s*\)\s*$', s, re.IGNORECASE)
+        if m:
+            base_col = m.group(1).upper()
+            mean_expr = m.group(2)
+            sigma_expr = m.group(3)
+            base = self._value_from_column_letter(row_idx, base_col)
+            vars_map = {base_col: base}
+            mean = self._safe_eval_expr_with_vars(mean_expr, vars_map)
+            sigma = abs(self._safe_eval_expr_with_vars(sigma_expr, vars_map))
+            return float(base + np.random.normal(loc=mean, scale=sigma))
+
+        m = re.match(r'^\s*gaussian\s*\(\s*([A-Za-z]+)\s*,\s*(.+?)\s*\)\s*$', s, re.IGNORECASE)
+        if m:
+            base_col = m.group(1).upper()
+            sigma_expr = m.group(2)
+            base = self._value_from_column_letter(row_idx, base_col)
+            vars_map = {base_col: base}
+            mean = 0.0
+            sigma = abs(self._safe_eval_expr_with_vars(sigma_expr, vars_map))
+            return float(base + np.random.normal(loc=mean, scale=sigma))
+
         # Additive Gaussian: 'J+gaussian(0,20%*J)' or 'L+gaussian(0,20%L)'
         m = re.match(r'^\s*([A-Za-z]+)\s*\+\s*gaussian\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)\s*$', s, re.IGNORECASE)
         if m:
@@ -1453,6 +1711,44 @@ class ExtendedGUI:
 
             row_start = 2
         
+        # Add standard/free mode selection for Thermal if presets are available
+        if data_type_key == 'Thermal' and self.thermal_standard_presets:
+            ttk.Label(frame, text='Mode:', font=('Arial', 10, 'bold')).grid(row=1, column=0, padx=5, pady=10, sticky='w')
+            mode_frame = ttk.Frame(frame)
+            mode_frame.grid(row=1, column=1, columnspan=3, padx=5, pady=10, sticky='w')
+            ttk.Radiobutton(mode_frame, text='Standard Distribution', variable=self.thermal_mode_var, value='standard', command=lambda: self.toggle_thermal_mode(data_type_key)).pack(side='left', padx=5)
+            ttk.Radiobutton(mode_frame, text='Free (Custom)', variable=self.thermal_mode_var, value='free', command=lambda: self.toggle_thermal_mode(data_type_key)).pack(side='left', padx=5)
+            ttk.Label(frame, text='Standard:', font=('Arial', 10)).grid(row=1, column=4, padx=5, pady=10, sticky='w')
+            std_values = list(self.thermal_standard_presets.keys())
+            std_combo = ttk.Combobox(frame, values=std_values, width=25, state='readonly')
+            if std_values:
+                std_combo.set(std_values[0])
+            std_combo.grid(row=1, column=5, columnspan=2, padx=5, pady=10, sticky='w')
+            std_combo.bind('<<ComboboxSelected>>', lambda e: self.on_thermal_standard_selected())
+            if data_type_key not in self.distribution_widgets:
+                self.distribution_widgets[data_type_key] = {}
+            self.distribution_widgets[data_type_key]['therm_std_combo'] = std_combo
+            row_start = 2
+
+        # Add standard/free mode selection for Gravity offload if presets are available
+        if data_type_key == 'Gravity offload' and self.gravity_standard_presets:
+            ttk.Label(frame, text='Mode:', font=('Arial', 10, 'bold')).grid(row=1, column=0, padx=5, pady=10, sticky='w')
+            mode_frame = ttk.Frame(frame)
+            mode_frame.grid(row=1, column=1, columnspan=3, padx=5, pady=10, sticky='w')
+            ttk.Radiobutton(mode_frame, text='Standard Distribution', variable=self.gravity_mode_var, value='standard', command=lambda: self.toggle_gravity_mode(data_type_key)).pack(side='left', padx=5)
+            ttk.Radiobutton(mode_frame, text='Free (Custom)', variable=self.gravity_mode_var, value='free', command=lambda: self.toggle_gravity_mode(data_type_key)).pack(side='left', padx=5)
+            ttk.Label(frame, text='Standard:', font=('Arial', 10)).grid(row=1, column=4, padx=5, pady=10, sticky='w')
+            std_values = list(self.gravity_standard_presets.keys())
+            std_combo = ttk.Combobox(frame, values=std_values, width=25, state='readonly')
+            if std_values:
+                std_combo.set(std_values[0])
+            std_combo.grid(row=1, column=5, columnspan=2, padx=5, pady=10, sticky='w')
+            std_combo.bind('<<ComboboxSelected>>', lambda e: self.on_gravity_standard_selected())
+            if data_type_key not in self.distribution_widgets:
+                self.distribution_widgets[data_type_key] = {}
+            self.distribution_widgets[data_type_key]['grav_std_combo'] = std_combo
+            row_start = 2
+        
         # Add standard/free mode selection for MM_PSF if standard distributions are available
         if config.get('has_distribution', False) and data_type_key == 'MM_PSF' and self.standard_distributions:
             ttk.Label(frame, text='Mode:', font=('Arial', 10, 'bold')).grid(row=1, column=0, padx=5, pady=10, sticky='w')
@@ -1508,7 +1804,7 @@ class ExtendedGUI:
             row = row_start + i
             ttk.Label(frame, text=param).grid(row=row, column=0, padx=5, pady=5)
             
-            dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'uniform'], width=12)
+            dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'uniform'], width=12, state='readonly')
             dist_box.set('fixed')
             dist_box.grid(row=row, column=1)
             dist_box.bind('<<ComboboxSelected>>', lambda e, dt=data_type_key, p=param: self.update_param_labels(dt, p))
@@ -1543,7 +1839,7 @@ class ExtendedGUI:
                 param_label = ttk.Label(frame, text=f'{param} [0-1]')
                 param_label.grid(row=row, column=0, padx=5, pady=5)
                 
-                dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'uniform'], width=12)
+                dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'uniform'], width=12, state='readonly')
                 dist_box.set('fixed')
                 dist_box.grid(row=row, column=1)
                 dist_box.bind('<<ComboboxSelected>>', lambda e, dt=data_type_key, p=param: self.update_alpha_param_labels(dt, p))
@@ -1666,6 +1962,183 @@ class ExtendedGUI:
         # If we're in standard mode, disable again after applying
         if self.align_mode_var.get() == 'standard':
             self._set_alignment_free_controls_state(state='disabled')
+
+    def on_thermal_standard_selected(self) -> None:
+        """Apply selected Thermal standard preset to per-parameter controls."""
+        data_type_key = 'Thermal'
+        if data_type_key not in self.distribution_widgets or 'therm_std_combo' not in self.distribution_widgets[data_type_key]:
+            return
+        preset_name = self.distribution_widgets[data_type_key]['therm_std_combo'].get()
+        preset = self.thermal_standard_presets.get(preset_name)
+        if not preset:
+            return
+
+        self._set_thermal_free_controls_state(state='normal')
+
+        for param_label, spec in preset.items():
+            if data_type_key not in self.dist_entries_by_type or param_label not in self.dist_entries_by_type[data_type_key]:
+                continue
+            dist_box, a_entry, b_entry = self.dist_entries_by_type[data_type_key][param_label]
+            # If spec is a column-letter mapping (e.g. 'W' or 'W,X,Y,AB'), preserve it
+            if self._is_column_letter_spec(spec):
+                try:
+                    dist_box.set('fixed')
+                except Exception:
+                    pass
+                # Show the raw spec so the user can see the mapping
+                self._set_entry_text(a_entry, str(spec).strip())
+                self._set_entry_text(b_entry, '0')
+                # Preserve mapping for export/processing
+                self.distribution_widgets.setdefault(data_type_key, {}).setdefault('col_mappings', {})[param_label] = str(spec).strip()
+                try:
+                    self.update_param_labels(data_type_key, param_label)
+                except Exception:
+                    pass
+                continue
+
+            try:
+                dist, a, b = self._parse_standard_dist_spec(spec)
+            except Exception:
+                continue
+
+            try:
+                dist_box.set(dist)
+            except Exception:
+                pass
+            self._set_entry_text(a_entry, f"{a}")
+            self._set_entry_text(b_entry, f"{b}")
+
+            try:
+                self.update_param_labels(data_type_key, param_label)
+            except Exception:
+                pass
+
+        if self.thermal_mode_var.get() == 'standard':
+            self._set_thermal_free_controls_state(state='disabled')
+
+    def _set_thermal_free_controls_state(self, state: str) -> None:
+        data_type_key = 'Thermal'
+        if data_type_key not in self.dist_entries_by_type:
+            return
+        for _, widgets in self.dist_entries_by_type[data_type_key].items():
+            dist_box, a_entry, b_entry = widgets
+            try:
+                dist_box.config(state=state)
+            except Exception:
+                pass
+            try:
+                a_entry.config(state=state)
+            except Exception:
+                pass
+            try:
+                b_entry.config(state=state)
+            except Exception:
+                pass
+
+    def toggle_thermal_mode(self, data_type_key: str) -> None:
+        if data_type_key != 'Thermal':
+            return
+        mode = self.thermal_mode_var.get()
+        std_combo = None
+        if data_type_key in self.distribution_widgets:
+            std_combo = self.distribution_widgets[data_type_key].get('therm_std_combo')
+        if std_combo is not None:
+            try:
+                std_combo.config(state='readonly' if mode == 'standard' else 'disabled')
+            except Exception:
+                pass
+        if mode == 'standard':
+            self.on_thermal_standard_selected()
+            self._set_thermal_free_controls_state(state='disabled')
+        else:
+            self._set_thermal_free_controls_state(state='normal')
+
+    def on_gravity_standard_selected(self) -> None:
+        data_type_key = 'Gravity offload'
+        if data_type_key not in self.distribution_widgets or 'grav_std_combo' not in self.distribution_widgets[data_type_key]:
+            return
+        preset_name = self.distribution_widgets[data_type_key]['grav_std_combo'].get()
+        preset = self.gravity_standard_presets.get(preset_name)
+        if not preset:
+            return
+
+        self._set_gravity_free_controls_state(state='normal')
+
+        for param_label, spec in preset.items():
+            if data_type_key not in self.dist_entries_by_type or param_label not in self.dist_entries_by_type[data_type_key]:
+                continue
+            dist_box, a_entry, b_entry = self.dist_entries_by_type[data_type_key][param_label]
+            # If spec looks like an Excel column-letter mapping, preserve it and show it
+            if self._is_column_letter_spec(spec):
+                try:
+                    dist_box.set('fixed')
+                except Exception:
+                    pass
+                self._set_entry_text(a_entry, str(spec).strip())
+                self._set_entry_text(b_entry, '0')
+                self.distribution_widgets.setdefault(data_type_key, {}).setdefault('col_mappings', {})[param_label] = str(spec).strip()
+                try:
+                    self.update_param_labels(data_type_key, param_label)
+                except Exception:
+                    pass
+                continue
+
+            try:
+                dist, a, b = self._parse_standard_dist_spec(spec)
+            except Exception:
+                continue
+
+            try:
+                dist_box.set(dist)
+            except Exception:
+                pass
+            self._set_entry_text(a_entry, f"{a}")
+            self._set_entry_text(b_entry, f"{b}")
+
+            try:
+                self.update_param_labels(data_type_key, param_label)
+            except Exception:
+                pass
+
+        if self.gravity_mode_var.get() == 'standard':
+            self._set_gravity_free_controls_state(state='disabled')
+
+    def _set_gravity_free_controls_state(self, state: str) -> None:
+        data_type_key = 'Gravity offload'
+        if data_type_key not in self.dist_entries_by_type:
+            return
+        for _, widgets in self.dist_entries_by_type[data_type_key].items():
+            dist_box, a_entry, b_entry = widgets
+            try:
+                dist_box.config(state=state)
+            except Exception:
+                pass
+            try:
+                a_entry.config(state=state)
+            except Exception:
+                pass
+            try:
+                b_entry.config(state=state)
+            except Exception:
+                pass
+
+    def toggle_gravity_mode(self, data_type_key: str) -> None:
+        if data_type_key != 'Gravity offload':
+            return
+        mode = self.gravity_mode_var.get()
+        std_combo = None
+        if data_type_key in self.distribution_widgets:
+            std_combo = self.distribution_widgets[data_type_key].get('grav_std_combo')
+        if std_combo is not None:
+            try:
+                std_combo.config(state='readonly' if mode == 'standard' else 'disabled')
+            except Exception:
+                pass
+        if mode == 'standard':
+            self.on_gravity_standard_selected()
+            self._set_gravity_free_controls_state(state='disabled')
+        else:
+            self._set_gravity_free_controls_state(state='normal')
 
     def _set_alignment_free_controls_state(self, state: str) -> None:
         """Enable/disable Alignment free-mode controls (dist type + value entries)."""
@@ -2226,17 +2699,29 @@ class ExtendedGUI:
                 return
 
             params = {}
-            
+            col_specs: dict[str, str] = {}
+
             # Collect regular parameters
             for param, widgets in self.dist_entries_by_type[data_type_key].items():
                 dist, a, b = widgets
                 dist_type = dist.get()
-                
+
+                a_val = a.get().strip() if hasattr(a, 'get') else str(a)
+                # If user entered an Excel column-letter mapping (e.g. 'W' or 'W,X,Y,AB'), record it
+                try:
+                    if self._is_column_letter_spec(a_val):
+                        col_specs[param] = a_val
+                        # mark as a special 'colref' distribution so downstream code can recognize it
+                        params[param] = ('colref', a_val, 0.0)
+                        continue
+                except Exception:
+                    pass
+
                 # For 'fixed' distribution, only use first parameter (second is disabled)
                 if dist_type == 'fixed':
-                    params[param] = (dist_type, float(a.get()), 0.0)
+                    params[param] = (dist_type, float(a_val), 0.0)
                 else:
-                    params[param] = (dist_type, float(a.get()), float(b.get()))
+                    params[param] = (dist_type, float(a_val), float(b.get()))
             
             # Collect alpha parameters if pseudo-voigt is selected
             if (config.get('has_distribution', False) and 
@@ -2255,7 +2740,71 @@ class ExtendedGUI:
                             params[param] = (alpha_dist, float(entry_a.get()), float(entry_b.get()))
             
             # Generate data
-            data_df = generate_data_from_distributions(params, num_mm, config)
+            # If any parameters reference Excel columns, read those numeric values directly
+            if col_specs and self.excel_path:
+                try:
+                    from openpyxl import load_workbook
+                    from openpyxl.utils import column_index_from_string
+                    wb = load_workbook(self.excel_path, data_only=True)
+                    sheet_name = config.get('sheet_name')
+                    sheet_key = None
+                    for s in wb.sheetnames:
+                        if s.lower() == sheet_name.lower():
+                            sheet_key = s
+                            break
+                    if sheet_key is not None:
+                        ws = wb[sheet_key]
+                        # Determine Position # mapping for selected MMs
+                        mm_cfg = self.mm_config_df.copy()
+                        if 'Position #' in mm_cfg.columns:
+                            mm_cfg['Position #'] = pd.to_numeric(mm_cfg['Position #'], errors='coerce')
+                            mm_cfg = mm_cfg[mm_cfg['Position #'].notna()]
+                            mm_to_pos = dict(zip(mm_cfg['MM #'].astype(int), mm_cfg['Position #'].astype(int)))
+                        else:
+                            mm_to_pos = {int(r['MM #']): int(i + 1) for i, (_, r) in enumerate(mm_cfg.iterrows()) if not pd.isna(r.get('MM #'))}
+
+                        selected_positions = [mm_to_pos.get(int(mm)) for mm in sorted(self.selected_mm_numbers)]
+                        # Build dataframe with Position # and filled params
+                        data_rows = []
+                        for pos in selected_positions:
+                            row = {'Position #': int(pos) if pos is not None else None}
+                            for p_label in config['params']:
+                                if p_label in col_specs:
+                                    # use first column letter if comma-separated
+                                    letter = col_specs[p_label].split(',')[0].strip()
+                                    try:
+                                        src_idx = column_index_from_string(letter)
+                                        # workbook rows start at 1; assume data rows align with Position #
+                                        v = ws.cell(row=1 + int(pos), column=src_idx).value
+                                    except Exception:
+                                        v = None
+                                    row[p_label] = v
+                                else:
+                                    # placeholder, will be filled from generated samples
+                                    row[p_label] = None
+                            data_rows.append(row)
+                        # Build a dataframe of the Excel-sourced values for overlay
+                        excel_df = pd.DataFrame(data_rows)
+                        # Prepare params for sampling by excluding colref entries
+                        sample_params = {k: v for k, v in params.items() if v[0] != 'colref'}
+                        sampled_df = generate_data_from_distributions(sample_params, num_mm, config) if sample_params else pd.DataFrame()
+                        # Ensure sampled_df has all expected param columns
+                        for p_label in config['params']:
+                            if p_label not in sampled_df.columns:
+                                sampled_df[p_label] = [None] * num_mm
+                        # Overlay Excel values for col_specs into the sampled dataframe
+                        data_df = sampled_df.reset_index(drop=True)
+                        for i, row in excel_df.iterrows():
+                            for p_label in config['params']:
+                                if p_label in col_specs:
+                                    data_df.at[i, p_label] = row.get(p_label)
+                    else:
+                        # sheet not found; fall back to sampling
+                        data_df = generate_data_from_distributions(params, num_mm, config)
+                except Exception:
+                    data_df = generate_data_from_distributions(params, num_mm, config)
+            else:
+                data_df = generate_data_from_distributions(params, num_mm, config)
             
             # Add distribution column for MM_PSF BEFORE alpha parameters
             if config.get('has_distribution', False) and data_type_key in self.distribution_widgets:
@@ -2469,6 +3018,94 @@ class ExtendedGUI:
                     g.loc[gaussian_mask, 'alpha_rad'] = '-'
                     g.loc[gaussian_mask, 'alpha_azi'] = '-'
                     generated = g
+
+                # If a standard preset with variable sigmas was selected, sample
+                # per-MM numeric sigma values now (deterministic per target file
+                # and preset) and write them into the canonical sigma columns so
+                # columns B/E in the workbook are numeric for each of the MMs.
+                try:
+                    if data_type_key == 'MM_PSF' and self.psf_mode_var.get() == 'standard' and 'std_dist_combo' in self.distribution_widgets.get(data_type_key, {}):
+                        import numpy as _np, hashlib
+                        from pathlib import Path as _Path
+                        target_name = _Path(target_path).name if target_path else (_Path(self.excel_path).name if self.excel_path else 'export.xlsx')
+                        # Iterate rows and sample per-row values from the preset definition
+                        for idx, row in generated.iterrows():
+                            preset_name = str(row.get('distribution') or '').strip()
+                            if not preset_name:
+                                continue
+                            std_def = self.standard_distributions.get(preset_name)
+                            if not isinstance(std_def, dict):
+                                continue
+                            # Detect Variable presets and parse percent/alpha if present
+                            force_gamma = False
+                            var_pct = None
+                            parsed_alpha = None
+                            try:
+                                lname = preset_name.lower()
+                                if 'variable' in lname or '%' in preset_name:
+                                    force_gamma = True
+                                    import re as _re
+                                    m = _re.search(r'(\d+)\s*%\s*variable', preset_name, flags=_re.IGNORECASE)
+                                    if not m:
+                                        m = _re.search(r'^(\d+)\s*%\b', preset_name)
+                                    if m:
+                                        var_pct = float(m.group(1)) / 100.0
+                                    m2 = _re.search(r'alpha\s*[:(]?\s*(\d+)\s*%?', preset_name, flags=_re.IGNORECASE)
+                                    if m2:
+                                        parsed_alpha = float(m2.group(1)) / 100.0
+                            except Exception:
+                                force_gamma = False
+
+                            # Build deterministic RNG per (file, preset)
+                            h = int(hashlib.sha256((target_name + str(preset_name)).encode('utf-8')).hexdigest()[:8], 16)
+                            rng = _np.random.default_rng(h + int(idx))
+
+                            for ui_param, std_param in (('sigma_rad [arcsec]', 'sigma_rad'), ('sigma_azi [arcsec]', 'sigma_azi')):
+                                try:
+                                    pdef = std_def.get(std_param)
+                                    if not isinstance(pdef, dict):
+                                        continue
+                                    mu = float(pdef.get('mean', 0.0)) if pdef.get('mean') is not None else 0.0
+                                    sigma = float(pdef.get('sigma', 0.0)) if pdef.get('sigma') is not None else 0.0
+                                    # If preset indicates Variable(...) but the table cell omitted
+                                    # an explicit sigma, derive sigma from the parsed percent
+                                    if force_gamma and (sigma <= 0) and mu > 0 and var_pct is not None:
+                                        sigma = abs(mu * float(var_pct))
+                                    # If distribution describes variability (gaussian/gamma),
+                                    # convert mean/std to a gamma shape/scale and sample.
+                                    if pdef.get('dist') in ('gaussian', 'gamma') and mu > 0 and sigma > 0:
+                                        k = (mu / sigma) ** 2
+                                        theta = (sigma ** 2) / mu
+                                        val = float(rng.gamma(shape=k, scale=theta, size=1)[0])
+                                    else:
+                                        # fallback to fixed mean
+                                        val = mu if mu > 0 else 1e-6
+                                    # Enforce positive floor
+                                    if val <= 0:
+                                        val = 1e-6
+                                    generated.at[idx, ui_param] = float(val)
+                                except Exception:
+                                    continue
+                            # Optional: override alpha params when preset encodes a parsed alpha
+                            if parsed_alpha is not None:
+                                for alpha_ui, alpha_param in (('alpha_rad', 'alpha_rad'), ('alpha_azi', 'alpha_azi')):
+                                    try:
+                                        pdef = std_def.get(alpha_param)
+                                        if not isinstance(pdef, dict):
+                                            continue
+                                        mu_a = float(pdef.get('mean', 0.0)) if pdef.get('mean') is not None else None
+                                        # If an explicit mean exists, construct gamma from parsed_alpha
+                                        if mu_a is not None and mu_a > 0:
+                                            sigma_a = max(abs(mu_a * float(parsed_alpha)), 1e-12)
+                                            k = (mu_a / sigma_a) ** 2
+                                            theta = (sigma_a ** 2) / mu_a
+                                            aval = float(rng.gamma(shape=k, scale=theta, size=1)[0])
+                                            aval = min(max(aval, 0.0), 1.0)
+                                            generated.at[idx, alpha_ui] = float(aval)
+                                    except Exception:
+                                        continue
+                except Exception:
+                    pass
                 
                 sheet_name = config['sheet_name']
                 
