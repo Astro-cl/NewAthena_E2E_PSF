@@ -3,49 +3,26 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import pandas as pd
 import sys
-from pathlib import Path
-import shutil
-import ast
 import re
-
-
-# Configuration for each data type
+import traceback
+import ast
+from pathlib import Path
+ 
+# Minimal DATA_TYPES structure required by the GUI module. This mirrors the
+# structure expected by the rest of the code and provides reasonable defaults
+# for non-interactive tests. The full definitions are normally loaded from
+# the Excel sheets at runtime.
 DATA_TYPES = {
-    'MM_PSF': {
-        'sheet_name': 'MM_PSF',
-            'tab_label': 'PSF',
-        'params': ['m_rad [arcsec]', 'm_azi [arcsec]', 'sigma_rad [arcsec]', 'sigma_azi [arcsec]'],
-        'alpha_params': ['alpha_rad', 'alpha_azi'],  # Additional params for pseudo-voigt
-        'defaults': {
-            'm_rad [arcsec]': (0, 0),
-            'm_azi [arcsec]': (0, 0),
-            'sigma_rad [arcsec]': (1, 1),
-            'sigma_azi [arcsec]': (8, 0.5),
-            'alpha_rad': (0.5, 0.1),
-            'alpha_azi': (0.5, 0.1)
-        },
-        'has_distribution': True  # Flag to enable distribution selection
-    },
     'Alignment': {
         'sheet_name': 'Alignment',
         'tab_label': 'Alignment',
+        # Use radial/azimuthal names to match preset table headers
         'params': ['d_align_rad [µm]', 'd_align_azi [µm]', 'd_align_z [µm]', 'd_align_rotz [arcsec]'],
         'defaults': {
-            'd_align_rad [µm]': (0, 1),
-            'd_align_azi [µm]': (0, 1),
-            'd_align_z [µm]': (0, 1),
+            'd_align_rad [µm]': (0, 0.1),
+            'd_align_azi [µm]': (0, 0.1),
+            'd_align_z [µm]': (0, 0.1),
             'd_align_rotz [arcsec]': (0, 0.01)
-        }
-    },
-    'Gravity offload': {
-        'sheet_name': 'Gravity offload',
-        'tab_label': 'Gravity',
-        'params': ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]'],
-        'defaults': {
-            'd_grav_x [µm]': (0, 0.1),
-            'd_grav_y [µm]': (0, 0.1),
-            'd_grav_z [µm]': (0, 0.1),
-            'd_grav_rotz [arcsec]': (0, 0.01)
         }
     },
     'Thermal': {
@@ -58,6 +35,30 @@ DATA_TYPES = {
             'd_therm_z [µm]': (0, 0.1),
             'd_therm_rotz [arcsec]': (0, 0.01)
         }
+    },
+    'Gravity offload': {
+        'sheet_name': 'Gravity offload',
+        'tab_label': 'Gravity offload',
+        'params': ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]'],
+        'defaults': {
+            'd_grav_x [µm]': (0, 0.1),
+            'd_grav_y [µm]': (0, 0.1),
+            'd_grav_z [µm]': (0, 0.1),
+            'd_grav_rotz [arcsec]': (0, 0.01)
+        }
+    },
+    'MM_PSF': {
+        'sheet_name': 'MM_PSF',
+        'tab_label': 'PSF',
+        'params': ['sigma_rad [arcsec]', 'sigma_azi [arcsec]'],
+        'alpha_params': ['alpha_rad', 'alpha_azi'],
+        'defaults': {
+            'sigma_rad [arcsec]': (3.0, 1.0),
+            'sigma_azi [arcsec]': (3.0, 1.0),
+            'alpha_rad': (0.5, 0.1),
+            'alpha_azi': (0.5, 0.1)
+        },
+        'has_distribution': True
     }
 }
 
@@ -268,6 +269,8 @@ class ExtendedGUI:
         self.aeff_fixed_var = tk.StringVar(value='')
         self.aeff_selected_preset_var = tk.StringVar(value='')
         self.aeff_pending_export = False
+        # When True, do not show modal 'Applied preset' dialogs (useful during UI setup)
+        self.suppress_standard_apply_modals = False
         self.export_mode_var = tk.StringVar(value='current')
         self.export_path_var = tk.StringVar(value='')
         
@@ -298,6 +301,7 @@ class ExtendedGUI:
         
         # Data type tabs will be created dynamically
         self.data_type_tabs = {}
+        self.tab_status_labels = {}  # data_type_key -> ttk.Label for pending export status
         self.dist_entries_by_type = {}
         self.param_labels_by_type = {}
         self.distribution_widgets = {}  # Store distribution type and alpha widgets
@@ -346,12 +350,23 @@ class ExtendedGUI:
             variable=self.aeff_checkbox_var,
         ).pack(anchor='w', padx=20, pady=2)
         
-        # Create checkboxes for each data type
+        # Create checkboxes for each data type.
+        # Requirement: PSF should appear second after A_eff, so add MM_PSF explicitly,
+        # then add the remaining data types in the original order.
+        # Add PSF (MM_PSF) as the second checkbox when available in DATA_TYPES.
+        if 'MM_PSF' in DATA_TYPES:
+            psf_cfg = DATA_TYPES['MM_PSF']
+            var = tk.BooleanVar(value=False)
+            self.data_type_checkboxes['MM_PSF'] = var
+            ttk.Checkbutton(self.selection_frame, text=psf_cfg['tab_label'], variable=var).pack(anchor='w', padx=20, pady=2)
+
+        # Add the rest of the data types (skip MM_PSF since already added)
         for data_type_key, config in DATA_TYPES.items():
+            if data_type_key == 'MM_PSF':
+                continue
             var = tk.BooleanVar(value=False)
             self.data_type_checkboxes[data_type_key] = var
-            ttk.Checkbutton(self.selection_frame, text=config['tab_label'], 
-                            variable=var).pack(anchor='w', padx=20, pady=2)
+            ttk.Checkbutton(self.selection_frame, text=config['tab_label'], variable=var).pack(anchor='w', padx=20, pady=2)
         
         ttk.Button(self.selection_frame, text='Apply Selection', command=self.apply_data_type_selection).pack(pady=10)
         
@@ -626,7 +641,15 @@ class ExtendedGUI:
                     pass
             cur = str(combo.get()).strip()
             if cur not in values and values:
-                combo.set(values[0])
+                if '0 deg FMS tilt' in values:
+                    combo.set('0 deg FMS tilt')
+                else:
+                    combo.set(values[0])
+            # Enforce UI state for thermal mode
+            try:
+                self.toggle_thermal_mode('Thermal')
+            except Exception:
+                pass
 
         # Gravity standard presets
         dt = 'Gravity offload'
@@ -642,7 +665,15 @@ class ExtendedGUI:
                     pass
             cur = str(combo.get()).strip()
             if cur not in values and values:
-                combo.set(values[0])
+                if 'GZ' in values:
+                    combo.set('GZ')
+                else:
+                    combo.set(values[0])
+            # Enforce UI state for gravity mode
+            try:
+                self.toggle_gravity_mode('Gravity offload')
+            except Exception:
+                pass
 
     def _safe_eval_numeric_expr(self, expr: str) -> float:
         """Safely evaluate simple numeric expressions like '12/3' or '1.5*110%'."""
@@ -697,7 +728,7 @@ class ExtendedGUI:
         if re.fullmatch(r'[-+]?\d+(?:\.\d+)?', compact):
             return ('fixed', float(compact), 0.0)
 
-        m = re.match(r'^\s*(gaussian|normal|uniform)\s*\(\s*(.+)\s*\)\s*$', s, re.IGNORECASE)
+        m = re.match(r'^\s*(gaussian|normal|uniform|gamma)\s*\(\s*(.+)\s*\)\s*$', s, re.IGNORECASE)
         if not m:
             raise ValueError(f'Unsupported distribution spec: {spec!r}')
 
@@ -713,7 +744,7 @@ class ExtendedGUI:
         # Note: gaussian specs are sampled as one-sided (truncated at zero)
         # when used for sigma/alpha parameters in MM_PSF presets. The GUI
         # continues to accept the familiar 'gaussian(mean,std)' syntax.
-        if kind in {'gaussian', 'normal'}:
+        if kind in {'gaussian', 'normal', 'gamma'}:
             return ('gaussian', a, abs(b))
         if kind == 'uniform':
             return ('uniform', a, b)
@@ -982,8 +1013,12 @@ class ExtendedGUI:
             messagebox.showwarning('No Selection', 'Please select at least one data type to modify.')
             return
         
-        # Update tabs
-        self.update_data_type_tabs()
+        # Update tabs; suppress automatic 'Applied preset' modals during setup
+        try:
+            self.suppress_standard_apply_modals = True
+            self.update_data_type_tabs()
+        finally:
+            self.suppress_standard_apply_modals = False
         
         # Provide feedback
         selected_names = [DATA_TYPES[key]['tab_label'] for key in selected]
@@ -1428,6 +1463,10 @@ class ExtendedGUI:
         ttk.Button(btn_row, text='Apply to Selected MMs', command=self.apply_aeff_to_selected).pack(side='left', padx=0)
         self.aeff_status_label = ttk.Label(btn_row, text='', foreground='blue', font=('Arial', 10))
         self.aeff_status_label.pack(side='left', padx=10)
+        try:
+            self.tab_status_labels['A_eff'] = self.aeff_status_label
+        except Exception:
+            pass
 
         # Populate preset list if already loaded
         self.refresh_aeff_preset_controls()
@@ -1439,8 +1478,12 @@ class ExtendedGUI:
             self.aeff_std_combo['values'] = presets
         except Exception:
             pass
+        # Default to the '1 keV' standard preset when available, otherwise the first one.
         if presets and not self.aeff_selected_preset_var.get():
-            self.aeff_selected_preset_var.set(presets[0])
+            if '1 keV' in presets:
+                self.aeff_selected_preset_var.set('1 keV')
+            else:
+                self.aeff_selected_preset_var.set(presets[0])
         try:
             self.on_aeff_standard_selected()
         except Exception:
@@ -1522,19 +1565,42 @@ class ExtendedGUI:
         """Return the row index in self.aeff_raw_df corresponding to MM#, or None."""
         if self.aeff_raw_df is None:
             return None
-        # Fast path for the common case where row index matches MM# (header at 0)
+        # MM values in the sheet are 1-based (MM # = 1..N). Prefer a fast
+        # path that checks the first column at index (mm-1). If that doesn't
+        # match, fall back to scanning the column for the MM value.
         try:
-            if 0 <= mm < self.aeff_raw_df.shape[0]:
-                v = self.aeff_raw_df.iloc[mm, 0]
-                if not pd.isna(v) and int(float(v)) == int(mm):
-                    return int(mm)
+            mm_int = int(float(mm))
+        except Exception:
+            return None
+
+        try:
+            nrows = self.aeff_raw_df.shape[0]
+            if 1 <= mm_int <= nrows:
+                v = self.aeff_raw_df.iloc[mm_int - 1, 0]
+                if not pd.isna(v) and int(float(v)) == mm_int:
+                    return mm_int - 1
         except Exception:
             pass
 
-        # Fallback: search
+        # Fallback: search the first column for a matching MM value. Be robust
+        # against header text or other non-numeric cells by catching parse
+        # errors per-cell instead of letting a ValueError abort the whole
+        # operation.
         try:
             col = self.aeff_raw_df.iloc[:, 0]
-            matches = col[col.apply(lambda x: (not pd.isna(x)) and str(x).strip() != '' and int(float(x)) == int(mm))]
+
+            def _is_mm_match(x):
+                try:
+                    if pd.isna(x):
+                        return False
+                    s = str(x).strip()
+                    if s == '':
+                        return False
+                    return int(float(s)) == mm_int
+                except Exception:
+                    return False
+
+            matches = col[col.apply(_is_mm_match)]
             if len(matches) == 0:
                 return None
             return int(matches.index[0])
@@ -1642,13 +1708,44 @@ class ExtendedGUI:
                 if not expr:
                     raise ValueError('Selected preset has no Values expression')
 
+                # Ask for confirmation before applying to selected MMs
+                msg = f"Apply standard A_eff preset '{preset}' to {len(self.selected_mm_numbers)} selected MMs?"
+                if not messagebox.askyesno('Confirm A_eff Apply', msg):
+                    return
+
+                successes = []
+                failures = []
+                failure_reasons = []
                 for mm in self.selected_mm_numbers:
-                    v = self._evaluate_aeff_preset_for_mm(int(mm), expr)
-                    self.aeff_weights[int(mm)] = float(v)
-                    updated += 1
+                    try:
+                        v = self._evaluate_aeff_preset_for_mm(int(mm), expr)
+                        self.aeff_weights[int(mm)] = float(v)
+                        updated += 1
+                        successes.append(int(mm))
+                    except Exception as e:
+                        failures.append(mm)
+                        failure_reasons.append(f"MM {mm}: {e}")
 
             self.aeff_pending_export = True
-            self.aeff_status_label.configure(text=f'Updated A_eff for {updated} MMs (pending export).')
+            # Provide a modal confirmation summary; do NOT show persistent in-window blue status text
+            if updated > 0:
+                msg = f'Updated A_eff for {updated} MMs (pending export).'
+                if failures:
+                    msg += f"\n{len(failures)} MMs could not be updated (missing A_eff row or parse error)."
+                messagebox.showinfo('A_eff Applied', msg)
+            else:
+                if failures:
+                    # Provide more detailed feedback about why updates failed.
+                    sample = '\n'.join(failure_reasons[:6])
+                    detail_msg = f'No MMs could be updated: missing A_eff rows or invalid preset.\n\nExamples:\n{sample}'
+                    messagebox.showwarning('A_eff Not Applied', detail_msg)
+                else:
+                    messagebox.showinfo('A_eff', 'No MMs were selected.')
+            # Clear the in-window A_eff status label if present
+            try:
+                self.aeff_status_label.configure(text='')
+            except Exception:
+                pass
         except Exception as e:
             messagebox.showerror('A_eff error', str(e))
             return
@@ -1703,7 +1800,7 @@ class ExtendedGUI:
             if std_values:
                 std_combo.set(std_values[0])
             std_combo.grid(row=1, column=5, columnspan=2, padx=5, pady=10, sticky='w')
-            std_combo.bind('<<ComboboxSelected>>', lambda e: self.on_alignment_standard_selected())
+            std_combo.bind('<<ComboboxSelected>>', lambda e: (setattr(self, 'suppress_standard_apply_modals', True), self.on_alignment_standard_selected(), setattr(self, 'suppress_standard_apply_modals', False)))
 
             if data_type_key not in self.distribution_widgets:
                 self.distribution_widgets[data_type_key] = {}
@@ -1721,10 +1818,19 @@ class ExtendedGUI:
             ttk.Label(frame, text='Standard:', font=('Arial', 10)).grid(row=1, column=4, padx=5, pady=10, sticky='w')
             std_values = list(self.thermal_standard_presets.keys())
             std_combo = ttk.Combobox(frame, values=std_values, width=25, state='readonly')
+            # Default to '0 deg FMS tilt' when available
             if std_values:
-                std_combo.set(std_values[0])
+                if '0 deg FMS tilt' in std_values:
+                    std_combo.set('0 deg FMS tilt')
+                else:
+                    std_combo.set(std_values[0])
             std_combo.grid(row=1, column=5, columnspan=2, padx=5, pady=10, sticky='w')
-            std_combo.bind('<<ComboboxSelected>>', lambda e: self.on_thermal_standard_selected())
+            std_combo.bind('<<ComboboxSelected>>', lambda e: (setattr(self, 'suppress_standard_apply_modals', True), self.on_thermal_standard_selected(), setattr(self, 'suppress_standard_apply_modals', False)))
+            # Ensure UI reflects current mode immediately (disable lower controls if standard)
+            try:
+                self.toggle_thermal_mode(data_type_key)
+            except Exception:
+                pass
             if data_type_key not in self.distribution_widgets:
                 self.distribution_widgets[data_type_key] = {}
             self.distribution_widgets[data_type_key]['therm_std_combo'] = std_combo
@@ -1741,9 +1847,18 @@ class ExtendedGUI:
             std_values = list(self.gravity_standard_presets.keys())
             std_combo = ttk.Combobox(frame, values=std_values, width=25, state='readonly')
             if std_values:
-                std_combo.set(std_values[0])
+                # Default to 'GZ' preset when available
+                if 'GZ' in std_values:
+                    std_combo.set('GZ')
+                else:
+                    std_combo.set(std_values[0])
             std_combo.grid(row=1, column=5, columnspan=2, padx=5, pady=10, sticky='w')
-            std_combo.bind('<<ComboboxSelected>>', lambda e: self.on_gravity_standard_selected())
+            std_combo.bind('<<ComboboxSelected>>', lambda e: (setattr(self, 'suppress_standard_apply_modals', True), self.on_gravity_standard_selected(), setattr(self, 'suppress_standard_apply_modals', False)))
+            # Ensure UI reflects current mode immediately (disable lower controls if standard)
+            try:
+                self.toggle_gravity_mode(data_type_key)
+            except Exception:
+                pass
             if data_type_key not in self.distribution_widgets:
                 self.distribution_widgets[data_type_key] = {}
             self.distribution_widgets[data_type_key]['grav_std_combo'] = std_combo
@@ -1769,7 +1884,7 @@ class ExtendedGUI:
             if self.standard_distributions:
                 std_dist_combo.set(list(self.standard_distributions.keys())[0])
             std_dist_combo.grid(row=1, column=5, columnspan=2, padx=5, pady=10, sticky='w')
-            std_dist_combo.bind('<<ComboboxSelected>>', lambda e: self.on_mm_psf_standard_selected(data_type_key))
+            std_dist_combo.bind('<<ComboboxSelected>>', lambda e: (setattr(self, 'suppress_standard_apply_modals', True), self.on_mm_psf_standard_selected(data_type_key), setattr(self, 'suppress_standard_apply_modals', False)))
 
             btn_pick = ttk.Button(frame, text='Choose PSF file...', command=self.choose_custom_psf_file)
             btn_pick.grid(row=1, column=7, padx=5, pady=10, sticky='w')
@@ -1804,7 +1919,7 @@ class ExtendedGUI:
             row = row_start + i
             ttk.Label(frame, text=param).grid(row=row, column=0, padx=5, pady=5)
             
-            dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'uniform'], width=12, state='readonly')
+            dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'gamma', 'uniform'], width=12, state='readonly')
             dist_box.set('fixed')
             dist_box.grid(row=row, column=1)
             dist_box.bind('<<ComboboxSelected>>', lambda e, dt=data_type_key, p=param: self.update_param_labels(dt, p))
@@ -1839,7 +1954,7 @@ class ExtendedGUI:
                 param_label = ttk.Label(frame, text=f'{param} [0-1]')
                 param_label.grid(row=row, column=0, padx=5, pady=5)
                 
-                dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'uniform'], width=12, state='readonly')
+                dist_box = ttk.Combobox(frame, values=['fixed', 'gaussian', 'gamma', 'uniform'], width=12, state='readonly')
                 dist_box.set('fixed')
                 dist_box.grid(row=row, column=1)
                 dist_box.bind('<<ComboboxSelected>>', lambda e, dt=data_type_key, p=param: self.update_alpha_param_labels(dt, p))
@@ -1890,6 +2005,34 @@ class ExtendedGUI:
         if data_type_key not in self.param_labels_by_type:
             self.param_labels_by_type[data_type_key] = {}
         self.param_labels_by_type[data_type_key].update(param_labels)
+        # For Thermal and Gravity, enforce mode UI after parameter widgets exist
+        # Force the mode variables to 'standard' so manual controls remain
+        # disabled until the user explicitly switches to 'free'. Call the
+        # toggle functions to apply the UI state immediately.
+        try:
+            if data_type_key == 'Thermal':
+                try:
+                    self.thermal_mode_var.set('standard')
+                except Exception:
+                    pass
+                try:
+                    self.toggle_thermal_mode('Thermal')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if data_type_key == 'Gravity offload':
+                try:
+                    self.gravity_mode_var.set('standard')
+                except Exception:
+                    pass
+                try:
+                    self.toggle_gravity_mode('Gravity offload')
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
         # Initialize mode (enable/disable controls based on default mode)
         if config.get('has_distribution', False) and data_type_key == 'MM_PSF' and self.standard_distributions:
@@ -1903,8 +2046,16 @@ class ExtendedGUI:
                      len(config.get('alpha_params', [])) + 1 
                      if config.get('has_distribution', False) and 'alpha_params' in config 
                      else row + 1)
-        ttk.Button(frame, text=f'Generate {config["tab_label"]} Data', 
-                   command=lambda dt=data_type_key: self.generate_data(dt)).grid(row=button_row, column=0, columnspan=7, pady=20)
+        gen_btn = ttk.Button(frame, text=f'Generate {config["tab_label"]} Data', 
+                   command=lambda dt=data_type_key: self.generate_data(dt))
+        gen_btn.grid(row=button_row, column=0, columnspan=5, pady=20, sticky='w')
+        # Status label to show pending export after applying/generating
+        status_label = ttk.Label(frame, text='', foreground='blue')
+        status_label.grid(row=button_row, column=5, columnspan=2, pady=20, sticky='w')
+        try:
+            self.tab_status_labels[data_type_key] = status_label
+        except Exception:
+            pass
 
     def _set_entry_text(self, entry: ttk.Entry, value: str) -> None:
         """Set entry text even if disabled."""
@@ -1937,6 +2088,10 @@ class ExtendedGUI:
 
         # Temporarily enable free controls so we can populate them
         self._set_alignment_free_controls_state(state='normal')
+        is_variable_preset = bool(re.search(r"\bVariable\b", preset_name, re.IGNORECASE))
+
+        # If preset name starts with 'Fixed', force controls to fixed/disabled
+        is_fixed_preset = bool(re.match(r'^\s*fixed', str(preset_name), re.IGNORECASE))
 
         for param_label, spec in preset.items():
             if data_type_key not in self.dist_entries_by_type or param_label not in self.dist_entries_by_type[data_type_key]:
@@ -1948,9 +2103,15 @@ class ExtendedGUI:
                 continue
 
             try:
-                dist_box.set(dist)
+                # If this is a Variable preset but the spec is gaussian, present the mean/sigma
+                # as-is (gaussian) so the GUI shows Mean/Sigma from the preset table.
+                if is_variable_preset and dist in ('gaussian', 'normal'):
+                    dist_box.set('gaussian')
+                else:
+                    dist_box.set(dist)
             except Exception:
                 pass
+            # Insert numeric text into the entries (preserve text even when disabled)
             self._set_entry_text(a_entry, f"{a}")
             self._set_entry_text(b_entry, f"{b}")
 
@@ -1959,9 +2120,39 @@ class ExtendedGUI:
             except Exception:
                 pass
 
+            # If we're in standard mode, disable the controls for this parameter
+            try:
+                if self.align_mode_var.get() == 'standard' or is_fixed_preset:
+                    try:
+                        dist_box.config(state='disabled')
+                    except Exception:
+                        pass
+                    try:
+                        a_entry.config(state='disabled')
+                    except Exception:
+                        pass
+                    try:
+                        if dist in ('gaussian', 'normal', 'gamma'):
+                            b_entry.config(state='disabled')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         # If we're in standard mode, disable again after applying
         if self.align_mode_var.get() == 'standard':
             self._set_alignment_free_controls_state(state='disabled')
+            # Inform user via modal unless we're suppressing standard-apply modals
+            try:
+                if not getattr(self, 'suppress_standard_apply_modals', False):
+                    messagebox.showinfo('Alignment Applied', f"Applied preset '{preset_name}' for Alignment (pending export).")
+            except Exception:
+                pass
+            try:
+                if 'Alignment' in self.tab_status_labels:
+                    self.tab_status_labels['Alignment'].configure(text='')
+            except Exception:
+                pass
 
     def on_thermal_standard_selected(self) -> None:
         """Apply selected Thermal standard preset to per-parameter controls."""
@@ -2013,8 +2204,21 @@ class ExtendedGUI:
             except Exception:
                 pass
 
-        if self.thermal_mode_var.get() == 'standard':
+        # If preset name starts with 'Fixed', treat all controls as fixed and disabled
+        is_fixed_preset = bool(re.match(r'^\s*fixed', str(preset_name), re.IGNORECASE))
+
+        if self.thermal_mode_var.get() == 'standard' or is_fixed_preset:
             self._set_thermal_free_controls_state(state='disabled')
+        try:
+            if not getattr(self, 'suppress_standard_apply_modals', False):
+                messagebox.showinfo('Thermal Applied', f"Applied preset '{preset_name}' for Thermal (pending export).")
+        except Exception:
+            pass
+        try:
+            if 'Thermal' in self.tab_status_labels:
+                self.tab_status_labels['Thermal'].configure(text='')
+        except Exception:
+            pass
 
     def _set_thermal_free_controls_state(self, state: str) -> None:
         data_type_key = 'Thermal'
@@ -2048,7 +2252,11 @@ class ExtendedGUI:
             except Exception:
                 pass
         if mode == 'standard':
-            self.on_thermal_standard_selected()
+            try:
+                self.suppress_standard_apply_modals = True
+                self.on_thermal_standard_selected()
+            finally:
+                self.suppress_standard_apply_modals = False
             self._set_thermal_free_controls_state(state='disabled')
         else:
             self._set_thermal_free_controls_state(state='normal')
@@ -2100,8 +2308,21 @@ class ExtendedGUI:
             except Exception:
                 pass
 
-        if self.gravity_mode_var.get() == 'standard':
+        # If preset name starts with 'Fixed', treat all controls as fixed and disabled
+        is_fixed_preset = bool(re.match(r'^\s*fixed', str(preset_name), re.IGNORECASE))
+
+        if self.gravity_mode_var.get() == 'standard' or is_fixed_preset:
             self._set_gravity_free_controls_state(state='disabled')
+        try:
+            if not getattr(self, 'suppress_standard_apply_modals', False):
+                messagebox.showinfo('Gravity Applied', f"Applied preset '{preset_name}' for Gravity (pending export).")
+        except Exception:
+            pass
+        try:
+            if 'Gravity offload' in self.tab_status_labels:
+                self.tab_status_labels['Gravity offload'].configure(text='')
+        except Exception:
+            pass
 
     def _set_gravity_free_controls_state(self, state: str) -> None:
         data_type_key = 'Gravity offload'
@@ -2135,7 +2356,11 @@ class ExtendedGUI:
             except Exception:
                 pass
         if mode == 'standard':
-            self.on_gravity_standard_selected()
+            try:
+                self.suppress_standard_apply_modals = True
+                self.on_gravity_standard_selected()
+            finally:
+                self.suppress_standard_apply_modals = False
             self._set_gravity_free_controls_state(state='disabled')
         else:
             self._set_gravity_free_controls_state(state='normal')
@@ -2178,8 +2403,12 @@ class ExtendedGUI:
                 pass
 
         if mode == 'standard':
-            # Apply preset then lock free controls
-            self.on_alignment_standard_selected()
+            # Apply preset then lock free controls (do not show modal on toggle)
+            try:
+                self.suppress_standard_apply_modals = True
+                self.on_alignment_standard_selected()
+            finally:
+                self.suppress_standard_apply_modals = False
             self._set_alignment_free_controls_state(state='disabled')
         else:
             # Unlock free controls
@@ -2196,7 +2425,7 @@ class ExtendedGUI:
             # Hide second field and label for fixed
             label_b.grid_remove()
             entry_b.grid_remove()
-        elif dist == 'gaussian':
+        elif dist == 'gaussian' or dist == 'gamma':
             label_a.config(text='Mean:')
             label_b.config(text='Sigma:')
             # Show second field and label
@@ -2214,14 +2443,23 @@ class ExtendedGUI:
     def toggle_psf_mode(self, data_type_key):
         """Toggle between standard and free mode for MM_PSF."""
         mode = self.psf_mode_var.get()
-        
         # Enable/disable standard distribution dropdown
         if data_type_key in self.distribution_widgets and 'std_dist_combo' in self.distribution_widgets[data_type_key]:
             std_combo = self.distribution_widgets[data_type_key]['std_dist_combo']
             if mode == 'standard':
                 std_combo.config(state='readonly')
-                # Apply the currently selected standard distribution (or custom PSF option)
-                self.on_mm_psf_standard_selected(data_type_key)
+                # Apply preset without showing modal (toggle should not show the modal)
+                try:
+                    self.suppress_standard_apply_modals = True
+                    print(f"DEBUG: toggle_psf_mode invoking on_mm_psf_standard_selected (mode=standard) for {data_type_key}")
+                    self.on_mm_psf_standard_selected(data_type_key)
+                finally:
+                    self.suppress_standard_apply_modals = False
+                print(f"DEBUG: toggle_psf_mode finished on_mm_psf_standard_selected, calling enforce_psf_alpha_ui")
+                try:
+                    self.enforce_psf_alpha_ui(data_type_key)
+                except Exception as e:
+                    print(f"DEBUG: enforce_psf_alpha_ui raised in toggle_psf_mode: {e}")
             else:
                 std_combo.config(state='disabled')
 
@@ -2245,21 +2483,109 @@ class ExtendedGUI:
                 else:
                     lbl.grid_remove()
 
+        # When switching to Free mode, ensure all distribution controls are enabled
+        # so the user can edit per-parameter comboboxes and text entries.
+        try:
+            if mode == 'free' and data_type_key in self.distribution_widgets:
+                # distribution type combobox
+                try:
+                    if 'dist_type' in self.distribution_widgets[data_type_key]:
+                        self.distribution_widgets[data_type_key]['dist_type'].config(state='readonly')
+                except Exception:
+                    pass
+
+                # enable per-parameter distribution boxes and entries
+                if data_type_key in self.dist_entries_by_type:
+                    for p, widgets in self.dist_entries_by_type[data_type_key].items():
+                        try:
+                            dist_box, entry_a, entry_b = widgets
+                            dist_box.config(state='readonly')
+                            entry_a.config(state='normal')
+                            # If the second field is visible, enable it; otherwise leave hidden
+                            try:
+                                if entry_b.winfo_ismapped() or entry_b.winfo_viewable():
+                                    entry_b.config(state='normal')
+                            except Exception:
+                                entry_b.config(state='normal')
+                            # Refresh labels/states to reflect selection
+                            try:
+                                self.update_param_labels(data_type_key, p)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                # enable alpha parameter controls when present
+                if data_type_key in self.alpha_entries_by_type:
+                    for ui_param, widgets in self.alpha_entries_by_type[data_type_key].items():
+                        try:
+                            _, dist_box, entry_a, entry_b, _ = widgets
+                            dist_box.config(state='readonly')
+                            entry_a.config(state='normal')
+                            try:
+                                if entry_b.winfo_ismapped() or entry_b.winfo_viewable():
+                                    entry_b.config(state='normal')
+                            except Exception:
+                                entry_b.config(state='normal')
+                            try:
+                                self.update_alpha_param_labels(data_type_key, ui_param)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
 
     def on_mm_psf_standard_selected(self, data_type_key: str) -> None:
         """Handle selection of a standard MM_PSF preset or the custom PSF file option."""
-        if data_type_key not in self.distribution_widgets or 'std_dist_combo' not in self.distribution_widgets[data_type_key]:
-            return
+        try:
+            if data_type_key not in self.distribution_widgets or 'std_dist_combo' not in self.distribution_widgets[data_type_key]:
+                return
 
-        std_name = self.distribution_widgets[data_type_key]['std_dist_combo'].get()
+            std_name = self.distribution_widgets[data_type_key]['std_dist_combo'].get()
 
-        if std_name == self.CUSTOM_PSF_OPTION:
-            # Keep all other MM_PSF entries disabled (standard mode already does this).
-            # Ensure picker is visible.
+            print(f"DEBUG: on_mm_psf_standard_selected called for '{data_type_key}', std_name='{std_name}'")
+
+            if std_name == self.CUSTOM_PSF_OPTION:
+                # Keep all other MM_PSF entries disabled (standard mode already does this).
+                # Ensure picker is visible.
+                if 'btn_pick_psf' in self.distribution_widgets[data_type_key]:
+                    self.distribution_widgets[data_type_key]['btn_pick_psf'].grid()
+                if 'lbl_pick_psf' in self.distribution_widgets[data_type_key]:
+                    self.distribution_widgets[data_type_key]['lbl_pick_psf'].grid()
+
+                # Extra safety: disable dist type + m_rad/m_azi dist dropdowns while using a preset.
+                if 'dist_type' in self.distribution_widgets[data_type_key]:
+                    try:
+                        self.distribution_widgets[data_type_key]['dist_type'].config(state='disabled')
+                    except Exception:
+                        pass
+                for p in ['m_rad [arcsec]', 'm_azi [arcsec]']:
+                    if data_type_key in self.dist_entries_by_type and p in self.dist_entries_by_type[data_type_key]:
+                        try:
+                            dist_box, entry_a, entry_b = self.dist_entries_by_type[data_type_key][p]
+                            dist_box.config(state='disabled')
+                            entry_a.config(state='disabled')
+                            entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+
+                if not self.custom_psf_path_var.get().strip():
+                    self.choose_custom_psf_file()
+                    return
+
+                return
+
+            # Normal preset
+            self.custom_psf_path_var.set('')
+            self.custom_psf_stem_var.set('')
+
+            # Hide picker when not on Custom
             if 'btn_pick_psf' in self.distribution_widgets[data_type_key]:
-                self.distribution_widgets[data_type_key]['btn_pick_psf'].grid()
+                self.distribution_widgets[data_type_key]['btn_pick_psf'].grid_remove()
             if 'lbl_pick_psf' in self.distribution_widgets[data_type_key]:
-                self.distribution_widgets[data_type_key]['lbl_pick_psf'].grid()
+                self.distribution_widgets[data_type_key]['lbl_pick_psf'].grid_remove()
 
             # Extra safety: disable dist type + m_rad/m_azi dist dropdowns while using a preset.
             if 'dist_type' in self.distribution_widgets[data_type_key]:
@@ -2277,37 +2603,20 @@ class ExtendedGUI:
                     except Exception:
                         pass
 
-            if not self.custom_psf_path_var.get().strip():
-                self.choose_custom_psf_file()
-            return
-
-        # Normal preset
-        self.custom_psf_path_var.set('')
-        self.custom_psf_stem_var.set('')
-
-        # Hide picker when not on Custom
-        if 'btn_pick_psf' in self.distribution_widgets[data_type_key]:
-            self.distribution_widgets[data_type_key]['btn_pick_psf'].grid_remove()
-        if 'lbl_pick_psf' in self.distribution_widgets[data_type_key]:
-            self.distribution_widgets[data_type_key]['lbl_pick_psf'].grid_remove()
-
-        # Extra safety: disable dist type + m_rad/m_azi dist dropdowns while using a preset.
-        if 'dist_type' in self.distribution_widgets[data_type_key]:
+            print(f"DEBUG: calling apply_standard_distribution for '{std_name}'")
+            self.apply_standard_distribution(data_type_key)
+            print(f"DEBUG: apply_standard_distribution returned for '{std_name}', now calling enforce_psf_alpha_ui")
             try:
-                self.distribution_widgets[data_type_key]['dist_type'].config(state='disabled')
+                self.enforce_psf_alpha_ui(data_type_key)
+            except Exception as e:
+                print(f"DEBUG: enforce_psf_alpha_ui raised: {e}")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"Error in on_mm_psf_standard_selected: {e}\n{tb}")
+            try:
+                messagebox.showerror('PSF Apply Error', f"Error applying PSF preset: {e}")
             except Exception:
                 pass
-        for p in ['m_rad [arcsec]', 'm_azi [arcsec]']:
-            if data_type_key in self.dist_entries_by_type and p in self.dist_entries_by_type[data_type_key]:
-                try:
-                    dist_box, entry_a, entry_b = self.dist_entries_by_type[data_type_key][p]
-                    dist_box.config(state='disabled')
-                    entry_a.config(state='disabled')
-                    entry_b.config(state='disabled')
-                except Exception:
-                    pass
-
-        self.apply_standard_distribution(data_type_key)
 
 
     def choose_custom_psf_file(self) -> None:
@@ -2350,6 +2659,70 @@ class ExtendedGUI:
             print("DEBUG: No std_dist_combo found")
             return
         
+        # Determine current mode for this data type (standard/free)
+        mode = 'standard'
+        try:
+            if data_type_key == 'MM_PSF':
+                mode = self.psf_mode_var.get()
+            elif data_type_key == 'Alignment':
+                mode = self.align_mode_var.get()
+            elif data_type_key == 'Thermal':
+                mode = self.thermal_mode_var.get()
+            elif data_type_key == 'Gravity offload':
+                mode = self.gravity_mode_var.get()
+        except Exception:
+            mode = 'standard'
+
+        # Enable/disable per-parameter controls and allowed distributions
+        if data_type_key in self.dist_entries_by_type:
+            for param, widgets in self.dist_entries_by_type[data_type_key].items():
+                dist_box, entry_a, entry_b = widgets
+                try:
+                    if mode == 'free':
+                        # Free mode: allow fixed, gaussian, uniform (no gamma)
+                        try:
+                            dist_box.config(values=['fixed', 'gaussian', 'uniform'])
+                        except Exception:
+                            pass
+                        try:
+                            dist_box.config(state='normal')
+                            entry_a.config(state='normal')
+                            entry_b.config(state='normal')
+                        except Exception:
+                            pass
+                    else:
+                        # Standard mode: allow gamma as representation of Variable presets
+                        try:
+                            dist_box.config(values=['fixed', 'gaussian', 'gamma', 'uniform'])
+                        except Exception:
+                            pass
+                        # Most fields will be disabled after applying preset
+                        try:
+                            dist_box.config(state='disabled')
+                            entry_a.config(state='disabled')
+                            entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        # Alpha parameter controls: enable in free mode, otherwise leave handled by apply_standard_distribution
+        if data_type_key in self.alpha_entries_by_type:
+            for ui_param, widgets in self.alpha_entries_by_type[data_type_key].items():
+                _, dist_box, entry_a, entry_b, _ = widgets
+                try:
+                    if mode == 'free':
+                        dist_box.config(values=['fixed', 'gaussian', 'uniform'])
+                        dist_box.config(state='normal')
+                        entry_a.config(state='normal')
+                        entry_b.config(state='normal')
+                    else:
+                        dist_box.config(values=['fixed', 'gaussian', 'gamma', 'uniform'])
+                        dist_box.config(state='disabled')
+                        entry_a.config(state='disabled')
+                        entry_b.config(state='disabled')
+                except Exception:
+                    pass
         std_name = self.distribution_widgets[data_type_key]['std_dist_combo'].get()
         if std_name == self.CUSTOM_PSF_OPTION:
             return
@@ -2364,6 +2737,8 @@ class ExtendedGUI:
         if 'dist_type' in self.distribution_widgets[data_type_key]:
             self.distribution_widgets[data_type_key]['dist_type'].set(std_def['type'])
             self.toggle_eta_entry(data_type_key)
+
+        
 
         # Standard presets assume zero mean offsets unless explicitly controlled elsewhere.
         # Ensure m_rad/m_azi fields are consistent when selecting different presets.
@@ -2401,13 +2776,76 @@ class ExtendedGUI:
         sigma_defs: dict[str, dict | None] = {}
         preset_name = str(std_def.get('name', '')).strip()
 
+        # If the preset name starts with 'Fixed', disable all downstream
+        # distribution controls (distribution type comboboxes and text boxes).
+        is_fixed_preset = bool(re.match(r'^\s*fixed', str(preset_name), re.IGNORECASE))
+        if is_fixed_preset:
+            # Disable main dist_type selector if present
+            try:
+                if 'dist_type' in self.distribution_widgets[data_type_key]:
+                    try:
+                        self.distribution_widgets[data_type_key]['dist_type'].set('gaussian')
+                    except Exception:
+                        pass
+                    self.distribution_widgets[data_type_key]['dist_type'].config(state='disabled')
+            except Exception:
+                pass
+
+            # Disable per-parameter distribution widgets and set to fixed where possible
+            if data_type_key in self.dist_entries_by_type:
+                for param, widgets in self.dist_entries_by_type[data_type_key].items():
+                    try:
+                        dist_box, entry_a, entry_b = widgets
+                        try:
+                            dist_box.set('fixed')
+                        except Exception:
+                            pass
+                        try:
+                            dist_box.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            entry_a.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+            # Disable alpha parameter widgets as well
+            if data_type_key in self.alpha_entries_by_type:
+                for ui_param, widgets in self.alpha_entries_by_type[data_type_key].items():
+                    try:
+                        _, dist_box, entry_a, entry_b, _ = widgets
+                        try:
+                            dist_box.set('fixed')
+                        except Exception:
+                            pass
+                        try:
+                            dist_box.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            entry_a.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
         # Start from the parsed std_def
         for ui_param, std_param in sigma_ui.items():
             if ui_param not in self.dist_entries_by_type[data_type_key] or std_param not in std_def:
                 continue
             sigma_defs[std_param] = std_def.get(std_param)
 
-        # Fallback: derive gaussian(mean,sigma) when the table cell was empty and the preset indicates % variability.
+        # Fallback: derive gamma(mean,sigma) when the table cell was empty and the preset indicates % variability.
         # For symmetric Gaussians, HEW_diameter = 2*sqrt(2 ln2)*sigma.
         for std_param in ('sigma_rad', 'sigma_azi'):
             if std_param not in sigma_defs or sigma_defs.get(std_param):
@@ -2423,7 +2861,8 @@ class ExtendedGUI:
             # Symmetric Gaussian mapping: HEW_diameter = 2*sqrt(2 ln2)*sigma
             import math
             mean_val = hew_val / (2.0 * math.sqrt(2.0 * math.log(2.0)))
-            sigma_defs[std_param] = {'dist': 'gaussian', 'mean': mean_val, 'sigma': abs(pct * mean_val)}
+            # Use gamma distribution to describe per-MM variability from presets labelled 'Variable'
+            sigma_defs[std_param] = {'dist': 'gamma', 'mean': mean_val, 'sigma': abs(pct * mean_val)}
 
         # Push sigma defs into the UI
         for ui_param, std_param in sigma_ui.items():
@@ -2437,6 +2876,7 @@ class ExtendedGUI:
             label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
 
             print(f"DEBUG: Setting {ui_param} to {param_def}")
+            is_variable_preset = bool(re.search(r"\bVariable\b", preset_name, re.IGNORECASE))
 
             # Temporarily enable everything to update
             dist_box.config(state='normal')
@@ -2450,12 +2890,19 @@ class ExtendedGUI:
                 label_a.config(text='Value:')
                 label_b.grid_remove()
                 entry_b.grid_remove()
-            elif param_def['dist'] == 'gaussian':
-                dist_box.set('gaussian')
+            elif param_def['dist'] == 'gaussian' or param_def['dist'] == 'gamma':
+                try:
+                    # If the preset is a Variable preset, present it as a gamma distribution
+                    if is_variable_preset:
+                        dist_box.set('gamma')
+                    else:
+                        dist_box.set(param_def['dist'])
+                except Exception:
+                    pass
                 entry_a.delete(0, tk.END)
-                entry_a.insert(0, str(param_def['mean']))
+                entry_a.insert(0, str(param_def.get('mean')))
                 entry_b.delete(0, tk.END)
-                entry_b.insert(0, str(param_def['sigma']))
+                entry_b.insert(0, str(param_def.get('sigma')))
                 label_a.config(text='Mean:')
                 label_b.config(text='Sigma:')
                 label_b.grid()
@@ -2473,68 +2920,241 @@ class ExtendedGUI:
 
             print(f"DEBUG: dist_box={dist_box.get()}, entry_a={entry_a.get()}, entry_b visible={entry_b.winfo_viewable()}")
 
-            # Disable again if in standard mode
-            if self.psf_mode_var.get() == 'standard':
-                dist_box.config(state='disabled')
-                entry_a.config(state='disabled')
-                if param_def['dist'] != 'fixed':
-                    entry_b.config(state='disabled')
+            # Ensure labels and states are consistent with current distribution selection
+            try:
+                self.update_param_labels(data_type_key, ui_param)
+            except Exception:
+                pass
+
+            # Re-enforce disabled state for Fixed presets as well (ensure GUI helpers
+            # that temporarily enabled fields do not leave them writable).
+            try:
+                if is_fixed_preset:
+                    try:
+                        dist_box.config(state='disabled')
+                    except Exception:
+                        pass
+                    try:
+                        entry_a.config(state='disabled')
+                    except Exception:
+                        pass
+                    try:
+                        entry_b.config(state='disabled')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Re-apply disabled state for Variable presets while in standard mode.
+            # `update_param_labels` may re-enable the sigma entry, so enforce disable
+            # after the label/state update.
+            try:
+                if self.psf_mode_var.get() == 'standard' and is_variable_preset:
+                    try:
+                        dist_box.config(state='disabled')
+                    except Exception:
+                        pass
+                    try:
+                        entry_a.config(state='disabled')
+                    except Exception:
+                        pass
+                    try:
+                        # For Variable presets we want sigma fields disabled as well
+                        if param_def.get('dist') != 'fixed':
+                            entry_b.config(state='disabled')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         
         # Apply alpha parameters if pseudo-voigt
         if std_def['type'] == 'pseudo-voigt' and data_type_key in self.alpha_entries_by_type:
+            is_variable_preset = bool(re.search(r"\bVariable\b", preset_name, re.IGNORECASE))
             alpha_mapping = {
                 'alpha_rad': 'alpha_rad',
                 'alpha_azi': 'alpha_azi'
             }
-            
+
+            # try to extract alpha-specific percent (e.g., 'alpha (10%)') or overall '% Variable'
+            m_alpha = re.search(r"alpha\s*\(?\s*(\d+(?:\.\d+)?)\s*%\s*\)?", preset_name, re.IGNORECASE)
+            alpha_pct = float(m_alpha.group(1)) / 100.0 if m_alpha else None
+            m_overall_pct = re.search(r"(\d+(?:\.\d+)?)\%\s*Variable", preset_name, re.IGNORECASE)
+            overall_pct = float(m_overall_pct.group(1)) / 100.0 if m_overall_pct else None
+
             for ui_param, std_param in alpha_mapping.items():
-                if ui_param in self.alpha_entries_by_type[data_type_key] and std_param in std_def and std_def[std_param]:
-                    _, dist_box, entry_a, entry_b, _ = self.alpha_entries_by_type[data_type_key][ui_param]
-                    label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
-                    param_def = std_def[std_param]
-                    # Clamp alpha means into [0,1]
-                    if param_def['dist'] == 'fixed':
-                        param_def = {**param_def, 'value': clamp01(param_def['value'])}
-                    elif param_def['dist'] == 'gaussian':
-                        param_def = {**param_def, 'mean': clamp01(param_def['mean'])}
-                    
-                    print(f"DEBUG: Setting alpha {ui_param} to {param_def}")
-                    
-                    # Temporarily enable everything to update
+                # prefer explicit spec coming from the spreadsheet
+                explicit = std_def.get(std_param)
+                if explicit and explicit:
+                    param_def = explicit
+                    # If preset explicitly contains a fixed alpha but the preset name
+                    # indicates a Variable pseudo-voigt with an alpha(...) percent,
+                    # prefer showing it as a gamma(mean,sigma) in the UI (disabled).
+                    if (param_def.get('dist') == 'fixed') and is_variable_preset and (alpha_pct is not None or overall_pct is not None):
+                        # derive baseline if possible or use defaults
+                        import math
+                        hew_match = re.search(r"(\d+(?:\.\d+)?)\"", preset_name)
+                        hew_str = hew_match.group(1) if hew_match else None
+                        baseline_alpha = {'alpha_rad': None, 'alpha_azi': None}
+                        if hew_str and hasattr(self, 'standard_distributions'):
+                            for preset_name2, preset2 in self.standard_distributions.items():
+                                try:
+                                    if preset2.get('type') == 'pseudo-voigt' and 'fixed' in str(preset_name2).lower() and hew_str in str(preset_name2):
+                                        ar = preset2.get('alpha_rad')
+                                        aa = preset2.get('alpha_azi')
+                                        if ar and aa and ar.get('dist') == 'fixed' and aa.get('dist') == 'fixed':
+                                            baseline_alpha['alpha_rad'] = float(ar['value'])
+                                            baseline_alpha['alpha_azi'] = float(aa['value'])
+                                            break
+                                except Exception:
+                                    pass
+                        if baseline_alpha['alpha_rad'] is None:
+                            baseline_alpha['alpha_rad'] = 0.77
+                        if baseline_alpha['alpha_azi'] is None:
+                            baseline_alpha['alpha_azi'] = 0.29
+                        mean_val = baseline_alpha[ui_param]
+                        use_pct = alpha_pct if alpha_pct is not None else overall_pct
+                        sigma_val = abs(use_pct * mean_val) if use_pct is not None else 0.0
+                        param_def = {'dist': 'gamma', 'mean': clamp01(mean_val), 'sigma': sigma_val}
+                else:
+                    # If this is a Variable preset and no explicit alpha spec exists,
+                    # derive a gamma(mean,sigma) using either matching fixed presets
+                    # or sensible defaults (0.77 / 0.29) and the percent from the name.
+                    if is_variable_preset and (alpha_pct is not None or overall_pct is not None):
+                        # attempt to find baseline alpha means from matching fixed preset (same HEW)
+                        import math
+                        hew_match = re.search(r"(\d+(?:\.\d+)?)\"", preset_name)
+                        hew_str = hew_match.group(1) if hew_match else None
+                        baseline_alpha = {'alpha_rad': None, 'alpha_azi': None}
+                        if hew_str and hasattr(self, 'standard_distributions'):
+                            for preset_name2, preset2 in self.standard_distributions.items():
+                                try:
+                                    if preset2.get('type') == 'pseudo-voigt' and 'fixed' in str(preset_name2).lower() and hew_str in str(preset_name2):
+                                        ar = preset2.get('alpha_rad')
+                                        aa = preset2.get('alpha_azi')
+                                        if ar and aa and ar.get('dist') == 'fixed' and aa.get('dist') == 'fixed':
+                                            baseline_alpha['alpha_rad'] = float(ar['value'])
+                                            baseline_alpha['alpha_azi'] = float(aa['value'])
+                                            break
+                                except Exception:
+                                    pass
+                        # defaults when baseline not found
+                        if baseline_alpha['alpha_rad'] is None:
+                            baseline_alpha['alpha_rad'] = 0.77
+                        if baseline_alpha['alpha_azi'] is None:
+                            baseline_alpha['alpha_azi'] = 0.29
+
+                        mean_val = baseline_alpha[ui_param]
+                        # prefer alpha-specific percent, otherwise fall back to overall Variable percent
+                        use_pct = alpha_pct if alpha_pct is not None else overall_pct
+                        sigma_val = abs(use_pct * mean_val) if use_pct is not None else 0.0
+                        param_def = {'dist': 'gamma', 'mean': clamp01(mean_val), 'sigma': sigma_val}
+                    else:
+                        # no explicit spec and not a variable preset with percent: skip
+                        continue
+
+                # At this point param_def is defined (either explicit or derived)
+                _, dist_box, entry_a, entry_b, _ = self.alpha_entries_by_type[data_type_key][ui_param]
+                label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
+
+                # Clamp alpha means into [0,1]
+                if param_def.get('dist') == 'fixed':
+                    param_def = {**param_def, 'value': clamp01(param_def['value'])}
+                elif param_def.get('dist') in ('gaussian', 'gamma'):
+                    param_def = {**param_def, 'mean': clamp01(param_def.get('mean'))}
+
+                print(f"DEBUG: Setting alpha {ui_param} to {param_def}")
+
+                # Temporarily enable everything to update
+                try:
                     dist_box.config(state='normal')
                     entry_a.config(state='normal')
                     entry_b.config(state='normal')
-                    
-                    if param_def['dist'] == 'fixed':
+                except Exception:
+                    pass
+
+                if param_def.get('dist') == 'fixed':
+                    try:
                         dist_box.set('fixed')
-                        entry_a.delete(0, tk.END)
-                        entry_a.insert(0, str(param_def['value']))
-                        label_a.config(text='Value:')
-                        label_b.grid_remove()
-                        entry_b.grid_remove()
-                    elif param_def['dist'] == 'gaussian':
-                        dist_box.set('gaussian')
-                        entry_a.delete(0, tk.END)
-                        entry_a.insert(0, str(param_def['mean']))
-                        entry_b.delete(0, tk.END)
-                        entry_b.insert(0, str(param_def['sigma']))
-                        label_a.config(text='Mean:')
-                        label_b.config(text='Sigma:')
-                        label_b.grid()
-                        entry_b.grid()
-                    
-                    print(f"DEBUG: alpha dist_box={dist_box.get()}, entry_a={entry_a.get()}")
-                    
-                    # Disable again if in standard mode (but keep visible if gaussian)
-                    if self.psf_mode_var.get() == 'standard':
-                        dist_box.config(state='disabled')
-                        entry_a.config(state='disabled')
-                        if param_def['dist'] != 'fixed':
+                    except Exception:
+                        pass
+                    entry_a.delete(0, tk.END)
+                    entry_a.insert(0, str(param_def['value']))
+                    label_a.config(text='Value:')
+                    label_b.grid_remove()
+                    entry_b.grid_remove()
+                    # Ensure fields remain disabled for Fixed presets
+                    try:
+                        if is_fixed_preset or self.psf_mode_var.get() == 'standard':
+                            dist_box.config(state='disabled')
+                            entry_a.config(state='disabled')
+                    except Exception:
+                        pass
+                elif param_def.get('dist') in ('gaussian', 'gamma'):
+                    try:
+                        # For Variable presets always present as gamma
+                        if is_variable_preset:
+                            dist_box.set('gamma')
+                        else:
+                            dist_box.set(param_def.get('dist'))
+                    except Exception:
+                        pass
+                    entry_a.delete(0, tk.END)
+                    entry_a.insert(0, str(param_def.get('mean')))
+                    entry_b.delete(0, tk.END)
+                    entry_b.insert(0, str(param_def.get('sigma')))
+                    label_a.config(text='Mean:')
+                    label_b.config(text='Sigma:')
+                    label_b.grid()
+                    entry_b.grid()
+
+                print(f"DEBUG: alpha dist_box={dist_box.get()}, entry_a={entry_a.get()}")
+
+                # Update labels and possibly re-disable fields
+                try:
+                    self.update_alpha_param_labels(data_type_key, ui_param)
+                except Exception:
+                    pass
+
+                # Re-enforce disabled state for alpha sigma fields if Variable preset
+                try:
+                    if self.psf_mode_var.get() == 'standard' and is_variable_preset:
+                        try:
+                            dist_box.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            entry_a.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            if param_def.get('dist') != 'fixed':
+                                entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Re-enforce disabled state for Fixed presets as well
+                try:
+                    if is_fixed_preset:
+                        try:
+                            dist_box.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
+                            entry_a.config(state='disabled')
+                        except Exception:
+                            pass
+                        try:
                             entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         
         # Fallback for alpha params when missing in pseudo-voigt presets (e.g., "(alpha 10%)")
         if std_def['type'] == 'pseudo-voigt' and data_type_key in self.alpha_entries_by_type:
-            import re, math
+            import math
             name = std_def.get('name', '')
             m_alpha = re.search(r"alpha\s*(\d+)\%", name, re.IGNORECASE)
             if m_alpha:
@@ -2567,13 +3187,14 @@ class ExtendedGUI:
                         # determine mean: from matching fixed preset or requested defaults
                         mean_val = baseline_alpha[ui_param]
                         sigma_val = abs(pct * mean_val)
-                        param_def = {'dist': 'gaussian', 'mean': clamp01(mean_val), 'sigma': sigma_val}
+                        # For Variable presets, model alpha variability with a gamma distribution
+                        param_def = {'dist': 'gamma', 'mean': clamp01(mean_val), 'sigma': sigma_val}
                         print(f"DEBUG: Derived {ui_param} from name '{name}' using baseline {param_def['mean']}: sigma={sigma_val}")
                         # Temporarily enable to update
                         dist_box.config(state='normal')
                         entry_a.config(state='normal')
                         entry_b.config(state='normal')
-                        dist_box.set('gaussian')
+                        dist_box.set(param_def['dist'])
                         entry_a.delete(0, tk.END)
                         entry_a.insert(0, str(param_def['mean']))
                         entry_b.delete(0, tk.END)
@@ -2582,10 +3203,164 @@ class ExtendedGUI:
                         label_b.config(text='Sigma:')
                         label_b.grid()
                         entry_b.grid()
-                        if self.psf_mode_var.get() == 'standard':
+                        if self.psf_mode_var.get() == 'standard' and is_variable_preset:
+                            # If standard Variable preset, keep the gamma shown but disabled
+                            try:
+                                dist_box.config(state='disabled')
+                            except Exception:
+                                pass
+                            try:
+                                entry_a.config(state='disabled')
+                            except Exception:
+                                pass
+                            try:
+                                entry_b.config(state='disabled')
+                            except Exception:
+                                pass
+
+        # Ensure that when in standard PSF mode for pseudo-voigt presets, alpha fields are shown as disabled
+        # and hold the mean value (not editable). This covers 'Variable' presets where the alpha
+        # distribution is not intended for per-MM editing.
+        try:
+            if self.psf_mode_var.get() == 'standard' and std_def.get('type') == 'pseudo-voigt':
+                # Determine if this preset is a 'Variable' preset
+                is_variable_preset = bool(re.search(r"\bVariable\b", preset_name, re.IGNORECASE))
+                for ui_param in ('alpha_rad', 'alpha_azi'):
+                    if data_type_key in self.alpha_entries_by_type and ui_param in self.alpha_entries_by_type[data_type_key]:
+                        _, dist_box, entry_a, entry_b, _ = self.alpha_entries_by_type[data_type_key][ui_param]
+                        label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
+                        # prefer explicit spec, otherwise try derived baseline
+                        pdef = std_def.get(ui_param)
+                        if pdef and pdef.get('dist') == 'fixed':
+                            mean_val = float(pdef.get('value'))
+                            sigma_val = 0.0
+                        elif pdef and pdef.get('dist') in ('gaussian', 'gamma'):
+                            mean_val = float(pdef.get('mean'))
+                            sigma_val = float(pdef.get('sigma', 0.0))
+                        else:
+                            # If no explicit alpha spec, try to reuse derived values from earlier fallback
+                            mean_val = None
+                            sigma_val = None
+                        if mean_val is None:
+                            # try to read whatever is currently in the entry_a/b
+                            try:
+                                mean_val = float(entry_a.get())
+                            except Exception:
+                                mean_val = 0.0
+                            try:
+                                sigma_val = float(entry_b.get())
+                            except Exception:
+                                sigma_val = 0.0
+
+                        # If this is a Variable preset, show gamma(mean,sigma) and disable editing
+                        try:
+                            if is_variable_preset:
+                                try:
+                                    dist_box.set('gamma')
+                                except Exception:
+                                    pass
+                                self._set_entry_text(entry_a, f"{mean_val}")
+                                self._set_entry_text(entry_b, f"{sigma_val}")
+                                label_a.config(text='Mean:')
+                                label_b.config(text='Sigma:')
+                                label_b.grid()
+                                entry_b.grid()
+                                try:
+                                    dist_box.config(state='disabled')
+                                    entry_a.config(state='disabled')
+                                    entry_b.config(state='disabled')
+                                except Exception:
+                                    pass
+                            else:
+                                # Non-variable: present fixed mean and hide sigma
+                                try:
+                                    dist_box.set('fixed')
+                                except Exception:
+                                    pass
+                                self._set_entry_text(entry_a, f"{mean_val}")
+                                self._set_entry_text(entry_b, '0')
+                                label_a.config(text='Value:')
+                                label_b.grid_remove()
+                                entry_b.grid_remove()
+                                try:
+                                    dist_box.config(state='disabled')
+                                    entry_a.config(state='disabled')
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Final enforcement: ensure Variable pseudo-voigt alpha fields are shown as gamma(mean,sigma)
+        # This guarantees UI consistency even if other helpers toggled widgets.
+        try:
+            if std_def.get('type') == 'pseudo-voigt' and is_variable_preset and data_type_key in self.alpha_entries_by_type:
+                # determine percent to use for sigma (alpha-specific or overall)
+                use_pct = alpha_pct if alpha_pct is not None else overall_pct
+                for ui_param in ('alpha_rad', 'alpha_azi'):
+                    try:
+                        _, dist_box, entry_a, entry_b, _ = self.alpha_entries_by_type[data_type_key][ui_param]
+                        label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
+                        # pick mean from explicit spec if present, otherwise fallback
+                        pdef = std_def.get(ui_param)
+                        if pdef and pdef.get('dist') in ('gaussian', 'gamma'):
+                            mean_val = clamp01(pdef.get('mean'))
+                            sigma_val = float(pdef.get('sigma', 0.0))
+                        else:
+                            # try to find baseline fixed preset or defaults
+                            baseline = None
+                            hew_match = re.search(r"(\d+(?:\.\d+)?)\"", preset_name)
+                            hew_str = hew_match.group(1) if hew_match else None
+                            if hew_str and hasattr(self, 'standard_distributions'):
+                                for pname, preset in self.standard_distributions.items():
+                                    try:
+                                        if preset.get('type') == 'pseudo-voigt' and 'fixed' in str(pname).lower() and hew_str in str(pname):
+                                            b = preset.get(ui_param)
+                                            if b and b.get('dist') == 'fixed':
+                                                baseline = float(b.get('value'))
+                                                break
+                                    except Exception:
+                                        pass
+                            if baseline is None:
+                                baseline = 0.77 if ui_param == 'alpha_rad' else 0.29
+                            mean_val = clamp01(baseline)
+                            sigma_val = abs(use_pct * mean_val) if use_pct is not None else 0.0
+
+                        # set UI to gamma mean/sigma and disable
+                        try:
+                            dist_box.set('gamma')
+                        except Exception:
+                            pass
+                        self._set_entry_text(entry_a, f"{mean_val}")
+                        self._set_entry_text(entry_b, f"{sigma_val}")
+                        label_a.config(text='Mean:')
+                        label_b.config(text='Sigma:')
+                        label_b.grid()
+                        entry_b.grid()
+                        try:
                             dist_box.config(state='disabled')
                             entry_a.config(state='disabled')
                             entry_b.config(state='disabled')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Notify user via modal and clear any persistent in-window status
+        try:
+            if not getattr(self, 'suppress_standard_apply_modals', False):
+                messagebox.showinfo(f"{DATA_TYPES[data_type_key]['tab_label']} Applied",
+                                    f"Applied standard preset '{preset_name}' for {DATA_TYPES[data_type_key]['tab_label']} (pending export).")
+        except Exception:
+            pass
+        try:
+            if data_type_key in self.tab_status_labels:
+                self.tab_status_labels[data_type_key].configure(text='')
+        except Exception:
+            pass
 
     def update_alpha_param_labels(self, data_type_key, param):
         """Update alpha parameter labels based on distribution type."""
@@ -2603,7 +3378,7 @@ class ExtendedGUI:
             label_a.config(text='Value:')
             label_b.grid_remove()
             entry_b.grid_remove()
-        elif dist == 'gaussian':
+        elif dist == 'gaussian' or dist == 'gamma':
             label_a.config(text='Mean:')
             label_b.config(text='Sigma:')
             label_b.grid()
@@ -2615,6 +3390,89 @@ class ExtendedGUI:
             label_b.grid()
             entry_b.config(state='normal')
             entry_b.grid()
+
+    def enforce_psf_alpha_ui(self, data_type_key):
+        """Runtime enforcement: ensure alpha fields show gamma(mean,sigma) and are disabled
+        for 'Variable' pseudo-voigt standard presets. Call from live handlers to guarantee
+        UI consistency when users toggle modes or select presets interactively."""
+        try:
+            def _clamp01(x):
+                try:
+                    return min(max(float(x), 0.0), 1.0)
+                except Exception:
+                    return 0.0
+            if data_type_key not in self.distribution_widgets or 'std_dist_combo' not in self.distribution_widgets[data_type_key]:
+                return
+            std_name = self.distribution_widgets[data_type_key]['std_dist_combo'].get()
+            if not std_name or std_name == self.CUSTOM_PSF_OPTION:
+                return
+            std_def = self.standard_distributions.get(std_name)
+            if not std_def or std_def.get('type') != 'pseudo-voigt':
+                return
+            is_variable_preset = bool(re.search(r"\bVariable\b", std_name, re.IGNORECASE))
+            if not is_variable_preset:
+                return
+
+            # prefer alpha-specific percent in name, else overall '% Variable'
+            m_alpha = re.search(r"alpha\s*\(?\s*(\d+(?:\.\d+)?)\s*%\s*\)?", std_name, re.IGNORECASE)
+            alpha_pct = float(m_alpha.group(1)) / 100.0 if m_alpha else None
+            m_overall = re.search(r"(\d+(?:\.\d+)?)\%\s*Variable", std_name, re.IGNORECASE)
+            overall_pct = float(m_overall.group(1)) / 100.0 if m_overall else None
+            use_pct = alpha_pct if alpha_pct is not None else overall_pct
+
+            for ui_param in ('alpha_rad', 'alpha_azi'):
+                if data_type_key not in self.alpha_entries_by_type or ui_param not in self.alpha_entries_by_type[data_type_key]:
+                    continue
+                try:
+                    _, dist_box, entry_a, entry_b, _ = self.alpha_entries_by_type[data_type_key][ui_param]
+                    label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
+
+                    # Determine mean: prefer explicit spec, else derive baseline or default
+                    pdef = std_def.get(ui_param)
+                    if pdef and pdef.get('dist') in ('gaussian', 'gamma'):
+                        mean_val = _clamp01(pdef.get('mean'))
+                    else:
+                        # try to find matching fixed preset baseline
+                        baseline = None
+                        hew_match = re.search(r"(\d+(?:\.\d+)?)\"", std_name)
+                        hew_str = hew_match.group(1) if hew_match else None
+                        if hew_str and hasattr(self, 'standard_distributions'):
+                            for pname, preset in self.standard_distributions.items():
+                                try:
+                                    if preset.get('type') == 'pseudo-voigt' and 'fixed' in str(pname).lower() and hew_str in str(pname):
+                                        b = preset.get(ui_param)
+                                        if b and b.get('dist') == 'fixed':
+                                            baseline = float(b.get('value'))
+                                            break
+                                except Exception:
+                                    pass
+                        if baseline is None:
+                            baseline = 0.77 if ui_param == 'alpha_rad' else 0.29
+                        mean_val = _clamp01(baseline)
+
+                    sigma_val = abs(use_pct * mean_val) if use_pct is not None else 0.0
+
+                    print(f"ENFORCE: setting {ui_param} -> gamma(mean={mean_val}, sigma={sigma_val}) for preset '{std_name}'")
+                    try:
+                        dist_box.set('gamma')
+                    except Exception:
+                        pass
+                    self._set_entry_text(entry_a, f"{mean_val}")
+                    self._set_entry_text(entry_b, f"{sigma_val}")
+                    label_a.config(text='Mean:')
+                    label_b.config(text='Sigma:')
+                    label_b.grid()
+                    entry_b.grid()
+                    try:
+                        dist_box.config(state='disabled')
+                        entry_a.config(state='disabled')
+                        entry_b.config(state='disabled')
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"ENFORCE ERROR: {e}")
     
     def toggle_eta_entry(self, data_type_key):
         """Show/hide alpha controls based on distribution type."""
@@ -2871,7 +3729,16 @@ class ExtendedGUI:
                 data_df.insert(0, 'Position #', selected_positions)
             
             self.data_dfs[data_type_key] = data_df
-            messagebox.showinfo('Success', f"{config['tab_label']} data generated for {num_mm} selected MMs!")
+            # Inform user that data was generated and is pending export; do not use persistent in-window label
+            try:
+                messagebox.showinfo('Success', f"{config['tab_label']} data generated for {num_mm} selected MMs!\n\n(Pending export)")
+            except Exception:
+                pass
+            try:
+                if data_type_key in self.tab_status_labels:
+                    self.tab_status_labels[data_type_key].configure(text='')
+            except Exception:
+                pass
             self.update_preview()
         except ValueError as e:
             messagebox.showerror('Error', str(e))
