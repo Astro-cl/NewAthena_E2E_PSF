@@ -771,30 +771,10 @@ def _write_optimised_workbook_preserving_formatting(
     from openpyxl import load_workbook
     import tempfile
 
-    # If input_path is the in-memory sentinel, materialize a temporary
-    # workbook from the in-memory sheets (formatting will be lost).
+    # Previously supported an in-memory sentinel '__INMEM__' which materialized
+    # sheets to a temporary workbook. That in-memory flow is removed; always
+    # operate on explicit file paths. Keep created_tmp_input for API compatibility.
     created_tmp_input = None
-    if isinstance(input_path, str) and input_path == '__INMEM__':
-        try:
-            sheets = load_all_sheets(input_path)
-            tf = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
-            tmp_input_path = tf.name
-            tf.close()
-            with pd.ExcelWriter(tmp_input_path, engine='openpyxl') as writer:
-                for name, df in sheets.items():
-                    if df is None:
-                        continue
-                    try:
-                        df.to_excel(writer, sheet_name=name, index=False)
-                    except Exception:
-                        try:
-                            pd.DataFrame(df).to_excel(writer, sheet_name=name, index=False)
-                        except Exception:
-                            pass
-            created_tmp_input = tmp_input_path
-            input_path = tmp_input_path
-        except Exception:
-            created_tmp_input = None
 
     base_out, ext_out = os.path.splitext(output_path)
     tmp_output_path = f"{base_out}.tmp.{os.getpid()}{ext_out}"

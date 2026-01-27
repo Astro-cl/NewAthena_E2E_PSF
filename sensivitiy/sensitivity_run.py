@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import re
+import logging
 
 ROOT = Path(__file__).resolve().parents[1]
 SENS_DIR = Path(__file__).resolve().parent
@@ -2981,7 +2982,7 @@ def main():
 
         # If combo includes MM_PSF and it matches a standard preset, generate MM_PSF sheet
         mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
-            if mk is not None and generate_data_from_distributions is not None:
+        if mk is not None and generate_data_from_distributions is not None:
                 sd = std_mm_psf[combo['MM_PSF']]
                 # build params dict for generate_data_from_distributions
                 params = {}
@@ -3362,14 +3363,12 @@ def main():
         try:
             import numpy as _np
             fp = Path(path)
-            if args.no_excel and str(path).endswith('.pkl'):
+            # Prefer CSV reader for CSV inputs, otherwise read MM_PSF from workbook
+            if str(path).lower().endswith('.csv'):
                 try:
-                    import pickle as _pkl
-                    with open(path, 'rb') as fh:
-                        sheets = _pkl.load(fh)
-                    mm_df = sheets.get('MM_PSF') if isinstance(sheets, dict) else None
+                    mm_df = pd.read_csv(path)
                 except Exception:
-                    mm_df = None
+                    mm_df = pd.read_excel(fp, sheet_name='MM_PSF', engine='openpyxl')
             else:
                 mm_df = pd.read_excel(fp, sheet_name='MM_PSF', engine='openpyxl')
             # find sigma columns
@@ -3386,21 +3385,16 @@ def main():
 
             mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
             if bad and mk is not None:
-                # attempt to repair by expanding the template for this preset
-                # For pickled in-memory inputs we cannot call openpyxl on the path; skip repair.
-                if args.no_excel and str(path).endswith('.pkl'):
-                    print(f"Skipping auto-repair for pickled input {Path(path).name}")
-                else:
-                    try:
-                        # read left-side per-MM columns to build df_gen (heuristic 10 columns)
-                        left_cols_count = 10
-                        df_gen = mm_df.iloc[:num_mm, :left_cols_count].reset_index(drop=True)
-                        write_mmpsf_preserve_template_and_expand(baseline, fp, df_gen, std_mm_psf, mk)
-                        # reload mm_df after repair
-                        mm_df = pd.read_excel(fp, sheet_name='MM_PSF', engine='openpyxl')
-                        print(f"Repaired MM_PSF template in {fp.name}")
-                    except Exception as _e:
-                        print(f"Failed to auto-repair MM_PSF in {fp.name}: {_e}")
+                try:
+                    # read left-side per-MM columns to build df_gen (heuristic 10 columns)
+                    left_cols_count = 10
+                    df_gen = mm_df.iloc[:num_mm, :left_cols_count].reset_index(drop=True)
+                    write_mmpsf_preserve_template_and_expand(baseline, fp, df_gen, std_mm_psf, mk)
+                    # reload mm_df after repair
+                    mm_df = pd.read_excel(fp, sheet_name='MM_PSF', engine='openpyxl')
+                    logging.info("Repaired MM_PSF template in %s", fp.name)
+                except Exception as _e:
+                    logging.exception("Failed to auto-repair MM_PSF in %s: %s", fp.name, _e)
         except Exception:
             # if anything goes wrong in diagnostic, continue to run and let main.py report errors
             pass

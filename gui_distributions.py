@@ -2546,7 +2546,7 @@ class ExtendedGUI:
 
             std_name = self.distribution_widgets[data_type_key]['std_dist_combo'].get()
 
-            print(f"DEBUG: on_mm_psf_standard_selected called for '{data_type_key}', std_name='{std_name}'")
+            logging.debug("on_mm_psf_standard_selected called for '%s', std_name='%s'", data_type_key, std_name)
 
             if std_name == self.CUSTOM_PSF_OPTION:
                 # Keep all other MM_PSF entries disabled (standard mode already does this).
@@ -2604,16 +2604,15 @@ class ExtendedGUI:
                     except Exception:
                         pass
 
-            print(f"DEBUG: calling apply_standard_distribution for '{std_name}'")
+            logging.debug("calling apply_standard_distribution for '%s'", std_name)
             self.apply_standard_distribution(data_type_key)
-            print(f"DEBUG: apply_standard_distribution returned for '{std_name}', now calling enforce_psf_alpha_ui")
+            logging.debug("apply_standard_distribution returned for '%s', now calling enforce_psf_alpha_ui", std_name)
             try:
                 self.enforce_psf_alpha_ui(data_type_key)
             except Exception as e:
-                print(f"DEBUG: enforce_psf_alpha_ui raised: {e}")
+                logging.exception("enforce_psf_alpha_ui raised: %s", e)
         except Exception as e:
-            tb = traceback.format_exc()
-            print(f"Error in on_mm_psf_standard_selected: {e}\n{tb}")
+            logging.exception("Error in on_mm_psf_standard_selected: %s", e)
             try:
                 messagebox.showerror('PSF Apply Error', f"Error applying PSF preset: {e}")
             except Exception:
@@ -2657,7 +2656,7 @@ class ExtendedGUI:
                 return 0.0
 
         if data_type_key not in self.distribution_widgets or 'std_dist_combo' not in self.distribution_widgets[data_type_key]:
-            print("DEBUG: No std_dist_combo found")
+            logging.debug("No std_dist_combo found for %s", data_type_key)
             return
         
         # Determine current mode for this data type (standard/free)
@@ -2728,11 +2727,11 @@ class ExtendedGUI:
         if std_name == self.CUSTOM_PSF_OPTION:
             return
         if not std_name or std_name not in self.standard_distributions:
-            print(f"DEBUG: std_name '{std_name}' not in standard_distributions: {list(self.standard_distributions.keys())}")
+            logging.debug("std_name '%s' not in standard_distributions: %s", std_name, list(self.standard_distributions.keys()))
             return
         
         std_def = self.standard_distributions[std_name]
-        print(f"DEBUG: Applying standard distribution '{std_name}': {std_def}")
+        logging.debug("Applying standard distribution '%s': %s", std_name, std_def)
         
         # Set distribution type
         if 'dist_type' in self.distribution_widgets[data_type_key]:
@@ -2876,7 +2875,7 @@ class ExtendedGUI:
             dist_box, entry_a, entry_b = self.dist_entries_by_type[data_type_key][ui_param]
             label_a, label_b = self.param_labels_by_type[data_type_key][ui_param]
 
-            print(f"DEBUG: Setting {ui_param} to {param_def}")
+            logging.debug("Setting %s to %s", ui_param, param_def)
             is_variable_preset = bool(re.search(r"\bVariable\b", preset_name, re.IGNORECASE))
 
             # Temporarily enable everything to update
@@ -2919,7 +2918,10 @@ class ExtendedGUI:
                 label_b.grid()
                 entry_b.grid()
 
-            print(f"DEBUG: dist_box={dist_box.get()}, entry_a={entry_a.get()}, entry_b visible={entry_b.winfo_viewable()}")
+            try:
+                logging.debug("dist_box=%s, entry_a=%s, entry_b visible=%s", dist_box.get(), entry_a.get(), entry_b.winfo_viewable())
+            except Exception:
+                logging.debug("dist box state logging failed for %s", ui_param)
 
             # Ensure labels and states are consistent with current distribution selection
             try:
@@ -3063,7 +3065,7 @@ class ExtendedGUI:
                 elif param_def.get('dist') in ('gaussian', 'gamma'):
                     param_def = {**param_def, 'mean': clamp01(param_def.get('mean'))}
 
-                print(f"DEBUG: Setting alpha {ui_param} to {param_def}")
+                logging.debug("Setting alpha %s to %s", ui_param, param_def)
 
                 # Temporarily enable everything to update
                 try:
@@ -3108,7 +3110,10 @@ class ExtendedGUI:
                     label_b.grid()
                     entry_b.grid()
 
-                print(f"DEBUG: alpha dist_box={dist_box.get()}, entry_a={entry_a.get()}")
+                try:
+                    logging.debug("alpha dist_box=%s, entry_a=%s", dist_box.get(), entry_a.get())
+                except Exception:
+                    logging.debug("alpha dist box state logging failed for %s", ui_param)
 
                 # Update labels and possibly re-disable fields
                 try:
@@ -3190,7 +3195,7 @@ class ExtendedGUI:
                         sigma_val = abs(pct * mean_val)
                         # For Variable presets, model alpha variability with a gamma distribution
                         param_def = {'dist': 'gamma', 'mean': clamp01(mean_val), 'sigma': sigma_val}
-                        print(f"DEBUG: Derived {ui_param} from name '{name}' using baseline {param_def['mean']}: sigma={sigma_val}")
+                        logging.debug("Derived %s from name '%s' using baseline %s: sigma=%s", ui_param, name, param_def.get('mean'), sigma_val)
                         # Temporarily enable to update
                         dist_box.config(state='normal')
                         entry_a.config(state='normal')
