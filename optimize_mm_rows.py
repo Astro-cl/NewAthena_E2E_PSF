@@ -737,14 +737,8 @@ def _elliptical_place_mm_config(
 
 
 def load_all_sheets(path: str) -> dict:
-    # Support in-memory sentinel and CSV-only inputs.
+    # Support CSV inputs and normal Excel workbooks.
     try:
-        if isinstance(path, str) and path == '__INMEM__':
-            # pd.read_excel has been overridden by main.py to serve in-memory dicts
-            try:
-                return pd.read_excel('__INMEM__', sheet_name=None)
-            except Exception:
-                return {}
         if isinstance(path, str) and str(path).lower().endswith('.csv'):
             try:
                 df = pd.read_csv(path)

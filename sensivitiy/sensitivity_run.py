@@ -2575,10 +2575,6 @@ def main():
                 pass
             input_files.append((out_path, combo))
             combo_id_map[out_name] = i
-            combo_id_map[out_name + '.pkl'] = i
-            combo_id_map[out_name + '.xlsx.pkl'] = i
-            combo_id_map[f"{out_name}.pkl"] = i
-            combo_id_map[f"{out_name}.xlsx.pkl"] = i
             continue
         if args.no_excel:
             # create pickled sheets dict instead of Excel workbook
@@ -2754,7 +2750,6 @@ def main():
             # Materialize a temporary .xlsx, run the workbook-based MM_PSF expansion
             # & sampling helpers (to ensure canonical sigma columns are numeric),
             # then read back sheets and pickle them for in-memory runs.
-            pkl_path = input_dir / (out_name + '.pkl')
             tmp_xlsx = input_dir / out_name
             try:
                 # copy baseline workbook to a temporary .xlsx we can operate on
@@ -2869,22 +2864,9 @@ def main():
                         break
                 if match_key:
                     try:
-                            specs = local_std_alignment.get(match_key)
-                            if args.no_excel and str(out_path).endswith('.pkl'):
-                                # load sheets, apply in-memory, and re-pickle
-                                try:
-                                    import pickle as _pkl
-                                    with open(out_path, 'rb') as fh:
-                                        sheets = _pkl.load(fh)
-                                    _apply_alignment_preset_to_sheets(sheets, specs, num_mm, match_key)
-                                    with open(out_path, 'wb') as fh:
-                                        _pkl.dump(sheets, fh)
-                                    print(f"Applied standard Alignment preset '{match_key}' to {out_path.name} (in-memory .pkl)")
-                                except Exception as _e:
-                                    print(f"Warning: failed to apply Alignment preset in-memory '{match_key}': {_e}")
-                            else:
-                                _apply_alignment_preset_to_workbook(out_path, specs, num_mm, match_key)
-                                print(f"Applied standard Alignment preset '{match_key}' to {out_path.name}")
+                        specs = local_std_alignment.get(match_key)
+                        _apply_alignment_preset_to_workbook(out_path, specs, num_mm, match_key)
+                        print(f"Applied standard Alignment preset '{match_key}' to {out_path.name}")
                     except Exception as _e:
                         print(f"Warning: failed to apply Alignment preset '{match_key}': {_e}")
         except Exception:
@@ -2905,43 +2887,8 @@ def main():
                 if match_key:
                     try:
                         specs = local_std_thermal.get(match_key)
-                        if args.no_excel and str(out_path).endswith('.pkl'):
-                            try:
-                                import pickle as _pkl
-                                with open(out_path, 'rb') as fh:
-                                    sheets = _pkl.load(fh)
-                                # apply to sheets in-memory
-                                # no-op alignment reuse removed; proceed with thermal in-memory edits
-                                # call a thermal-specific in-memory applier if available; fallback to same alignment-style applier
-                                try:
-                                    # reuse alignment applier logic but operate on Thermal sheet
-                                    # implement minimal thermal inplace here
-                                    if 'Thermal' in sheets and isinstance(sheets['Thermal'], pd.DataFrame):
-                                        df_sheet = sheets['Thermal']
-                                    else:
-                                        df_sheet = pd.DataFrame(columns=['Position #'] + DATA_TYPES.get('Thermal', {}).get('params', ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]']))
-                                    # ensure params exist and fill with zeros
-                                    for p in DATA_TYPES.get('Thermal', {}).get('params', ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]']):
-                                        if p not in df_sheet.columns:
-                                            df_sheet[p] = 0.0
-                                    # sampling fallback: set first num_mm rows to zeros if no better data
-                                    for ii in range(min(len(df_sheet), num_mm)):
-                                        for p in DATA_TYPES.get('Thermal', {}).get('params', ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]']):
-                                            try:
-                                                df_sheet.at[ii, p] = float(0.0)
-                                            except Exception:
-                                                df_sheet.at[ii, p] = 0.0
-                                    sheets['Thermal'] = df_sheet
-                                except Exception:
-                                    pass
-                                with open(out_path, 'wb') as fh:
-                                    _pkl.dump(sheets, fh)
-                                print(f"Applied standard Thermal preset '{match_key}' to {out_path.name} (in-memory .pkl)")
-                            except Exception as _e:
-                                print(f"Warning: failed to apply Thermal preset in-memory '{match_key}': {_e}")
-                        else:
-                            _apply_thermal_preset_to_workbook(out_path, specs, num_mm, match_key)
-                            print(f"Applied standard Thermal preset '{match_key}' to {out_path.name}")
+                        _apply_thermal_preset_to_workbook(out_path, specs, num_mm, match_key)
+                        print(f"Applied standard Thermal preset '{match_key}' to {out_path.name}")
                     except Exception as _e:
                         print(f"Warning: failed to apply Thermal preset '{match_key}': {_e}")
         except Exception:
@@ -2962,42 +2909,8 @@ def main():
                 if match_key:
                     try:
                         specs = local_std_gravity.get(match_key)
-                        if args.no_excel and str(out_path).endswith('.pkl'):
-                            try:
-                                import pickle as _pkl
-                                with open(out_path, 'rb') as fh:
-                                    sheets = _pkl.load(fh)
-                                # minimal in-memory gravity application: ensure columns exist and fill zeros/samples
-                                try:
-                                    if 'Gravity offload' in sheets and isinstance(sheets['Gravity offload'], pd.DataFrame):
-                                        df_sheet = sheets['Gravity offload']
-                                    else:
-                                        df_sheet = pd.DataFrame(columns=['Position #'] + DATA_TYPES.get('Gravity offload', {}).get('params', ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]']))
-                                    for p in DATA_TYPES.get('Gravity offload', {}).get('params', ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]']):
-                                        if p not in df_sheet.columns:
-                                            df_sheet[p] = 0.0
-                                    if df_sheet.shape[0] < num_mm:
-                                        for ii in range(df_sheet.shape[0], int(num_mm)):
-                                            df_sheet.loc[ii] = [None] * len(df_sheet.columns)
-                                            if 'Position #' in df_sheet.columns:
-                                                df_sheet.at[ii, 'Position #'] = ii + 1
-                                    for ii in range(min(len(df_sheet), int(num_mm))):
-                                        for p in DATA_TYPES.get('Gravity offload', {}).get('params', ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]']):
-                                            try:
-                                                df_sheet.at[ii, p] = float(0.0)
-                                            except Exception:
-                                                df_sheet.at[ii, p] = 0.0
-                                    sheets['Gravity offload'] = df_sheet
-                                except Exception:
-                                    pass
-                                with open(out_path, 'wb') as fh:
-                                    _pkl.dump(sheets, fh)
-                                print(f"Applied standard Gravity preset '{match_key}' to {out_path.name} (in-memory .pkl)")
-                            except Exception as _e:
-                                print(f"Warning: failed to apply Gravity preset in-memory '{match_key}': {_e}")
-                        else:
-                            _apply_gravity_preset_to_workbook(out_path, specs, num_mm, match_key)
-                            print(f"Applied standard Gravity preset '{match_key}' to {out_path.name}")
+                        _apply_gravity_preset_to_workbook(out_path, specs, num_mm, match_key)
+                        print(f"Applied standard Gravity preset '{match_key}' to {out_path.name}")
                     except Exception as _e:
                         print(f"Warning: failed to apply Gravity preset '{match_key}': {_e}")
         except Exception:
@@ -3068,12 +2981,7 @@ def main():
 
         # If combo includes MM_PSF and it matches a standard preset, generate MM_PSF sheet
         mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
-        if mk is not None and generate_data_from_distributions is not None:
-            # If using no-excel/pickle mode we already populated sheets['MM_PSF'] earlier
-            if args.no_excel and str(out_path).endswith('.pkl'):
-                # already created in-memory MM_PSF; skip file-based generation
-                pass
-            else:
+            if mk is not None and generate_data_from_distributions is not None:
                 sd = std_mm_psf[combo['MM_PSF']]
                 # build params dict for generate_data_from_distributions
                 params = {}
@@ -3142,10 +3050,6 @@ def main():
                 except Exception as e:
                     print(f"Failed to generate MM_PSF for combo {combo}: {e}")
         elif mk is not None:
-            if args.no_excel and str(out_path).endswith('.pkl'):
-                # skip file-based expansion when using pickled sheets
-                pass
-            else:
                 # generate_data_from_distributions not available: preserve baseline per-MM left table
                 try:
                     df_base = pd.read_excel(baseline, sheet_name='MM_PSF', engine='openpyxl')
@@ -3421,9 +3325,6 @@ def main():
         try:
             mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
             if mk is not None:
-                # skip file-based enforcement for pickled in-memory inputs
-                if args.no_excel and str(out_path).endswith('.pkl'):
-                    continue
                 # reconstruct a left-side per-MM df from baseline to preserve layout
                 try:
                     df_base = pd.read_excel(baseline, sheet_name='MM_PSF', engine='openpyxl')
