@@ -2820,15 +2820,22 @@ def main():
                     # fallback: try to reuse previously-read sheets dict
                     pass
 
-                import pickle as _pkl
-                with open(pkl_path, 'wb') as fh:
-                    _pkl.dump(sheets, fh)
-                out_path = pkl_path
-                # cleanup temporary xlsx
+                # Persist modified sheets back into the temporary workbook (.xlsx)
                 try:
-                    tmp_xlsx.unlink()
+                    with pd.ExcelWriter(tmp_xlsx, engine='openpyxl') as writer:
+                        for sname, sdf in (sheets or {}).items():
+                            try:
+                                if isinstance(sdf, pd.DataFrame):
+                                    sdf.to_excel(writer, sheet_name=sname, index=False)
+                                else:
+                                    # skip non-DataFrame sheets
+                                    continue
+                            except Exception:
+                                continue
+                    out_path = tmp_xlsx
                 except Exception:
-                    pass
+                    # fallback: keep the temporary xlsx as out_path
+                    out_path = tmp_xlsx
             except Exception:
                 # fallback to writing baseline copy if any of the above fails
                 out_path = input_dir / out_name
@@ -3398,13 +3405,8 @@ def main():
                 pass
 
         input_files.append((out_path, combo))
-        # Record multiple filename variants so later lookups (including '.pkl'
-        # or '.xlsx.pkl' produced by the --no-excel flow) can find the combo id.
+        # Record generated filename for later lookups
         combo_id_map[out_name] = i
-        combo_id_map[out_name + '.pkl'] = i
-        combo_id_map[out_name + '.xlsx.pkl'] = i
-        combo_id_map[f"{out_name}.pkl"] = i
-        combo_id_map[f"{out_name}.xlsx.pkl"] = i
 
     if getattr(args, 'csv_only', False):
         print(f"Generated {len(input_files)} input CSVs in {input_dir}")
