@@ -14,7 +14,7 @@ from distributions_rotated import (
 )  # Custom functions for 2D rotated distributions
 import json
 import sys
-import pickle
+# pickle-based in-memory input support removed for release
 
 # In-memory sheets storage when run with --input-pickle
 _INMEM_DFS = None
@@ -1848,7 +1848,7 @@ if __name__ == '__main__':
     parser.add_argument('--metrics-nr-final', type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--metrics-ntheta-final', type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--metrics-r-margin', type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument('--input-pickle', default=None, help=argparse.SUPPRESS)
+    # Removed --input-pickle support; keep input-csv for CSV single-sheet paths
     parser.add_argument('--input-csv', default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -1862,17 +1862,7 @@ if __name__ == '__main__':
     # If an explicit input CSV path was provided, prefer it as the input file
     if getattr(args, 'input_csv', None):
         args.file = args.input_csv
-    # If an input-pickle was provided, load it and enable in-memory reads.
-    if getattr(args, 'input_pickle', None):
-        try:
-            with open(args.input_pickle, 'rb') as fh:
-                dfs = pickle.load(fh)
-            enable_inmemory_reads(dfs)
-            # Use sentinel file path to trigger in-memory reads
-            args.file = '__INMEM__'
-        except Exception as e:
-            print(f"Failed to load input pickle: {e}")
-            sys.exit(1)
+    # Note: in-memory pickled input support removed for release.
 
     # If args.file is a multi-sheet CSV, parse into in-memory sheets and enable reads
     if isinstance(args.file, str) and args.file.lower().endswith('.csv'):

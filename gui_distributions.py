@@ -7,6 +7,7 @@ import re
 import traceback
 import ast
 from pathlib import Path
+import logging
  
 # Minimal DATA_TYPES structure required by the GUI module. This mirrors the
 # structure expected by the rest of the code and provides reasonable defaults
@@ -2451,15 +2452,15 @@ class ExtendedGUI:
                 # Apply preset without showing modal (toggle should not show the modal)
                 try:
                     self.suppress_standard_apply_modals = True
-                    print(f"DEBUG: toggle_psf_mode invoking on_mm_psf_standard_selected (mode=standard) for {data_type_key}")
+                    logging.debug("toggle_psf_mode invoking on_mm_psf_standard_selected (mode=standard) for %s", data_type_key)
                     self.on_mm_psf_standard_selected(data_type_key)
                 finally:
                     self.suppress_standard_apply_modals = False
-                print(f"DEBUG: toggle_psf_mode finished on_mm_psf_standard_selected, calling enforce_psf_alpha_ui")
+                logging.debug("toggle_psf_mode finished on_mm_psf_standard_selected, calling enforce_psf_alpha_ui")
                 try:
                     self.enforce_psf_alpha_ui(data_type_key)
                 except Exception as e:
-                    print(f"DEBUG: enforce_psf_alpha_ui raised in toggle_psf_mode: {e}")
+                    logging.debug("enforce_psf_alpha_ui raised in toggle_psf_mode: %s", e)
             else:
                 std_combo.config(state='disabled')
 
