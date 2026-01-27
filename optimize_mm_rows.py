@@ -318,7 +318,7 @@ def _azimuthal_place_mm_config(
     hew_cache: dict[int, float] = {}
     for mm_num in mm_numbers:
         if mm_num not in hew_cache:
-            hew_cache[mm_num] = compute_individual_mm_hew(
+            hew_cache[mm_num] = compute_mm_hew_at_origin(
                 base_params,
                 mm_num,
                 mm_config_df=mm_config,
@@ -480,7 +480,7 @@ def _xaxis_place_mm_config(
     mm_hew_pairs: list[tuple[int, float]] = []
     for mm_num in mm_numbers:
         if mm_num not in hew_cache:
-            hew_cache[mm_num] = compute_individual_mm_hew(
+            hew_cache[mm_num] = compute_mm_hew_at_origin(
                 base_params,
                 mm_num,
                 mm_config_df=mm_config,
@@ -693,7 +693,7 @@ def _elliptical_place_mm_config(
         mm_hew_pairs: list[tuple[int, float]] = []
         for mm_num in row_mm:
             if mm_num not in hew_cache:
-                hew_cache[mm_num] = compute_individual_mm_hew(
+                hew_cache[mm_num] = compute_mm_hew_at_origin(
                     base_params,
                     mm_num,
                     mm_config_df=mm_config,
@@ -737,6 +737,23 @@ def _elliptical_place_mm_config(
 
 
 def load_all_sheets(path: str) -> dict:
+    # Support in-memory sentinel and CSV-only inputs.
+    try:
+        if isinstance(path, str) and path == '__INMEM__':
+            # pd.read_excel has been overridden by main.py to serve in-memory dicts
+            try:
+                return pd.read_excel('__INMEM__', sheet_name=None)
+            except Exception:
+                return {}
+        if isinstance(path, str) and str(path).lower().endswith('.csv'):
+            try:
+                df = pd.read_csv(path)
+                return {'MM_PSF': df}
+            except Exception:
+                return {}
+    except Exception:
+        pass
+
     xls = pd.ExcelFile(path, engine="openpyxl")
     sheets = {}
     for name in xls.sheet_names:
@@ -758,6 +775,32 @@ def _write_optimised_workbook_preserving_formatting(
     - Atomic replace into output_path
     """
     from openpyxl import load_workbook
+    import tempfile
+
+    # If input_path is the in-memory sentinel, materialize a temporary
+    # workbook from the in-memory sheets (formatting will be lost).
+    created_tmp_input = None
+    if isinstance(input_path, str) and input_path == '__INMEM__':
+        try:
+            sheets = load_all_sheets(input_path)
+            tf = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
+            tmp_input_path = tf.name
+            tf.close()
+            with pd.ExcelWriter(tmp_input_path, engine='openpyxl') as writer:
+                for name, df in sheets.items():
+                    if df is None:
+                        continue
+                    try:
+                        df.to_excel(writer, sheet_name=name, index=False)
+                    except Exception:
+                        try:
+                            pd.DataFrame(df).to_excel(writer, sheet_name=name, index=False)
+                        except Exception:
+                            pass
+            created_tmp_input = tmp_input_path
+            input_path = tmp_input_path
+        except Exception:
+            created_tmp_input = None
 
     base_out, ext_out = os.path.splitext(output_path)
     tmp_output_path = f"{base_out}.tmp.{os.getpid()}{ext_out}"
@@ -851,6 +894,13 @@ def _write_optimised_workbook_preserving_formatting(
 
     wb.save(tmp_output_path)
     os.replace(tmp_output_path, output_path)
+
+    # Clean up any temporary input we created for __INMEM__ materialization
+    try:
+        if created_tmp_input is not None:
+            os.remove(created_tmp_input)
+    except Exception:
+        pass
 
 
 def compute_theta_maps(mm_config_df: pd.DataFrame) -> tuple[dict, dict]:
@@ -1552,15 +1602,25 @@ def hew_fast_approximate(df: pd.DataFrame) -> float:
         cx = float((df["mux"] * df["weight"]).sum() / total_weight)
         cy = float((df["muy"] * df["weight"]).sum() / total_weight)
     
+    # Enforce a small sigma floor to avoid zero-width Gaussians which raise
+    # in the Gaussian implementation and break approximate HEW computations.
+    MIN_SIG_M = 1e-9
+    if 'sigmax' in df.columns:
+        df['sigmax'] = np.maximum(df['sigmax'].to_numpy(dtype=float, copy=False), MIN_SIG_M)
+    if 'sigmay' in df.columns:
+        df['sigmay'] = np.maximum(df['sigmay'].to_numpy(dtype=float, copy=False), MIN_SIG_M)
+
     max_sigma = max(df["sigmax"].max(), df["sigmay"].max())
     max_center = np.sqrt((df["mux"] - cx) ** 2 + (df["muy"] - cy) ** 2).max()
-    # Increase radius margin and sampling substantially to improve convergence
-    # for demanding accuracy targets (tradeoff: slower runtime).
-    r_max = max(max_center + 10.0 * max_sigma, 1e-6)
+    # Reduce radius margin and sampling to make placement/approx HEW fast.
+    # Placement uses this approximate HEW many times; prioritize speed over
+    # perfect accuracy. Use conservative caps to avoid runaway cost for
+    # pseudo-Voigt heavy tails.
+    r_max = max(max_center + 4.0 * max_sigma, 1e-6)
 
-    # High-resolution grid: increase radial sampling strongly (primary limiter)
-    # and use dense azimuthal sampling to avoid any angular discretization bias.
-    n_r, n_theta = 3200, 720
+    # Moderate-resolution grid suitable for ranking/placement decisions.
+    # These values keep runtime low while producing stable ordering of MMs.
+    n_r, n_theta = 600, 180
     theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
     r = np.linspace(0.0, r_max, n_r)
     dtheta = theta[1] - theta[0]
@@ -1602,6 +1662,183 @@ def hew_fast_approximate(df: pd.DataFrame) -> float:
     # Use local cubic interpolation for the 50% radius, then return HEW diameter
     radius50 = _radius_for_fraction(frac, r, target=0.5)
     return float(2.0 * radius50)
+
+
+def hew_fast_approximate_center(df: pd.DataFrame, cx: float, cy: float) -> float:
+    """Approximate HEW computed with a fixed center (cx, cy) instead of using
+    the dataset centroid. Useful for ranking single-MM PSFs with respect to the
+    instrument origin.
+    """
+    normalize = True
+    # use the same sigma floor as hew_fast_approximate
+    MIN_SIG_M = 1e-9
+    if 'sigmax' in df.columns:
+        df['sigmax'] = np.maximum(df['sigmax'].to_numpy(dtype=float, copy=False), MIN_SIG_M)
+    if 'sigmay' in df.columns:
+        df['sigmay'] = np.maximum(df['sigmay'].to_numpy(dtype=float, copy=False), MIN_SIG_M)
+
+    max_sigma = max(df['sigmax'].max(), df['sigmay'].max())
+    max_center = np.sqrt((df['mux'] - cx) ** 2 + (df['muy'] - cy) ** 2).max()
+    r_max = max(max_center + 4.0 * max_sigma, 1e-6)
+
+    n_r, n_theta = 600, 180
+    theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
+    r = np.linspace(0.0, r_max, n_r)
+    dtheta = theta[1] - theta[0]
+    dr = r[1] - r[0] if n_r > 1 else r_max
+    R, TH = np.meshgrid(r, theta)
+    Xp = cx + R * np.cos(TH)
+    Yp = cy + R * np.sin(TH)
+    Zp = np.zeros_like(Xp)
+
+    for _, row in df.iterrows():
+        dist_type = row.get('distribution', 'gaussian')
+        if dist_type in ['pseudo-voigt', 'voigt']:
+            Zp += pseudo_voigt_2d_rotated(
+                Xp, Yp,
+                muazi=row['mux'], murad=row['muy'],
+                sigmaazi=row['sigmax'], sigmarad=row['sigmay'],
+                theta=row['theta_degrees'],
+                alphaazi=row.get('alpha_azi', 0.5),
+                alpharad=row.get('alpha_rad', 0.5),
+                amplitude=row['weight'],
+                normalize=normalize,
+                degrees=True,
+            )
+        else:
+            Zp += gaussian_2d_rotated(
+                Xp, Yp,
+                mux=row['mux'], muy=row['muy'],
+                sigmax=row['sigmax'], sigmay=row['sigmay'],
+                theta=row['theta_degrees'],
+                amplitude=row['weight'],
+                normalize=normalize,
+                degrees=True,
+            )
+
+    radial_energy = np.sum(Zp * R, axis=0) * dtheta
+    cumulative = np.cumsum(radial_energy * dr)
+    total_energy = cumulative[-1] if cumulative.size else 1.0
+    frac = cumulative / total_energy if total_energy > 0 else cumulative
+    radius50 = _radius_for_fraction(frac, r, target=0.5)
+    return float(2.0 * radius50)
+
+
+def compute_mm_hew_at_origin(
+    params_df: pd.DataFrame,
+    mm_num: int,
+    mm_config_df: pd.DataFrame | None = None,
+    alignment_by_pos: dict[int, dict] | None = None,
+    gravity_by_pos: dict[int, dict] | None = None,
+    thermal_by_pos: dict[int, dict] | None = None,
+) -> float:
+    """Compute the HEW for a single MM measured about the origin (0,0).
+
+    This constructs a single-row DataFrame for the MM with mux/muy set to the
+    MM's position including alignment/gravity/thermal deltas (if mm_config_df
+    is provided) and returns the approximate HEW computed about (0,0).
+    """
+    mm_params = params_df[params_df['MM #'] == mm_num]
+    if mm_params.empty:
+        return float('inf')
+
+    # Build a single-row DF matching hew_fast_approximate expectations
+    row = mm_params.iloc[0].copy()
+    # Default mux/muy from intrinsic polar offsets
+    mux = 0.0
+    muy = 0.0
+    theta_deg = 0.0
+
+    if mm_config_df is not None:
+        try:
+            slot_row = mm_config_df[mm_config_df['MM #'].astype(int) == int(mm_num)].iloc[0]
+        except Exception:
+            slot_row = None
+        if slot_row is not None:
+            x_mm = float(slot_row.get('x_MM [m]', 0.0))
+            y_mm = float(slot_row.get('y_MM [m]', 0.0))
+            r_mm = float(slot_row.get('r_MM [m]', 0.0))
+            if r_mm == 0.0:
+                r_mm = float(np.hypot(x_mm, y_mm)) if (x_mm or y_mm) else 1e-9
+            # compute polar offsets including per-position deltas
+            m_rad = float(row.get('m_rad', 0.0))
+            m_azi = float(row.get('m_azi', 0.0))
+            pos_num = None
+            if 'Position #' in mm_config_df.columns:
+                try:
+                    pos_num = int(float(slot_row.get('Position #')))
+                except Exception:
+                    pos_num = None
+
+            # Apply alignment deltas to polar offsets
+            if pos_num is not None and alignment_by_pos and pos_num in alignment_by_pos:
+                m_rad += float(alignment_by_pos[pos_num].get('d_align_rad', 0.0))
+                m_azi += float(alignment_by_pos[pos_num].get('d_align_azi', 0.0))
+
+            # rotz coupling
+            d_rotz_arcsec = 0.0
+            if alignment_by_pos and pos_num in alignment_by_pos:
+                d_rotz_arcsec += float(alignment_by_pos[pos_num].get('d_align_rotz', 0.0))
+            if gravity_by_pos and pos_num in gravity_by_pos:
+                d_rotz_arcsec += float(gravity_by_pos[pos_num].get('d_grav_rotz', 0.0))
+            if thermal_by_pos and pos_num in thermal_by_pos:
+                d_rotz_arcsec += float(thermal_by_pos[pos_num].get('d_therm_rotz', 0.0))
+            if d_rotz_arcsec != 0.0:
+                d_rotz_rad = np.radians(d_rotz_arcsec / 3600.0)
+                m_azi += r_mm * d_rotz_rad
+
+            # Convert polar->cartesian using same convention
+            u_rad_x = x_mm / r_mm
+            u_rad_y = y_mm / r_mm
+            u_azi_x = -y_mm / r_mm
+            u_azi_y = x_mm / r_mm
+            mux = u_rad_x * m_rad + u_azi_x * m_azi
+            muy = u_rad_y * m_rad + u_azi_y * m_azi
+
+            # Apply gravity/thermal xy
+            if gravity_by_pos and pos_num in gravity_by_pos:
+                mux += float(gravity_by_pos[pos_num].get('d_grav_x', 0.0))
+                muy += float(gravity_by_pos[pos_num].get('d_grav_y', 0.0))
+            if thermal_by_pos and pos_num in thermal_by_pos:
+                mux += float(thermal_by_pos[pos_num].get('d_therm_x', 0.0))
+                muy += float(thermal_by_pos[pos_num].get('d_therm_y', 0.0))
+
+            # z projection
+            dz = 0.0
+            if alignment_by_pos and pos_num in alignment_by_pos:
+                dz += float(alignment_by_pos[pos_num].get('d_align_z', 0.0))
+            if gravity_by_pos and pos_num in gravity_by_pos:
+                dz += float(gravity_by_pos[pos_num].get('d_grav_z', 0.0))
+            if thermal_by_pos and pos_num in thermal_by_pos:
+                dz += float(thermal_by_pos[pos_num].get('d_therm_z', 0.0))
+            if dz != 0.0:
+                denom = 12.0 - float(slot_row.get('z_MM', 0.0))
+                if denom != 0.0:
+                    mux += dz * float(slot_row.get('x_MM [m]', 0.0)) / denom
+                    muy += dz * float(slot_row.get('y_MM [m]', 0.0)) / denom
+
+            # Theta for the slot
+            theta_deg = float(np.degrees(np.arctan2(float(y_mm), float(x_mm)))) if (x_mm or y_mm) else 0.0
+            if theta_deg < 0:
+                theta_deg += 360.0
+
+    # Build single-row DataFrame
+    single = pd.DataFrame([
+        {
+            'MM #': int(row.get('MM #')),
+            'mux': float(mux),
+            'muy': float(muy),
+            'sigmax': float(row.get('sigma_rad', row.get('sigmax', 0.0))),
+            'sigmay': float(row.get('sigma_azi', row.get('sigmay', 0.0))),
+            'theta_degrees': float(row.get('theta_degrees', theta_deg)),
+            'weight': float(row.get('weight', 1.0)),
+            'distribution': row.get('distribution', 'gaussian'),
+            'alpha_azi': row.get('alpha_azi', 0.5),
+            'alpha_rad': row.get('alpha_rad', 0.5),
+        }
+    ])
+
+    return hew_fast_approximate_center(single, 0.0, 0.0)
 
 
 def _load_base_params_from_workbook(input_path: str) -> pd.DataFrame:

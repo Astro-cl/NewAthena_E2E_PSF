@@ -3882,8 +3882,21 @@ class ExtendedGUI:
                         except Exception:
                             g['alpha_azi'] = None
 
-                    g.loc[gaussian_mask, 'alpha_rad'] = '-'
-                    g.loc[gaussian_mask, 'alpha_azi'] = '-'
+                    # Use NaN for numeric alpha columns to avoid dtype conflicts
+                    import numpy as _np
+                    if 'alpha_rad' in g.columns:
+                        # preserve object columns (custom PSF) but set numeric entries to NaN
+                        try:
+                            g['alpha_rad'] = pd.to_numeric(g['alpha_rad'], errors='coerce')
+                            g.loc[gaussian_mask, 'alpha_rad'] = _np.nan
+                        except Exception:
+                            g.loc[gaussian_mask, 'alpha_rad'] = None
+                    if 'alpha_azi' in g.columns:
+                        try:
+                            g['alpha_azi'] = pd.to_numeric(g['alpha_azi'], errors='coerce')
+                            g.loc[gaussian_mask, 'alpha_azi'] = _np.nan
+                        except Exception:
+                            g.loc[gaussian_mask, 'alpha_azi'] = None
                     generated = g
 
                 # If a standard preset with variable sigmas was selected, sample

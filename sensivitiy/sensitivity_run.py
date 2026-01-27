@@ -40,6 +40,29 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
+def write_multisheet_csv(sheets: dict, out_path: Path):
+    """Write a single CSV file containing multiple named sheets.
+
+    Each sheet is written preceded by a marker line:
+      # sheet: Sheet Name
+
+    This format is readable by `parse_multisheet_csv` in `main.py`.
+    """
+    with open(out_path, 'w', encoding='utf-8', newline='') as fh:
+        first = True
+        for name, df in sheets.items():
+            if not first:
+                fh.write('\n')
+            first = False
+            fh.write(f"# sheet: {name}\n")
+            # Use pandas to_csv into a buffer then write
+            try:
+                csv_text = df.to_csv(index=False)
+            except Exception:
+                csv_text = df.to_csv(index=False, header=True)
+            fh.write(csv_text)
+
+
 def copy_baseline(baseline_path: Path, dest_dir: Path | None = None) -> Path:
     baseline = Path(baseline_path)
     if not baseline.exists():
@@ -346,6 +369,43 @@ def load_standard_alignment_defs(path: Path) -> dict:
     return std
 
 
+def _find_std_mm_psf_key(name: str, std_map: dict) -> str:
+    """Try to match a combo MM_PSF string to a key in `std_map`.
+
+    Returns the matched key (exact or fuzzy) or None if not found.
+    """
+    if not name or not std_map:
+        return None
+    try:
+        import re
+        def _norm(s):
+            s = str(s).lower()
+            s = s.replace('"', '')
+            s = re.sub(r'mm_psf\d*', '', s)
+            s = re.sub(r'[\(\)\[\]]', ' ', s)
+            s = re.sub(r'[^a-z0-9%\s]', ' ', s)
+            s = re.sub(r'\s+', ' ', s).strip()
+            return s
+
+        target = _norm(name)
+        # exact match
+        if name in std_map:
+            return name
+        # try case-insensitive exact
+        for k in std_map.keys():
+            if k.lower() == name.lower():
+                return k
+
+        # fuzzy contains / contained
+        for k in std_map.keys():
+            nk = _norm(k)
+            if nk and (nk in target or target in nk):
+                return k
+        return None
+    except Exception:
+        return None
+
+
 def load_standard_thermal_defs(path: Path) -> dict:
     """Load standard Thermal presets from the baseline workbook.
 
@@ -488,6 +548,8 @@ def main():
     p.add_argument("--dry-run", action="store_true", help="Create folders and copy baseline but don't execute driver")
     p.add_argument("--generate-only", action="store_true", help="Only generate input workbooks, do not run jobs")
     p.add_argument("--no-excel", action="store_true", help="Do not create Excel workbooks per combo; use pickled DataFrame inputs instead")
+    p.add_argument("--csv-only", action="store_true", default=True, help="Do not create Excel workbooks; generate per-combo MM_PSF CSVs and call main.py on them (default)")
+    p.add_argument("--no-csv", dest='csv_only', action='store_false', help="Disable CSV-only fast path and create Excel workbooks instead")
     p.add_argument("--force-timestamp", type=str, default=None, help="Force the UTC timestamp used in generated filenames (e.g. 20260125T000945Z)")
     args = p.parse_args()
 
@@ -514,8 +576,12 @@ def main():
         input_dir.mkdir(parents=True, exist_ok=True)
     if args.baseline:
         try:
-            out = copy_baseline(Path(args.baseline), dest_dir=input_dir)
-            print(f"Copied baseline to: {out}")
+            if not getattr(args, 'csv_only', False):
+                out = copy_baseline(Path(args.baseline), dest_dir=input_dir)
+                print(f"Copied baseline to: {out}")
+            else:
+                # For csv-only mode we do not need to copy the baseline workbook
+                print(f"csv-only mode: skipping baseline workbook copy ({args.baseline})")
         except Exception as e:
             print(f"Failed to copy baseline: {e}")
             return
@@ -678,41 +744,86 @@ def main():
             write_sheet(workbook_path, 'MM_PSF', df_gen)
             return
 
-        # Header row (row 0) may be shorter/longer than generated columns.
-        raw_header = raw.iloc[0].tolist() if raw.shape[0] > 0 else []
+        # Find the header row in the raw baseline sheet. Some templates include
+        # several preamble rows before the MM_PSF header (e.g. metadata), so
+        # scan for the header row by looking for expected column name fragments.
+        raw_header = []
+        header_idx = 0
+        if raw.shape[0] > 0:
+            # detect header by looking for presence of key labels in a row
+            key_frags = ['m_rad', 'm_azi', 'sigma_rad', 'sigma_azi', 'mm #']
+            max_scan = min(raw.shape[0], 200)
+            found = False
+            for r in range(max_scan):
+                row_vals = [str(x).strip().lower() for x in raw.iloc[r].tolist()]
+                matches = sum(1 for k in key_frags if any(k in v for v in row_vals))
+                if matches >= 2:
+                    header_idx = r
+                    raw_header = raw.iloc[r].tolist()
+                    found = True
+                    break
+            if not found:
+                # fallback to first row
+                header_idx = 0
+                raw_header = raw.iloc[0].tolist()
+
+        # Prepare generated column names and count before we manipulate headers.
         gen_cols = df_gen.columns.tolist()
         n_gen = len(gen_cols)
 
-        # Ensure header length at least n_gen
+        # Build the tail header directly from the raw sheet's columns that
+        # follow the left-most `n_gen` columns. This avoids slicing a
+        # potentially truncated or mis-detected `raw_header` list and keeps
+        # the preserved template columns aligned with the original layout.
+        try:
+            if raw.shape[1] > n_gen:
+                tail_header = raw.iloc[header_idx, n_gen:].tolist()
+            else:
+                tail_header = []
+            raw_header = gen_cols + tail_header
+        except Exception:
+            # On any error, fall back to using generated columns as header
+            raw_header = list(gen_cols)
+
+        # Ensure header length at least n_gen (safeguard)
         if len(raw_header) < n_gen:
-            raw_header = gen_cols + raw_header[n_gen:]
+            raw_header = gen_cols + []
 
         rows = []
+        # Preserve any preamble rows before the detected header
+        if header_idx > 0:
+            for r in range(header_idx):
+                rows.append(raw.iloc[r].tolist())
         rows.append(raw_header)
 
         # Number of per-MM rows to write
         num_mm_rows = len(df_gen)
 
-        # For each MM row, take generated values for the left columns and
-        # preserve any tail columns from the baseline raw sheet if present.
+
+        # For each MM row, take generated values for the left columns.
+        # Do NOT copy tail/template values from baseline per-row (these often
+        # represent a separate right-hand table). Instead, leave tail columns
+        # empty for per-MM rows and append any baseline template rows after
+        # all per-MM rows below.
+        tail_len = max(0, raw.shape[1] - n_gen) if raw.shape[0] > 0 else 0
         for i in range(num_mm_rows):
             gen_row = [df_gen.iloc[i].get(c) for c in gen_cols]
-            tail = []
-            raw_row_idx = i + 1
-            if raw.shape[0] > raw_row_idx:
-                # tail columns start after gen_cols count
-                if raw.shape[1] > n_gen:
-                    tail = raw.iloc[raw_row_idx, n_gen:].tolist()
-                else:
-                    tail = [None] * max(0, raw.shape[1] - n_gen)
-            else:
-                # no baseline row available; pad tails with None
-                tail = [None] * max(0, raw.shape[1] - n_gen)
+            tail = [None] * tail_len
             rows.append(gen_row + tail)
 
-        # Append any remaining template rows from the baseline that follow the per-MM rows
-        for j in range(num_mm_rows + 1, raw.shape[0]):
-            rows.append(raw.iloc[j].tolist())
+        # After writing per-MM rows, append any baseline rows that follow the
+        # per-MM block (these are template rows that should not be merged
+        # into per-MM rows).
+        template_start = header_idx + 1 + num_mm_rows
+        if raw.shape[0] > template_start:
+            for r in range(template_start, raw.shape[0]):
+                raw_row = list(raw.iloc[r].tolist())
+                # ensure row length matches header
+                if len(raw_row) < len(raw_header):
+                    raw_row = raw_row + [None] * (len(raw_header) - len(raw_row))
+                elif len(raw_row) > len(raw_header):
+                    raw_row = raw_row[:len(raw_header)]
+                rows.append(raw_row)
 
         # Write assembled rows into the workbook
         wb = load_workbook(workbook_path)
@@ -802,10 +913,16 @@ def main():
                     ws.cell(row=r, column=sigma_rad_col, value=v_sr)
                 if v_sa is not None:
                     ws.cell(row=r, column=sigma_azi_col, value=v_sa)
+                # write alpha values: numeric if fixed, otherwise write '-' to
+                # indicate not-applicable for standard gaussian presets
                 if v_ar is not None:
                     ws.cell(row=r, column=alpha_rad_col, value=v_ar)
+                else:
+                    ws.cell(row=r, column=alpha_rad_col, value='-')
                 if v_aa is not None:
                     ws.cell(row=r, column=alpha_azi_col, value=v_aa)
+                else:
+                    ws.cell(row=r, column=alpha_azi_col, value='-')
                 # Update left-side 'distribution' column if present to reflect voigt/gauss
                 try:
                     distrib_col = None
@@ -821,11 +938,120 @@ def main():
                         elif 'gauss' in lname or 'gaussian' in lname:
                             ws.cell(row=r, column=distrib_col, value='gaussian')
                         else:
-                            # leave as-is or set to chosen name for clarity
-                            ws.cell(row=r, column=distrib_col, value=str(chosen_name))
+                            # fallback: if any alpha is fixed, set as pseudo-voigt
+                            if (entry.get('alpha_rad') and isinstance(entry.get('alpha_rad'), dict) and entry.get('alpha_rad').get('dist') == 'fixed') or (entry.get('alpha_azi') and isinstance(entry.get('alpha_azi'), dict) and entry.get('alpha_azi').get('dist') == 'fixed'):
+                                ws.cell(row=r, column=distrib_col, value='pseudo-voigt')
+                            else:
+                                ws.cell(row=r, column=distrib_col, value='gaussian')
                 except Exception:
                     pass
                 break
+
+        # If the chosen preset corresponds to a standard definition that
+        # provides fixed values for sigma/alpha, enforce those fixed values
+        # in the first `num_mm` per-MM rows so generated workbooks always
+        # contain canonical numeric entries for fixed presets.
+        try:
+            if chosen_name and (std_defs or {}).get(chosen_name):
+                entry = std_defs.get(chosen_name)
+                # compute number of MM rows to enforce: prefer df_gen length
+                try:
+                    num_enforce = int(len(df_gen)) if df_gen is not None else int(num_mm)
+                except Exception:
+                    num_enforce = int(num_mm)
+
+                # find header row (assume header at row 1) and locate sigma/alpha columns
+                # tolerant matching for names like 'sigma_rad', 'sigma_rad [arcsec]', 'sigma_rad_'
+                header_cells = [str(ws.cell(row=1, column=c).value or '').strip().lower() for c in range(1, ws.max_column + 1)]
+                def _find_col(name_frag):
+                    for idx, hv in enumerate(header_cells, start=1):
+                        if name_frag in hv:
+                            return idx
+                    # try underscore-suffixed or prefix matches
+                    for idx, hv in enumerate(header_cells, start=1):
+                        if hv.replace(' ', '').startswith(name_frag.replace(' ', '')):
+                            return idx
+                    return None
+
+                sr_col_idx = _find_col('sigma_rad')
+                sa_col_idx = _find_col('sigma_azi')
+                ar_col_idx = _find_col('alpha_rad')
+                aa_col_idx = _find_col('alpha_azi')
+
+                def _val_for(param_key):
+                    v = entry.get(param_key)
+                    if isinstance(v, dict):
+                        if v.get('dist') == 'fixed':
+                            return float(v.get('value', 0.0))
+                        if v.get('dist') == 'gaussian':
+                            return float(v.get('mean', 0.0))
+                    return None
+
+                v_sr = _val_for('sigma_rad')
+                v_sa = _val_for('sigma_azi')
+                v_ar = _val_for('alpha_rad')
+                v_aa = _val_for('alpha_azi')
+
+                # write fixed values into the first num_enforce rows (rows 2..1+num_enforce)
+                for rr in range(2, min(ws.max_row, 1 + num_enforce) + 1):
+                    try:
+                        if sr_col_idx and v_sr is not None:
+                            ws.cell(row=rr, column=sr_col_idx, value=float(v_sr))
+                        if sa_col_idx and v_sa is not None:
+                            ws.cell(row=rr, column=sa_col_idx, value=float(v_sa))
+                        if ar_col_idx and v_ar is not None:
+                            ws.cell(row=rr, column=ar_col_idx, value=float(v_ar))
+                        if aa_col_idx and v_aa is not None:
+                            ws.cell(row=rr, column=aa_col_idx, value=float(v_aa))
+                    except Exception:
+                        continue
+                # Also ensure the per-MM "distribution" column (if present) is set
+                try:
+                    distrib_col = None
+                    for cidx in range(1, n_gen + 1):
+                        hv = ws.cell(row=1, column=cidx).value
+                        if isinstance(hv, str) and 'distrib' in hv.lower():
+                            distrib_col = cidx
+                            break
+                    if distrib_col is not None:
+                        lname = str(chosen_name).lower()
+                        if 'voigt' in lname or 'pseudo' in lname:
+                            dlabel = 'pseudo-voigt'
+                        elif 'gauss' in lname or 'gaussian' in lname:
+                            dlabel = 'gaussian'
+                        else:
+                            if (entry.get('alpha_rad') and isinstance(entry.get('alpha_rad'), dict) and entry.get('alpha_rad').get('dist') == 'fixed') or (entry.get('alpha_azi') and isinstance(entry.get('alpha_azi'), dict) and entry.get('alpha_azi').get('dist') == 'fixed'):
+                                dlabel = 'pseudo-voigt'
+                            else:
+                                dlabel = 'gaussian'
+                        for rr in range(2, min(ws.max_row, 1 + num_enforce) + 1):
+                            try:
+                                ws.cell(row=rr, column=distrib_col, value=dlabel)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+
+                # If any sigma/alpha definitions are non-fixed (variable preset),
+                # sample per-MM values now so the first num_enforce rows reflect
+                # the preset's distribution (gamma/gaussian/uniform) rather than
+                # leaving template placeholders or non-numeric strings.
+                try:
+                    need_sample = False
+                    for k in ('sigma_rad', 'sigma_azi', 'alpha_rad', 'alpha_azi'):
+                        vvv = entry.get(k)
+                        if isinstance(vvv, dict) and vvv.get('dist') != 'fixed':
+                            need_sample = True
+                            break
+                    # also treat preset names containing 'variable' or '%' as variable
+                    if not need_sample and isinstance(chosen_name, str) and ('variable' in chosen_name.lower() or '%' in chosen_name):
+                        need_sample = True
+                    if need_sample:
+                        _sample_per_mm_sigmas_and_write(workbook_path, std_defs, chosen_name, num_enforce)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         wb.save(workbook_path)
 
@@ -2126,6 +2352,234 @@ def main():
         parts = [f"{k}={v}" for k, v in combo.items()]
         name_suffix = '_'.join(_sanitize_filename(p) for p in parts)
         out_name = f"{ts}_{i}_{name_suffix}.xlsx"
+        # Fast CSV-only path: produce a single MM_PSF CSV per combo and skip
+        # expensive workbook copying / openpyxl operations to speed up runs.
+        if getattr(args, 'csv_only', False):
+            out_name = f"{ts}_{i}_{name_suffix}.csv"
+            out_path = input_dir / out_name
+            try:
+                # If a standard MM_PSF preset is selected, try to match it to a
+                # standard preset (supports a few label variants) and build a
+                # numeric per-MM DataFrame and write directly to CSV.
+                sd = None
+                if 'MM_PSF' in combo:
+                    mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf)
+                    if mk:
+                        sd = std_mm_psf[mk]
+                    else:
+                        # no match; silently proceed
+                        pass
+                if sd is not None:
+                    params = {}
+                    params['m_rad [arcsec]'] = ('fixed', 0.0, 0.0)
+                    params['m_azi [arcsec]'] = ('fixed', 0.0, 0.0)
+                    sr = sd.get('sigma_rad')
+                    if sr is None:
+                        params['sigma_rad [arcsec]'] = ('fixed', 0.0, 0.0)
+                    else:
+                        if sr.get('dist') == 'fixed':
+                            params['sigma_rad [arcsec]'] = ('fixed', sr.get('value', 0.0), 0.0)
+                        elif sr.get('dist') == 'gaussian':
+                            params['sigma_rad [arcsec]'] = ('gaussian', sr.get('mean', 0.0), sr.get('sigma', 0.0))
+                        else:
+                            params['sigma_rad [arcsec]'] = ('uniform', sr.get('min', 0.0), sr.get('max', 0.0))
+                    sa = sd.get('sigma_azi')
+                    if sa is None:
+                        params['sigma_azi [arcsec]'] = ('fixed', 0.0, 0.0)
+                    else:
+                        if sa.get('dist') == 'fixed':
+                            params['sigma_azi [arcsec]'] = ('fixed', sa.get('value', 0.0), 0.0)
+                        elif sa.get('dist') == 'gaussian':
+                            params['sigma_azi [arcsec]'] = ('gaussian', sa.get('mean', 0.0), sa.get('sigma', 0.0))
+                        else:
+                            params['sigma_azi [arcsec]'] = ('uniform', sa.get('min', 0.0), sa.get('max', 0.0))
+                    ar = sd.get('alpha_rad')
+                    if ar is None:
+                        params['alpha_rad'] = ('fixed', 0.5, 0.0)
+                    else:
+                        if ar.get('dist') == 'fixed':
+                            params['alpha_rad'] = ('fixed', ar.get('value', 0.5), 0.0)
+                        else:
+                            params['alpha_rad'] = ('fixed', ar.get('mean', 0.5), 0.0)
+                    aa = sd.get('alpha_azi')
+                    if aa is None:
+                        params['alpha_azi'] = ('fixed', 0.5, 0.0)
+                    else:
+                        if aa.get('dist') == 'fixed':
+                            params['alpha_azi'] = ('fixed', aa.get('value', 0.5), 0.0)
+                        else:
+                            params['alpha_azi'] = ('fixed', aa.get('mean', 0.5), 0.0)
+                    if generate_data_from_distributions is not None:
+                        df_gen = generate_data_from_distributions(params, num_mm, DATA_TYPES['MM_PSF'])
+                        df_gen.insert(0, 'MM #', mm_list[:len(df_gen)])
+                        
+                    else:
+                        df_gen = None
+                        
+
+                    # Deterministic per-MM sampling for sigma/alpha when preset
+                    # defines a non-fixed distribution (use hash of timestamp+name+i)
+                    try:
+                        pass
+                        import numpy as _np, hashlib as _hashlib
+                        entry = sd
+                        # find sigma/alpha cols (df_gen may be None when using fallback)
+                        sr_col = None
+                        sa_col = None
+                        if df_gen is not None:
+                            if 'sigma_rad [arcsec]' in df_gen.columns:
+                                sr_col = 'sigma_rad [arcsec]'
+                            else:
+                                sr_col = next((c for c in df_gen.columns if 'sigma_rad' in c.lower()), None)
+                            if 'sigma_azi [arcsec]' in df_gen.columns:
+                                sa_col = 'sigma_azi [arcsec]'
+                            else:
+                                sa_col = next((c for c in df_gen.columns if 'sigma_azi' in c.lower()), None)
+
+                        # If the GUI helper is unavailable, construct a numeric df_gen
+                        # from the standard preset entry by deterministic sampling.
+                        
+                        if generate_data_from_distributions is None and isinstance(entry, dict):
+                            # build a minimal dataframe matching expected CSV layout
+                            import pandas as _pd
+                            n = int(num_mm)
+                            cols = [
+                                'MM #', 'm_rad [arcsec]', 'm_azi [arcsec]',
+                                'sigma_rad [arcsec]', 'sigma_azi [arcsec]', 'distribution',
+                                'alpha_rad', 'alpha_azi'
+                            ]
+                            rows = []
+                            # seed base for deterministic sampling
+                            seed_base = int(_hashlib.sha256((out_name + ':' + str(mk or combo.get('MM_PSF'))).encode('utf-8')).hexdigest()[:16], 16)
+
+                            def _sample(defn, idx, base_seed):
+                                if defn is None:
+                                    return 0.0
+                                dist = defn.get('dist')
+                                rng = _np.random.default_rng(base_seed + int(idx))
+                                if dist == 'fixed':
+                                    return float(defn.get('value', 0.0))
+                                if dist == 'gaussian':
+                                    mu = float(defn.get('mean', 0.0))
+                                    sigma = float(defn.get('sigma', 0.0))
+                                    if sigma <= 0 or mu <= 0:
+                                        return float(mu)
+                                    # truncated normal
+                                    val = rng.normal(mu, sigma)
+                                    attempts = 0
+                                    while val <= 0 and attempts < 100:
+                                        val = rng.normal(mu, sigma)
+                                        attempts += 1
+                                    return float(val if val > 0 else max(mu, 1e-6))
+                                if dist == 'gamma':
+                                    mu = float(defn.get('mean', 0.0))
+                                    sigma = float(defn.get('sigma', 0.0))
+                                    if sigma <= 0 or mu <= 0:
+                                        return float(mu if mu > 0 else 1e-6)
+                                    k = (mu / sigma) ** 2
+                                    theta = (sigma ** 2) / mu
+                                    return float(rng.gamma(k, theta))
+                                if dist == 'uniform':
+                                    lo = float(defn.get('min', 0.0))
+                                    hi = float(defn.get('max', lo))
+                                    return float(rng.uniform(lo, hi))
+                                return 0.0
+
+                            for i_idx in range(n):
+                                v_sr = _sample(entry.get('sigma_rad'), i_idx, seed_base)
+                                v_sa = _sample(entry.get('sigma_azi'), i_idx, seed_base + 0x1000)
+                                # alpha values: fixed if provided, else default 0.5
+                                ar = entry.get('alpha_rad')
+                                aa = entry.get('alpha_azi')
+                                if isinstance(ar, dict) and ar.get('dist') == 'fixed':
+                                    v_ar = float(ar.get('value', 0.5))
+                                elif isinstance(ar, dict) and ar.get('dist') in ('gaussian','gamma','uniform'):
+                                    v_ar = _sample(ar, i_idx, seed_base + 0x2000)
+                                else:
+                                    v_ar = 0.5
+                                if isinstance(aa, dict) and aa.get('dist') == 'fixed':
+                                    v_aa = float(aa.get('value', 0.5))
+                                elif isinstance(aa, dict) and aa.get('dist') in ('gaussian','gamma','uniform'):
+                                    v_aa = _sample(aa, i_idx, seed_base + 0x3000)
+                                else:
+                                    v_aa = 0.5
+                                # choose distribution label
+                                lname = str(mk or combo.get('MM_PSF') or '').lower()
+                                if 'voigt' in lname or 'pseudo' in lname:
+                                    dlab = 'pseudo-voigt'
+                                elif 'gauss' in lname or 'gaussian' in lname:
+                                    dlab = 'gaussian'
+                                else:
+                                    dlab = 'gaussian'
+                                rows.append([i_idx+1, 0.0, 0.0, float(v_sr), float(v_sa), dlab, float(v_ar), float(v_aa)])
+                            df_gen = _pd.DataFrame(rows, columns=cols)
+                            # debug: report constructed df_gen
+                            try:
+                                pass
+                            except Exception:
+                                pass
+                            # ensure df_gen has expected column names used below
+                            if 'MM #' in df_gen.columns and sr_col is None:
+                                sr_col = 'sigma_rad [arcsec]'
+                                sa_col = 'sigma_azi [arcsec]'
+                        else:
+                            # perform sampling row-wise using existing df_gen
+                            if sr_col and sa_col:
+                                for ridx in range(len(df_gen)):
+                                    seed_src = f"{out_name}:{mk or combo.get('MM_PSF')}:{ridx}"
+                                    h = int(_hashlib.sha256(seed_src.encode('utf-8')).hexdigest()[:16], 16)
+                                    rng = _np.random.RandomState(h % (2**32))
+                                    if entry and isinstance(entry.get('sigma_rad'), dict) and entry.get('sigma_rad').get('dist') != 'fixed':
+                                        mu = float(entry['sigma_rad'].get('mean', 0.0))
+                                        sigma = float(entry['sigma_rad'].get('sigma', max(1e-6, mu*0.1)))
+                                        df_gen.at[ridx, sr_col] = float(max(1e-9, rng.normal(mu, sigma)))
+                                    if entry and isinstance(entry.get('sigma_azi'), dict) and entry.get('sigma_azi').get('dist') != 'fixed':
+                                        mu2 = float(entry['sigma_azi'].get('mean', 0.0))
+                                        sigma2 = float(entry['sigma_azi'].get('sigma', max(1e-6, mu2*0.1)))
+                                        df_gen.at[ridx, sa_col] = float(max(1e-9, rng.normal(mu2, sigma2)))
+                    except Exception as e:
+                        pass
+
+                    try:
+                        # Build a sheets dict that contains MM_PSF and any baseline sheets
+                        sheets_out = {}
+                        try:
+                            # prefer existing sheets if created earlier
+                            if 'sheets' in locals() and isinstance(sheets, dict):
+                                sheets_out.update(sheets)
+                        except Exception:
+                            pass
+                        sheets_out['MM_PSF'] = df_gen
+                        # If out_path is a CSV, write as multi-sheet CSV; otherwise fallback to single-sheet CSV
+                        if str(out_path).lower().endswith('.csv'):
+                            write_multisheet_csv(sheets_out, Path(out_path))
+                        else:
+                            # write MM_PSF only into CSV for backwards compatibility
+                            df_gen.to_csv(out_path, index=False)
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: try to read MM_PSF from baseline and write CSV
+                    try:
+                        base_df = pd.read_excel(baseline, sheet_name='MM_PSF', engine='openpyxl')
+                        # write baseline sheets as a multi-sheet CSV if requested
+                        try:
+                            sheets_base = pd.read_excel(baseline, sheet_name=None, engine='openpyxl')
+                            write_multisheet_csv(sheets_base, Path(out_path))
+                        except Exception:
+                            base_df.to_csv(out_path, index=False)
+                    except Exception:
+                        # if all fails, write an empty placeholder
+                        pd.DataFrame().to_csv(out_path, index=False)
+            except Exception:
+                pass
+            input_files.append((out_path, combo))
+            combo_id_map[out_name] = i
+            combo_id_map[out_name + '.pkl'] = i
+            combo_id_map[out_name + '.xlsx.pkl'] = i
+            combo_id_map[f"{out_name}.pkl"] = i
+            combo_id_map[f"{out_name}.xlsx.pkl"] = i
+            continue
         if args.no_excel:
             # create pickled sheets dict instead of Excel workbook
             try:
@@ -2133,9 +2587,11 @@ def main():
             except Exception:
                 sheets = {}
             # If MM_PSF requested and we can generate, build df_gen and replace
-            if 'MM_PSF' in combo and combo['MM_PSF'] in std_mm_psf and generate_data_from_distributions is not None:
+            # Resolve MM_PSF preset name via fuzzy matching to support label variants
+            mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
+            if mk is not None and generate_data_from_distributions is not None:
                 try:
-                    sd = std_mm_psf[combo['MM_PSF']]
+                    sd = std_mm_psf[mk]
                     params = {}
                     params['m_rad [arcsec]'] = ('fixed', 0.0, 0.0)
                     params['m_azi [arcsec]'] = ('fixed', 0.0, 0.0)
@@ -2183,7 +2639,7 @@ def main():
                         # deterministic sampling similar to _sample_per_mm_sigmas_and_write
                         import numpy as _np
                         import hashlib as _hashlib
-                        entry = std_mm_psf.get(combo.get('MM_PSF'))
+                        entry = std_mm_psf.get(mk)
                         if entry is not None:
                             mm_df = sheets.get('MM_PSF')
                             if isinstance(mm_df, pd.DataFrame):
@@ -2214,7 +2670,7 @@ def main():
                                             return _np.zeros(size)
 
                                         # seed on out_name + preset for reproducibility
-                                        h = int(_hashlib.sha256((out_name + str(combo.get('MM_PSF'))).encode('utf-8')).hexdigest()[:8], 16)
+                                        h = int(_hashlib.sha256((out_name + str(mk)).encode('utf-8')).hexdigest()[:8], 16)
                                         rng = _np.random.default_rng(h)
                                         sr_def = entry.get('sigma_rad')
                                         sa_def = entry.get('sigma_azi')
@@ -2262,7 +2718,7 @@ def main():
                                             dist_cols = [c for c in mm_df.columns if isinstance(c, str) and 'distrib' in c.lower()]
                                             if dist_cols:
                                                 dcol = dist_cols[0]
-                                                lname = str(combo.get('MM_PSF')).lower()
+                                                lname = str(mk).lower() if mk is not None else str(combo.get('MM_PSF')).lower()
                                                 if 'voigt' in lname or 'pseudo' in lname:
                                                     mm_df[dcol] = 'pseudo-voigt'
                                                 elif 'gauss' in lname or 'gaussian' in lname:
@@ -2305,14 +2761,16 @@ def main():
                 shutil.copy2(baseline, tmp_xlsx)
                 # If MM_PSF preset selected, attempt to preserve template and expand
                 try:
-                    if 'MM_PSF' in combo and combo['MM_PSF'] in (std_mm_psf or {}):
+                    # try to match preset name and expand/sample using canonical key
+                    mk_tmp = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
+                    if mk_tmp is not None:
                         try:
                             # attempt the preservative template write + expansion
-                            write_mmpsf_preserve_template_and_expand(baseline, tmp_xlsx, df_gen if 'df_gen' in locals() else None, std_mm_psf, combo.get('MM_PSF'))
+                            write_mmpsf_preserve_template_and_expand(baseline, tmp_xlsx, df_gen if 'df_gen' in locals() else None, std_mm_psf, mk_tmp)
                         except Exception:
                             pass
                         try:
-                            _sample_per_mm_sigmas_and_write(tmp_xlsx, std_mm_psf, combo.get('MM_PSF'), num_mm)
+                            _sample_per_mm_sigmas_and_write(tmp_xlsx, std_mm_psf, mk_tmp, num_mm)
                         except Exception:
                             pass
                 except Exception:
@@ -2602,7 +3060,8 @@ def main():
             pass
 
         # If combo includes MM_PSF and it matches a standard preset, generate MM_PSF sheet
-        if 'MM_PSF' in combo and combo['MM_PSF'] in std_mm_psf and generate_data_from_distributions is not None:
+        mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
+        if mk is not None and generate_data_from_distributions is not None:
             # If using no-excel/pickle mode we already populated sheets['MM_PSF'] earlier
             if args.no_excel and str(out_path).endswith('.pkl'):
                 # already created in-memory MM_PSF; skip file-based generation
@@ -2664,18 +3123,18 @@ def main():
                     df_gen.insert(0, 'MM #', mm_list[:len(df_gen)])
                     # write generated MM_PSF preserving baseline template columns if present
                     try:
-                        write_mmpsf_preserve_template_and_expand(baseline, out_path, df_gen, std_mm_psf, combo.get('MM_PSF'))
+                        write_mmpsf_preserve_template_and_expand(baseline, out_path, df_gen, std_mm_psf, mk)
                     except Exception:
                         write_sheet(out_path, 'MM_PSF', df_gen)
                     print(f"Wrote generated MM_PSF to {out_path.name}")
                     # Ensure per-MM sigma columns are numeric for this input immediately
                     try:
-                        _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, combo.get('MM_PSF'), num_mm)
+                        _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
                     except Exception:
                         pass
                 except Exception as e:
                     print(f"Failed to generate MM_PSF for combo {combo}: {e}")
-        elif 'MM_PSF' in combo and combo['MM_PSF'] in std_mm_psf:
+        elif mk is not None:
             if args.no_excel and str(out_path).endswith('.pkl'):
                 # skip file-based expansion when using pickled sheets
                 pass
@@ -2692,13 +3151,13 @@ def main():
                         df_gen = df_base.iloc[:num_mm].reset_index(drop=True)
                     # write preserving template and expanding chosen preset into numeric template cells
                     try:
-                        write_mmpsf_preserve_template_and_expand(baseline, out_path, df_gen, std_mm_psf, combo.get('MM_PSF'))
+                        write_mmpsf_preserve_template_and_expand(baseline, out_path, df_gen, std_mm_psf, mk)
                     except Exception:
                         write_sheet(out_path, 'MM_PSF', df_gen)
                     print(f"Wrote MM_PSF (expanded template) to {out_path.name}")
                     # Ensure per-MM sigma columns are numeric for this input immediately
                     try:
-                        _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, combo.get('MM_PSF'), num_mm)
+                        _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
                     except Exception:
                         pass
                 except Exception as e:
@@ -2892,6 +3351,52 @@ def main():
                         print(f"Warning: fallback alignment application failed for preset '{match_key}': {ex}")
         except Exception:
             pass
+        # If requested, produce a CSV-only input for main.py instead of Excel/pickle.
+        if getattr(args, 'csv_only', False):
+            try:
+                import tempfile as _tmp_tempfile
+                # Prefer sheets['MM_PSF'] if available (created earlier), else df_gen
+                df_to_write = None
+                try:
+                    if 'sheets' in locals() and isinstance(sheets, dict) and 'MM_PSF' in sheets:
+                        df_to_write = sheets.get('MM_PSF')
+                except Exception:
+                    df_to_write = None
+                if df_to_write is None:
+                    try:
+                        df_to_write = df_gen
+                    except Exception:
+                        df_to_write = None
+
+                if df_to_write is None:
+                    # last resort: try to read MM_PSF from baseline
+                    try:
+                        df_to_write = pd.read_excel(baseline, sheet_name='MM_PSF', engine='openpyxl')
+                    except Exception:
+                        df_to_write = None
+
+                if df_to_write is None:
+                    # no MM_PSF data available; fallback to copying baseline as CSV (best-effort)
+                    csv_path = input_dir / out_name.replace('.xlsx', '.csv')
+                    try:
+                        baseline_df = pd.read_excel(baseline, sheet_name='MM_PSF', engine='openpyxl')
+                        baseline_df.to_csv(csv_path, index=False)
+                        out_path = csv_path
+                    except Exception:
+                        # leave out_path as-is if we cannot produce CSV
+                        pass
+                else:
+                    # Create CSV file inside input_dir (ephemeral if non-persistent)
+                    csv_name = out_name.replace('.xlsx', '.csv')
+                    csv_path = input_dir / csv_name
+                    try:
+                        df_to_write.to_csv(csv_path, index=False)
+                        out_path = csv_path
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         input_files.append((out_path, combo))
         # Record multiple filename variants so later lookups (including '.pkl'
         # or '.xlsx.pkl' produced by the --no-excel flow) can find the combo id.
@@ -2901,7 +3406,10 @@ def main():
         combo_id_map[f"{out_name}.pkl"] = i
         combo_id_map[f"{out_name}.xlsx.pkl"] = i
 
-    print(f"Generated {len(input_files)} input workbooks in {input_dir}")
+    if getattr(args, 'csv_only', False):
+        print(f"Generated {len(input_files)} input CSVs in {input_dir}")
+    else:
+        print(f"Generated {len(input_files)} input workbooks in {input_dir}")
     if args.generate_only:
         print("generate-only: skipping job execution and post-processing")
         return
@@ -2909,7 +3417,8 @@ def main():
     # Enforce standard MM_PSF template and numeric per-MM sigmas for all inputs
     for out_path, combo in input_files:
         try:
-            if 'MM_PSF' in combo and combo.get('MM_PSF') in (std_mm_psf or {}):
+            mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
+            if mk is not None:
                 # skip file-based enforcement for pickled in-memory inputs
                 if args.no_excel and str(out_path).endswith('.pkl'):
                     continue
@@ -2926,7 +3435,7 @@ def main():
 
                 if df_gen is not None:
                     try:
-                        write_mmpsf_preserve_template_and_expand(baseline, out_path, df_gen, std_mm_psf, combo.get('MM_PSF'))
+                        write_mmpsf_preserve_template_and_expand(baseline, out_path, df_gen, std_mm_psf, mk)
                     except Exception:
                         try:
                             write_sheet(out_path, 'MM_PSF', df_gen)
@@ -2935,7 +3444,7 @@ def main():
 
                 # Ensure per-MM sigma columns are numeric (deterministic sampling when needed)
                 try:
-                    _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, combo.get('MM_PSF'), num_mm)
+                    _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
                 except Exception:
                     pass
         except Exception:
@@ -2972,7 +3481,8 @@ def main():
             else:
                 bad = True
 
-            if bad and combo.get('MM_PSF') and combo.get('MM_PSF') in (std_mm_psf or {}):
+            mk = _find_std_mm_psf_key(combo.get('MM_PSF'), std_mm_psf) if 'MM_PSF' in combo else None
+            if bad and mk is not None:
                 # attempt to repair by expanding the template for this preset
                 # For pickled in-memory inputs we cannot call openpyxl on the path; skip repair.
                 if args.no_excel and str(path).endswith('.pkl'):
@@ -2982,7 +3492,7 @@ def main():
                         # read left-side per-MM columns to build df_gen (heuristic 10 columns)
                         left_cols_count = 10
                         df_gen = mm_df.iloc[:num_mm, :left_cols_count].reset_index(drop=True)
-                        write_mmpsf_preserve_template_and_expand(baseline, fp, df_gen, std_mm_psf, combo.get('MM_PSF'))
+                        write_mmpsf_preserve_template_and_expand(baseline, fp, df_gen, std_mm_psf, mk)
                         # reload mm_df after repair
                         mm_df = pd.read_excel(fp, sheet_name='MM_PSF', engine='openpyxl')
                         print(f"Repaired MM_PSF template in {fp.name}")
@@ -2995,7 +3505,11 @@ def main():
             # call main.py with in-memory pickle path; include placement for optimization
             cmd = ["python3", str(ROOT / 'main.py'), "-f", "__INMEM__", "--input-pickle", str(path), "--placement", "elliptical", "--return_metrics_only"]
         else:
-            cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--placement", "elliptical", "--return_metrics_only"]
+            # If CSV-only input was generated, call main.py with --input-csv so it reads CSVs
+            if isinstance(path, (str,)) and str(path).lower().endswith('.csv'):
+                cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--input-csv", str(path), "--placement", "elliptical", "--return_metrics_only"]
+            else:
+                cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--placement", "elliptical", "--return_metrics_only"]
         try:
             proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
             if proc.returncode != 0:
@@ -3102,7 +3616,9 @@ def main():
             row[k] = v
         # Describe MM_PSF preset if present
         try:
-            chosen = combo.get('MM_PSF') if isinstance(combo, dict) else None
+            chosen_name = combo.get('MM_PSF') if isinstance(combo, dict) else None
+            mk = _find_std_mm_psf_key(chosen_name, std_mm_psf) if chosen_name else None
+            use_name = mk if mk is not None else chosen_name
             def _describe_preset(name):
                 import re
                 if not name:

@@ -14,6 +14,111 @@ from distributions_rotated import (
 )  # Custom functions for 2D rotated distributions
 import json
 import sys
+import pickle
+
+# In-memory sheets storage when run with --input-pickle
+_INMEM_DFS = None
+_ORIG_READ_EXCEL = pd.read_excel
+_ORIG_EXCELFILE = pd.ExcelFile
+
+def enable_inmemory_reads(dfs: dict):
+    """Enable reading sheets from the provided dict instead of Excel files.
+
+    After calling this, calls to `pd.read_excel(path, sheet_name=...)` where
+    `path` equals the sentinel string '__INMEM__' will be served from `dfs`.
+    """
+    global _INMEM_DFS, _ORIG_READ_EXCEL
+    _INMEM_DFS = dfs
+
+    class _InMemExcelFile:
+        def __init__(self, sheets: dict):
+            self._sheets = dict(sheets)
+            self.sheet_names = list(self._sheets.keys())
+
+    def _read_excel_override(path, *args, **kwargs):
+        # If sentinel value string, serve from in-memory dict
+        if isinstance(path, str) and path == '__INMEM__' and _INMEM_DFS is not None:
+            sheet = kwargs.get('sheet_name') if 'sheet_name' in kwargs else (args[0] if args else None)
+            if sheet is None:
+                return dict(_INMEM_DFS)
+            if isinstance(sheet, list):
+                return {s: _INMEM_DFS.get(s) for s in sheet}
+            if sheet is None:
+                return dict(_INMEM_DFS)
+            return _INMEM_DFS.get(sheet)
+
+        # If caller passed an ExcelFile-like object created from __INMEM__,
+        # detect and serve sheets directly.
+        if not isinstance(path, str) and hasattr(path, 'sheet_names') and _INMEM_DFS is not None:
+            # sheet_name may be positional or kw
+            sheet = kwargs.get('sheet_name') if 'sheet_name' in kwargs else (args[0] if args else None)
+            if sheet is None:
+                return dict(_INMEM_DFS)
+            if isinstance(sheet, list):
+                return {s: _INMEM_DFS.get(s) for s in sheet}
+            return _INMEM_DFS.get(sheet)
+
+        # otherwise delegate to original
+        return _ORIG_READ_EXCEL(path, *args, **kwargs)
+
+    def _excelfile_override(path, *args, **kwargs):
+        # Return a lightweight ExcelFile-like wrapper for the sentinel path
+        if isinstance(path, str) and path == '__INMEM__' and _INMEM_DFS is not None:
+            return _InMemExcelFile(_INMEM_DFS)
+        return _ORIG_EXCELFILE(path, *args, **kwargs)
+
+    pd.read_excel = _read_excel_override
+    pd.ExcelFile = _excelfile_override
+
+
+def parse_multisheet_csv(path: str) -> dict:
+    """Parse a single CSV file that contains multiple sheets separated by
+    marker lines of the form `# sheet: Sheet Name`.
+
+    Returns a dict {sheet_name: DataFrame}.
+    If no markers are present, the file is interpreted as a single `MM_PSF` sheet.
+    """
+    import re
+    from io import StringIO
+
+    text = open(path, 'r', encoding='utf-8').read()
+    # Find markers like '# sheet: NAME' (case-insensitive)
+    parts = re.split(r'^\s*#\s*sheet\s*:\s*(.+)\s*$', text, flags=re.IGNORECASE | re.MULTILINE)
+    sheets = {}
+    if len(parts) == 1:
+        # No markers found -> treat whole file as MM_PSF
+        try:
+            df = pd.read_csv(path, header=0)
+        except Exception:
+            df = pd.read_csv(path, header=None)
+        sheets['MM_PSF'] = df
+        return sheets
+
+    # parts is [pre, name1, body1, name2, body2, ...] where pre may be empty
+    pre = parts[0]
+    idx = 1
+    while idx < len(parts):
+        name = parts[idx].strip()
+        body = parts[idx + 1]
+        # read body into dataframe
+        buf = StringIO(body)
+        # Heuristic: certain sheets are headerless; treat MM_PSF as headerful
+        if name.strip().lower() in {'alignment', 'thermal', 'gravity offload'}:
+            try:
+                df = pd.read_csv(buf, header=None)
+            except Exception:
+                buf.seek(0)
+                df = pd.read_csv(buf, header=0)
+        else:
+            try:
+                df = pd.read_csv(buf, header=0)
+            except Exception:
+                buf.seek(0)
+                df = pd.read_csv(buf, header=None)
+        sheets[name] = df
+        idx += 2
+    return sheets
+
 
 
 def load_aeff_weight_map(path: str, sheet: str = 'A_eff') -> dict[int, float]:
@@ -25,25 +130,87 @@ def load_aeff_weight_map(path: str, sheet: str = 'A_eff') -> dict[int, float]:
     - If the sheet is missing, or any MM has a missing/non-numeric weight in column B,
       this function raises ValueError.
     """
+    # Support CSV inputs: if a CSV path is provided, try to read weight
+    # information from the CSV itself (columns 'MM #' and 'weight' or 'A_eff').
+    is_csv = isinstance(path, str) and str(path).lower().endswith('.csv')
     try:
-        raw = pd.read_excel(path, sheet_name=sheet, engine='openpyxl', header=None)
+        if is_csv:
+            raw = pd.read_csv(path, header=0)
+            # Normalize headerful DataFrame into the same shape expected below
+            # by keeping column names as-is.
+        else:
+            raw = pd.read_excel(path, sheet_name=sheet, engine='openpyxl', header=None)
     except Exception as e:
-        raise ValueError(f"Missing or unreadable '{sheet}' sheet in workbook: {e}")
+        # If CSV read fails or the sheet is missing, raise a clear error.
+        raise ValueError(f"Missing or unreadable '{sheet}' sheet or CSV input: {e}")
 
-    if raw.shape[1] < 2:
-        raise ValueError(f"'{sheet}' sheet must have at least 2 columns (A=MM #, B=weight).")
-
-    # Find header row containing 'MM #' in column A, else assume first row is header.
-    header_row = 0
-    scan_rows = min(20, raw.shape[0])
-    for r in range(scan_rows):
-        v = raw.iloc[r, 0]
-        if isinstance(v, str) and v.strip().lower().replace(' ', '') in {'mm#', 'mm'}:
-            header_row = r
+    # The sheet may be returned in two shapes:
+    # 1) a raw headerless DataFrame (header=None used by caller) where the
+    #    'MM #' header appears somewhere in the first rows and the weight is
+    #    the adjacent column; or
+    # 2) a headerful DataFrame where columns already contain names like
+    #    'MM #' and one of the A_eff columns (e.g. 'A_eff', 'A_eff @1 keV').
+    # Handle both cases.
+    data = None
+    # Case A: headerful columns (detect 'MM' in column names)
+    cols = [str(c).strip() for c in list(raw.columns)]
+    import re
+    mm_col_name = None
+    for c in cols:
+        if re.search(r"\bmm\b|mm#", c, flags=re.IGNORECASE):
+            mm_col_name = c
             break
+    if mm_col_name is not None:
+        # find a weight-like column: prefer exact 'A_eff' or 'weight', else any column containing 'a_eff' or 'eff' or 'weight'
+        weight_col_name = None
+        for c in cols:
+            if c.lower().strip() in {'a_eff', 'a_eff ', 'a_eff@0.25keV', 'weight'}:
+                weight_col_name = c
+                break
+        if weight_col_name is None:
+            for c in cols:
+                if re.search(r"a[_ ]?eff|eff|weight", c, flags=re.IGNORECASE):
+                    weight_col_name = c
+                    break
+        # Fallback: choose the next column after mm_col_name index
+        if weight_col_name is None:
+            try:
+                idx = cols.index(mm_col_name)
+                if idx + 1 < len(cols):
+                    weight_col_name = cols[idx + 1]
+            except Exception:
+                weight_col_name = None
 
-    data = raw.iloc[header_row + 1 :, :2].copy()
-    data.columns = ['MM #', 'weight']
+        if weight_col_name is None:
+            raise ValueError(f"Could not locate an A_eff/weight column in '{sheet}' sheet alongside '{mm_col_name}'")
+
+        data = raw[[mm_col_name, weight_col_name]].copy()
+        data.columns = ['MM #', 'weight']
+    else:
+        # Case B: headerless/raw layout - search for 'MM' header cell in the first rows
+        scan_rows = min(20, raw.shape[0])
+        header_row = None
+        header_col = None
+        for r in range(scan_rows):
+            for c in range(raw.shape[1]):
+                v = raw.iloc[r, c]
+                if isinstance(v, str) and v.strip().lower().replace(' ', '') in {'mm#', 'mm'}:
+                    header_row = r
+                    header_col = c
+                    break
+            if header_row is not None:
+                break
+
+        # Fallback: assume first two columns if we couldn't find an explicit header.
+        if header_row is None:
+            header_row = 0
+            header_col = 0
+
+        if raw.shape[1] < header_col + 2:
+            raise ValueError(f"'{sheet}' sheet must have at least two adjacent columns for MM # and weight.")
+
+        data = raw.iloc[header_row + 1 :, header_col : header_col + 2].copy()
+        data.columns = ['MM #', 'weight']
 
     mm = pd.to_numeric(data['MM #'], errors='coerce')
     wt = pd.to_numeric(data['weight'], errors='coerce')
@@ -95,13 +262,80 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
     theta_degrees is calculated from MM configuration: theta = arcsin(x_MM / r_MM)
     weight column is optional and will be overridden by A_eff sheet if present
     """
-    kwargs = {"engine": "openpyxl"}  # Use openpyxl engine for Excel files
-    if sheet:
-        kwargs["sheet_name"] = sheet  # Specify sheet if provided
-    df = pd.read_excel(path, **kwargs)  # Read the Excel file into a DataFrame
+    # Support CSV inputs: either when the provided path ends with .csv or when
+    # `--input-csv` was used to provide a CSV path. In these cases we read the
+    # supplied CSV directly into a DataFrame. Otherwise fall back to Excel.
+    try:
+        is_csv = isinstance(path, str) and (str(path).lower().endswith('.csv') or getattr(sys.modules['__main__'], 'args', None) and getattr(sys.modules['__main__'].args, 'input_csv', None))
+    except Exception:
+        is_csv = isinstance(path, str) and str(path).lower().endswith('.csv')
+
+    if is_csv:
+        # If main was invoked with --input-csv, that path will be passed as `path`.
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            # Fall back to Excel reader if CSV read fails
+            kwargs = {"engine": "openpyxl"}
+            if sheet:
+                kwargs["sheet_name"] = sheet
+            df = pd.read_excel(path, **kwargs)
+    else:
+        kwargs = {"engine": "openpyxl"}  # Use openpyxl engine for Excel files
+        if sheet:
+            kwargs["sheet_name"] = sheet  # Specify sheet if provided
+        df = pd.read_excel(path, **kwargs)  # Read the Excel file into a DataFrame
     required = ["m_rad [arcsec]","m_azi [arcsec]","sigma_rad [arcsec]","sigma_azi [arcsec]"]  # Required columns
-    if not all(c in df.columns for c in required):  # Check if all required columns are present
-        raise ValueError(f"Excel must contain columns: {required}")  # Raise error if not
+
+    # If the sheet was read headerless (integer column names) and the first
+    # data row appears to contain header strings, promote that row to header.
+    try:
+        import numpy as _np
+        if all(isinstance(c, (int,)) for c in df.columns):
+            first_row = df.iloc[0].astype(str).str.strip().tolist()
+            # If any required name appears in first row, treat it as header
+            if any(r in first_row for r in [r for r in required]):
+                df.columns = first_row
+                df = df.iloc[1:].reset_index(drop=True)
+    except Exception:
+        pass
+
+    # If required headers aren't present, try to be flexible:
+    # - map similar column names (e.g. 'm_rad', 'm_rad [arcsec]', 'm rad (arcsec)')
+    # - if headerless, assume first 4 columns are the required ones
+    if not all(c in df.columns for c in required):
+        cols = [str(c).strip() for c in df.columns]
+        import re
+        # build mapping by fuzzy match
+        mapping = {}
+        for req in required:
+            key = None
+            rq = req.split()[0]  # e.g. 'm_rad'
+            for c in cols:
+                low = c.lower()
+                if rq.replace('_', '') in low.replace(' ', '').replace('_', ''):
+                    key = c
+                    break
+                # also allow sigma_rad -> contains 'sigma' and 'rad'
+                parts = rq.replace('_', ' ').split()
+                if all(p in low for p in parts):
+                    key = c
+                    break
+            if key:
+                mapping[key] = req
+
+        if len(mapping) == len(required):
+            # rename detected columns to required names
+            df = df.rename(columns={k: v for k, v in mapping.items()})
+        else:
+            # fallback: if there are at least 4 columns, assume order
+            if df.shape[1] >= 4:
+                warn_cols = list(df.columns[:4])
+                print(f"Warning: MM_PSF appears headerless or uses non-standard headers {warn_cols}; assuming order {required}.")
+                df = df.copy()
+                df.columns = required + list(df.columns[4:])
+            else:
+                raise ValueError(f"Excel must contain columns: {required}")  # Raise error if not
     
     # Convert from arcsec to meters: 1 arcsec = 12*π/180/3600 m
     arcsec_to_m = 12 * np.pi / 180 / 3600
@@ -409,13 +643,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
     def convert_polar_to_cartesian(row, mm_config_map):
         """Convert polar offsets (m_rad, m_azi) to Cartesian using MM position as reference."""
         mm_num = row['MM #']
-        if mm_num not in mm_config_map:
-            return row['mux'], row['muy']  # Use default if no config
-        
-        config = mm_config_map[mm_num]
-        x_mm = config.get('x_MM', 0)
-        y_mm = config.get('y_MM', 0)
-        r_mm = config.get('r_MM', 1)  # Avoid division by zero
+        # Use provided mm_config_map or sensible defaults when missing
+        config = mm_config_map.get(mm_num, {'x_MM': 1.0, 'y_MM': 0.0, 'r_MM': 1.0})
+        x_mm = config.get('x_MM', 1.0)
+        y_mm = config.get('y_MM', 0.0)
+        r_mm = config.get('r_MM', 1.0)  # Avoid division by zero
         
         # Unit vectors
         u_rad_x = x_mm / r_mm  # Radial unit vector x-component
@@ -717,21 +949,41 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         if r_max <= 0:
             r_max = 1e-6
 
-        theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
-        r = np.linspace(0.0, r_max, n_r)
-        dtheta = theta[1] - theta[0]
-        dr = r[1] - r[0] if n_r > 1 else r_max
-        R, TH = np.meshgrid(r, theta)
-        Xp = cx + R * np.cos(TH)
-        Yp = cy + R * np.sin(TH)
+        # Iteratively expand radial margin if heavy tails cause significant
+        # energy to fall outside the initial r_max (common with Lorentzian).
+        expected_total = float(np.nansum(weight_arr)) if 'weight_arr' in locals() else 1.0
+        # allow a few attempts, expanding margin each time up to a modest limit
+        # (reduce attempts and growth to avoid runaway cost for pseudo-Voigt tails)
+        attempts = 3
+        tol = 0.9995
+        total_energy = 0.0
+        for attempt in range(attempts):
+            theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
+            r = np.linspace(0.0, r_max, n_r)
+            dtheta = theta[1] - theta[0]
+            dr = r[1] - r[0] if n_r > 1 else r_max
+            R, TH = np.meshgrid(r, theta)
+            Xp = cx + R * np.cos(TH)
+            Yp = cy + R * np.sin(TH)
 
-        # Reuse the same summation kernel on the polar grid.
-        Zp = _sum_on_grid(Xp, Yp, normalize_flag)
+            # Reuse the same summation kernel on the polar grid.
+            Zp = _sum_on_grid(Xp, Yp, normalize_flag)
 
-        # Integrate over theta (Jacobian r) to get radial energy density
-        radial_energy = np.sum(Zp * R, axis=0) * dtheta  # shape (n_r,)
-        cumulative = np.cumsum(radial_energy * dr)
-        total_energy = cumulative[-1] if cumulative.size else 1.0
+            # Integrate over theta (Jacobian r) to get radial energy density
+            radial_energy = np.sum(Zp * R, axis=0) * dtheta  # shape (n_r,)
+            cumulative = np.cumsum(radial_energy * dr)
+            total_energy = cumulative[-1] if cumulative.size else 1.0
+
+            # If normalization is expected (weights sum > 0) and we captured
+            # nearly all energy, break early. Otherwise expand r_max and retry.
+            if expected_total <= 0 or total_energy / expected_total >= tol:
+                break
+            # Expand margin and retry (limit growth to avoid runaway cost).
+            # Use gentler growth factor and a tighter n_r cap to bound cost.
+            r_max *= 1.5
+            # Slightly increase radial resolution but cap much lower than before
+            n_r = min(int(n_r * 1.15) + 1, 5000)
+            n_theta = min(int(n_theta * 1.0), 2048)
         if debug:
             try:
                 frac = cumulative / total_energy if total_energy > 0 else cumulative
@@ -846,15 +1098,15 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Lower final polar-grid for faster runs (target <5s) while increasing
     # radial margin to capture PSF tails and keep HEW estimate high.
     if quick_mode:
-        # Coarse: keep radial emphasis but shrink azimuthal samples to meet runtime.
-        n_r_final = 10000
+        # Coarse: keep radial emphasis but reduce final caps to limit runtime
+        n_r_final = 3000
         n_theta_final = 120
-        final_r_margin = 22.0
+        final_r_margin = 10.0
     else:
-        # Increase fine-mode sampling for higher accuracy (budget ~15s).
-        n_r_final = 12000
-        n_theta_final = 1440
-        final_r_margin = 22.0
+        # Increase fine-mode sampling for higher accuracy but stay bounded.
+        n_r_final = 5000
+        n_theta_final = 720
+        final_r_margin = 12.0
 
     # Allow callers to override final metric sampling for speed/experiments
     if metrics_n_r_final is not None:
@@ -1596,7 +1848,43 @@ if __name__ == '__main__':
     parser.add_argument('--metrics-nr-final', type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--metrics-ntheta-final', type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--metrics-r-margin', type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--input-pickle', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--input-csv', default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # Expose parsed args to helper functions that inspect __main__.args
+    try:
+        import sys as _sys
+        _sys.modules['__main__'].args = args
+    except Exception:
+        pass
+
+    # If an explicit input CSV path was provided, prefer it as the input file
+    if getattr(args, 'input_csv', None):
+        args.file = args.input_csv
+    # If an input-pickle was provided, load it and enable in-memory reads.
+    if getattr(args, 'input_pickle', None):
+        try:
+            with open(args.input_pickle, 'rb') as fh:
+                dfs = pickle.load(fh)
+            enable_inmemory_reads(dfs)
+            # Use sentinel file path to trigger in-memory reads
+            args.file = '__INMEM__'
+        except Exception as e:
+            print(f"Failed to load input pickle: {e}")
+            sys.exit(1)
+
+    # If args.file is a multi-sheet CSV, parse into in-memory sheets and enable reads
+    if isinstance(args.file, str) and args.file.lower().endswith('.csv'):
+        try:
+            sheets = parse_multisheet_csv(args.file)
+            # Only enable in-memory reads if the CSV actually contained multiple sheets
+            if isinstance(sheets, dict) and len(sheets) > 1:
+                enable_inmemory_reads(sheets)
+                args.file = '__INMEM__'
+        except Exception:
+            # If parsing fails, fall back to treating CSV as single-sheet file
+            pass
 
     # If user requested metrics-only, disable interactive plotting and suppress show().
     if getattr(args, 'return_metrics_only', False):
@@ -1618,6 +1906,8 @@ if __name__ == '__main__':
     if args.optimize:
         from optimize_mm_rows import optimize_rows
         base, ext = os.path.splitext(args.file)
+        if ext == '':
+            ext = '.xlsx'
         opt_output = f"{base}_optimised{ext}"
 
         is_coarse = (args.mode == 'coarse')
@@ -1637,15 +1927,20 @@ if __name__ == '__main__':
         start_strategy = placement_strategy or 'elliptical'
         print(f"Optimizing MM positions (mode={args.mode}, start={start_strategy})...")
         try:
-            opt_hew = optimize_rows(
-                input_path=args.file,
-                output_path=opt_output,
-                mode=args.mode,
-                optimize=True,
-                time_budget_s=opt_budget_s,
-                start_placement=start_strategy,
-                write_output=(not getattr(args, 'suppress_output', False)),
-            )
+            # If the input is a CSV-only file, skip workbook-based optimization
+            if isinstance(args.file, str) and str(args.file).lower().endswith('.csv'):
+                print("Skipping MM position optimization for CSV-only input (no MM configuration sheet).")
+                opt_hew = None
+            else:
+                opt_hew = optimize_rows(
+                    input_path=args.file,
+                    output_path=opt_output,
+                    mode=args.mode,
+                    optimize=True,
+                    time_budget_s=opt_budget_s,
+                    start_placement=start_strategy,
+                    write_output=(not getattr(args, 'suppress_output', False)),
+                )
         except KeyboardInterrupt:
             print("Optimization interrupted (Ctrl+C). The optimised file was not updated.")
             opt_hew = None
@@ -1683,13 +1978,18 @@ if __name__ == '__main__':
                 pass
 
             # Load the optimized configuration for overlaying
-            df_optimized = load_gaussians_from_excel(opt_output, args.sheet)
+            if os.path.exists(opt_output):
+                df_optimized = load_gaussians_from_excel(opt_output, args.sheet)
+            else:
+                df_optimized = None
             plot_title_suffix = " (comparison)"
 
     # Placement-only mode
     elif placement_strategy is not None:
         from optimize_mm_rows import cross_placement, x_axis_placement, elliptical_placement
         base, ext = os.path.splitext(args.file)
+        if ext == '':
+            ext = '.xlsx'
         opt_output = f"{base}_placed{ext}"
 
         if placement_strategy == 'x_axis':
@@ -1704,54 +2004,61 @@ if __name__ == '__main__':
 
         print(f"Applying placement strategy ({placement_label})...")
         try:
-            placement_hew = placement_fn(
-                input_path=args.file,
-                output_path=opt_output,
-                seed=42,
-                write_output=(not getattr(args, 'suppress_output', False)),
-            )
+            # If the input is a CSV-only file, skip workbook-based placement
+            if isinstance(args.file, str) and str(args.file).lower().endswith('.csv'):
+                print("Skipping MM placement for CSV-only input (no MM configuration sheet).")
+                placement_hew = None
+            else:
+                placement_hew = placement_fn(
+                    input_path=args.file,
+                    output_path=opt_output,
+                    seed=42,
+                    write_output=(not getattr(args, 'suppress_output', False)),
+                )
         except KeyboardInterrupt:
             print("Placement interrupted (Ctrl+C). The placed file was not updated.")
             placement_hew = None
         else:
-            print(f"Placement complete. Final HEW: {placement_hew:.6e} m")
-            if not getattr(args, 'suppress_output', False):
-                print(f"Placed configuration saved to: {opt_output}")
-
-            # Make it explicit how many positions changed
-            try:
-                if not getattr(args, 'suppress_output', False) and os.path.exists(opt_output):
-                    mm_in = pd.read_excel(args.file, sheet_name="MM configuration", engine="openpyxl")
-                    mm_out = pd.read_excel(opt_output, sheet_name="MM configuration", engine="openpyxl")
-                else:
-                    mm_in = None
-                    mm_out = None
-                if mm_in is not None and mm_out is not None:
-                    a = mm_in["MM #"].astype(int).to_numpy()
-                    b = mm_out["MM #"].astype(int).to_numpy()
-                    changed = (a != b)
-                    print(f"MM configuration changed entries: {int(changed.sum())}")
-
-                    # Print a small sample
-                    if changed.any():
-                        idx = np.flatnonzero(changed)[:10].tolist()
-                        sample = pd.DataFrame(
-                            {
-                                "sheet_row_index": idx,
-                                "MM # (input)": a[idx],
-                                "MM # (placed)": b[idx],
-                            }
-                        )
-                        print("Sample MM# changes (first 10):")
-                        print(sample.to_string(index=False))
-            except Exception:
-                pass
-
-            # Load the placed configuration for overlaying (only if file was written)
-            if not getattr(args, 'suppress_output', False) and os.path.exists(opt_output):
-                df_optimized = load_gaussians_from_excel(opt_output, args.sheet)
-            else:
+            if placement_hew is None:
+                print("Placement skipped (CSV-only input); no placed configuration produced.")
                 df_optimized = None
+            else:
+                print(f"Placement complete. Final HEW: {placement_hew:.6e} m")
+                if not getattr(args, 'suppress_output', False):
+                    print(f"Placed configuration saved to: {opt_output}")
+
+                # Make it explicit how many positions changed
+                try:
+                    if not getattr(args, 'suppress_output', False) and os.path.exists(opt_output):
+                        mm_in = pd.read_excel(args.file, sheet_name="MM configuration", engine="openpyxl")
+                        mm_out = pd.read_excel(opt_output, sheet_name="MM configuration", engine="openpyxl")
+                    else:
+                        mm_in = None
+                        mm_out = None
+                    if mm_in is not None and mm_out is not None:
+                        a = mm_in["MM #"].astype(int).to_numpy()
+                        b = mm_out["MM #"].astype(int).to_numpy()
+                        changed = (a != b)
+                        print(f"MM configuration changed entries: {int(changed.sum())}")
+
+                        # Print a small sample
+                        if changed.any():
+                            idx = np.flatnonzero(changed)[:10].tolist()
+                            sample = pd.DataFrame(
+                                {
+                                    "sheet_row_index": idx,
+                                    "MM # (input)": a[idx],
+                                    "MM # (placed)": b[idx],
+                                }
+                            )
+                            print("Sample MM# changes (first 10):")
+                            print(sample.to_string(index=False))
+                except Exception:
+                    pass
+
+                # Load the placed configuration for overlaying (only if file was written)
+                if not getattr(args, 'suppress_output', False) and os.path.exists(opt_output):
+                    df_optimized = load_gaussians_from_excel(opt_output, args.sheet)
             plot_title_suffix = f" (placement: {placement_label})"
     
     # Plot the sum and encircled energy (with optional optimized overlay)
