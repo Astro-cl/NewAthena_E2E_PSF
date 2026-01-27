@@ -3501,15 +3501,12 @@ def main():
         except Exception:
             # if anything goes wrong in diagnostic, continue to run and let main.py report errors
             pass
-        if args.no_excel and str(path).endswith('.pkl'):
-            # call main.py with in-memory pickle path; include placement for optimization
-            cmd = ["python3", str(ROOT / 'main.py'), "-f", "__INMEM__", "--input-pickle", str(path), "--placement", "elliptical", "--return_metrics_only"]
+        # If CSV-only input was generated, call main.py with --input-csv so it reads CSVs
+        if isinstance(path, (str,)) and str(path).lower().endswith('.csv'):
+            cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--input-csv", str(path), "--placement", "elliptical", "--return_metrics_only"]
         else:
-            # If CSV-only input was generated, call main.py with --input-csv so it reads CSVs
-            if isinstance(path, (str,)) and str(path).lower().endswith('.csv'):
-                cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--input-csv", str(path), "--placement", "elliptical", "--return_metrics_only"]
-            else:
-                cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--placement", "elliptical", "--return_metrics_only"]
+            # Default: pass the generated file path to main.py
+            cmd = ["python3", str(ROOT / 'main.py'), "-f", str(path), "--placement", "elliptical", "--return_metrics_only"]
         try:
             proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
             if proc.returncode != 0:
