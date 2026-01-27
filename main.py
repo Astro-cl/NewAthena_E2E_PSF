@@ -14,61 +14,8 @@ from distributions_rotated import (
 )  # Custom functions for 2D rotated distributions
 import json
 import sys
-# pickle-based in-memory input support removed for release
-
-# In-memory sheets storage when run with --input-pickle
-_INMEM_DFS = None
-_ORIG_READ_EXCEL = pd.read_excel
-_ORIG_EXCELFILE = pd.ExcelFile
-
-def enable_inmemory_reads(dfs: dict):
-    """Enable reading sheets from the provided dict instead of Excel files.
-
-    After calling this, calls to `pd.read_excel(path, sheet_name=...)` where
-    `path` equals the sentinel string '__INMEM__' will be served from `dfs`.
-    """
-    global _INMEM_DFS, _ORIG_READ_EXCEL
-    _INMEM_DFS = dfs
-
-    class _InMemExcelFile:
-        def __init__(self, sheets: dict):
-            self._sheets = dict(sheets)
-            self.sheet_names = list(self._sheets.keys())
-
-    def _read_excel_override(path, *args, **kwargs):
-        # If sentinel value string, serve from in-memory dict
-        if isinstance(path, str) and path == '__INMEM__' and _INMEM_DFS is not None:
-            sheet = kwargs.get('sheet_name') if 'sheet_name' in kwargs else (args[0] if args else None)
-            if sheet is None:
-                return dict(_INMEM_DFS)
-            if isinstance(sheet, list):
-                return {s: _INMEM_DFS.get(s) for s in sheet}
-            if sheet is None:
-                return dict(_INMEM_DFS)
-            return _INMEM_DFS.get(sheet)
-
-        # If caller passed an ExcelFile-like object created from __INMEM__,
-        # detect and serve sheets directly.
-        if not isinstance(path, str) and hasattr(path, 'sheet_names') and _INMEM_DFS is not None:
-            # sheet_name may be positional or kw
-            sheet = kwargs.get('sheet_name') if 'sheet_name' in kwargs else (args[0] if args else None)
-            if sheet is None:
-                return dict(_INMEM_DFS)
-            if isinstance(sheet, list):
-                return {s: _INMEM_DFS.get(s) for s in sheet}
-            return _INMEM_DFS.get(sheet)
-
-        # otherwise delegate to original
-        return _ORIG_READ_EXCEL(path, *args, **kwargs)
-
-    def _excelfile_override(path, *args, **kwargs):
-        # Return a lightweight ExcelFile-like wrapper for the sentinel path
-        if isinstance(path, str) and path == '__INMEM__' and _INMEM_DFS is not None:
-            return _InMemExcelFile(_INMEM_DFS)
-        return _ORIG_EXCELFILE(path, *args, **kwargs)
-
-    pd.read_excel = _read_excel_override
-    pd.ExcelFile = _excelfile_override
+import tempfile
+from pathlib import Path
 
 
 def parse_multisheet_csv(path: str) -> dict:
@@ -1864,14 +1811,26 @@ if __name__ == '__main__':
         args.file = args.input_csv
     # Note: in-memory pickled input support removed for release.
 
-    # If args.file is a multi-sheet CSV, parse into in-memory sheets and enable reads
+    # If args.file is a multi-sheet CSV, parse it and materialize a temporary .xlsx
     if isinstance(args.file, str) and args.file.lower().endswith('.csv'):
         try:
             sheets = parse_multisheet_csv(args.file)
-            # Only enable in-memory reads if the CSV actually contained multiple sheets
+            # If CSV contained multiple sheets, write to a temporary .xlsx and use that
             if isinstance(sheets, dict) and len(sheets) > 1:
-                enable_inmemory_reads(sheets)
-                args.file = '__INMEM__'
+                tf = tempfile.NamedTemporaryFile(prefix='multisheet_', suffix='.xlsx', delete=False)
+                tf.close()
+                tmp_path = Path(tf.name)
+                try:
+                    with pd.ExcelWriter(tmp_path, engine='openpyxl') as writer:
+                        for sname, sdf in sheets.items():
+                            try:
+                                sdf.to_excel(writer, sheet_name=sname, index=False)
+                            except Exception:
+                                continue
+                    args.file = str(tmp_path)
+                except Exception:
+                    # fallback: leave args.file as CSV path
+                    pass
         except Exception:
             # If parsing fails, fall back to treating CSV as single-sheet file
             pass
