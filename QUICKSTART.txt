@@ -1,5 +1,5 @@
 ================================================================================
-  NEWATHENAE2EPSF_V2 - QUICK START GUIDE
+  NEWATHENAE2EPSF_V3 - QUICK START GUIDE
 ================================================================================
 
 INSTALLATION
@@ -12,6 +12,34 @@ INSTALLATION
 
 3. Install dependencies:
   pip install -r requirements.txt
+
+Tkinter (GUI) dependency
+------------------------
+The GUI uses `tkinter`. This module comes with CPython but requires the
+underlying Tcl/Tk libraries to be present on the host. `tkinter` is not
+installed via `pip`; use your OS package manager or a Python distribution
+that bundles Tcl/Tk.
+
+macOS:
+  - Installing Python from python.org typically includes tkinter.
+  - Alternatively install Tcl/Tk via Homebrew and use a Python build linked to it:
+      brew install tcl-tk
+
+Linux (examples):
+  - Debian / Ubuntu:
+      sudo apt update
+      sudo apt install -y python3-tk
+  - Fedora / RHEL (dnf):
+      sudo dnf install -y python3-tkinter
+  - Arch Linux:
+      sudo pacman -S tk
+
+Windows:
+  - Use the official Python installer from https://www.python.org/ (it
+    bundles Tcl/Tk and tkinter).
+  - If using other distributions, ensure the chosen Python build includes
+    or is linked against Tcl/Tk.
+
 
 USING THE GUI (Easiest Method)
 -------------------------------
