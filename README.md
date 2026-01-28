@@ -1,4 +1,4 @@
-# NewAthenaE2EPSF_v2 - PSF Analysis Toolkit
+# NewAthenaE2EPSF_v3 - PSF Analysis Toolkit
 
 [![Python CI](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml/badge.svg)](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml)
 
@@ -38,6 +38,14 @@ A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of
 - **Free Mode**: Full manual control over all PSF parameters
 
 ## Installation
+
+## Release v3 (2026-01-28)
+
+- Repository cleanup: removed legacy in-memory pickle flows and temporary debug tools.
+- Added deterministic per-MM sampling for presets and CSV/Excel parity in generation.
+- Renamed `sensivitiy` → `sensitivity` and updated Quickstart and tests.
+- Added basic unit tests and a pytest configuration to streamline CI.
+
 
 ### Requirements
 - Python 3.8 or higher
