@@ -113,6 +113,7 @@ Documentation, comments and Unit tests written by AI.
    - Choose export mode (new file or update current)
    - Click "Export to Excel"
    - Files are saved in `Distributions/` folder
+   - Context menu (right-click) on plots: Export PSF / Encircled Energy / FITS / EEF CSV. EEF CSV files are written to `CustomPSFs/` as `E2E_EEF_YYYYMMDD_HHMMSS.csv`.
 
 ### Using Command Line
 
@@ -215,6 +216,27 @@ python3 main.py [OPTIONS]
 - `--no-normalize`: Disable normalization
 - `--output FILE`: Save combined plot to file (in `Figures/` folder)
 - `--mode {coarse,fine,extra-fine}`: Runtime mode. Controls plotting + optimization speed/accuracy.
+
+Additional export and metadata options:
+
+- `--author NAME` (exporter script): write `AUTHOR` into FITS header when exporting via `scripts/export_e2e_fits.py`.
+- `--contact EMAIL` (exporter script): write `CONTACT` into FITS header (falls back to git `user.email` or ivo.ferreira@esa.int).
+- `--orcid ORCID` (exporter script): write `ORCID` into FITS header.
+
+GUI notes:
+
+- Right-click on the interactive plots to open a context menu. Options include:
+   - Export PSF Plot (PNG)
+   - Export Encircled Energy Plot (PNG)
+   - Export FITS (Primary HDU-only, big-endian IEEE64) — header includes `TOT_AEFF`, `INTG_Z`, `PIXAS*`, `PIXM*`, `CDELT*`, `AUTHOR`, `CONTACT`, `ORCID`, `INPUTFN`.
+   - Export EEF CSV (writes `CustomPSFs/E2E_EEF_YYYYMMDD_HHMMSS.csv` with percentage/diameter columns for best/origin/optimized curves when present).
+
+Keyboard shortcuts in the interactive window:
+
+- `p` or `1`: Export PSF plot to PNG
+- `e` or `2`: Export Encircled Energy plot to PNG
+- `f` or `3`: Export aggregated E2E PSF to FITS
+- `c` or `4`: Export Encircled Energy Function data to CSV (`CustomPSFs/`)
 - `--optimize`: Enable row-wise MM# assignment optimization to minimize HEW (uses `--mode`).
    - Note: `--optimise` is accepted as an alias.
 - `--placement [{cross,x_axis,elliptical}]`: Apply a placement strategy.

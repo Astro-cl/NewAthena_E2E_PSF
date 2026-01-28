@@ -1285,7 +1285,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1.set_ylabel('y [µm]')
     
     # Add secondary axes for arcsec (1 arcsec = 12*π/180/3600 m, so 1 m = 54000/π arcsec)
-    m_to_arcsec = 54000 / np.pi  # meters to arcsec
+    m_to_arcsec = (180.0 / np.pi) * 3600.0  # meters to arcsec
     um_to_arcsec = m_to_arcsec * 1e-6  # microns to arcsec
     
     # Top axis for x in arcsec
@@ -1333,7 +1333,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     plt.xlim((xlim_min - margin_x)*1e6, (xlim_max + margin_x)*1e6)
     plt.ylim((ylim_min - margin_y)*1e6, (ylim_max + margin_y)*1e6)
     # Precompute arcsec conversions for legend/value annotations
-    m_to_arcsec = 54000 / np.pi
+    m_to_arcsec = (180.0 / np.pi) * 3600.0
 
     def _min_interval_width(axis_vals: np.ndarray, prof: np.ndarray, frac: float = 0.5) -> float | None:
         """Smallest interval (anywhere) containing a fraction of 1D energy.
@@ -1622,6 +1622,165 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     def export_eef_plot():
         """Export the Encircled Energy Function plot (right subplot) to PNG"""
         save_subplot_with_axes(ax2, "Encircled_Energy", include_colorbar=False)
+
+    def export_eef_csv():
+        """Export the Encircled Energy Function data to CSV in CustomPSFs/"""
+        import time as _time, os as _os
+        ts = _time.strftime('%Y%m%d_%H%M%S')
+        out = _os.path.join('CustomPSFs', f'E2E_EEF_{ts}.csv')
+        _os.makedirs(_os.path.dirname(out), exist_ok=True)
+        # Prepare columns
+        try:
+            pct_best = profile_pct if 'profile_pct' in locals() else (frac_profile * 100 if 'frac_profile' in locals() else [])
+            diam_best = profile_diam if 'profile_diam' in locals() else (2 * r_profile * m_to_arcsec if 'r_profile' in locals() else [])
+            pct_orig = profile_pct_00 if 'profile_pct_00' in locals() else (frac_00 * 100 if 'frac_00' in locals() else [])
+            diam_orig = profile_diam_00 if 'profile_diam_00' in locals() else (2 * r_profile_00 * m_to_arcsec if 'r_profile_00' in locals() else [])
+        except Exception:
+            pct_best, diam_best, pct_orig, diam_orig = [], [], [], []
+
+        # Optimized arrays optional
+        opt_pct = None
+        opt_diam = None
+        if 'opt_frac_profile' in locals() and opt_frac_profile is not None:
+            try:
+                opt_pct = opt_frac_profile * 100
+                opt_diam = 2 * opt_r_profile * m_to_arcsec
+            except Exception:
+                opt_pct, opt_diam = None, None
+
+        # Build dataframe
+        import pandas as _pd
+        maxlen = max(len(pct_best) if hasattr(pct_best, '__len__') else 0,
+                     len(pct_orig) if hasattr(pct_orig, '__len__') else 0,
+                     len(opt_pct) if opt_pct is not None and hasattr(opt_pct, '__len__') else 0)
+
+        def _pad(arr, n):
+            if arr is None:
+                return [None] * n
+            if not hasattr(arr, '__len__'):
+                return [arr] * n
+            a = list(arr)
+            if len(a) < n:
+                a = a + [None] * (n - len(a))
+            return a
+
+        df_out = _pd.DataFrame({
+            'pct_best': _pad(pct_best, maxlen),
+            'diam_arcsec_best': _pad(diam_best, maxlen),
+            'pct_origin': _pad(pct_orig, maxlen),
+            'diam_arcsec_origin': _pad(diam_orig, maxlen),
+        })
+        if opt_pct is not None:
+            df_out['pct_opt'] = _pad(opt_pct, maxlen)
+            df_out['diam_arcsec_opt'] = _pad(opt_diam, maxlen)
+
+        df_out.to_csv(out, index=False)
+        print('Wrote EEF CSV to', out)
+
+    def export_fits():
+        """Export the aggregated E2E PSF grid `Z` to a minimal FITS file.
+
+        Writes a Primary HDU-only FITS with big-endian doubles and header
+        cards: TOT_AEFF, INTG_Z, PIXAS1/2 (arcsec), PIXM1/2 (meters), CDELT1/2 (deg/pixel).
+        """
+        import time as _time, os as _os
+        # Minimal FITS writer (primary HDU only)
+        def _write_simple_fits(path: str, data, header_cards: dict | None = None):
+            arr = np.asarray(data, dtype=np.float64)
+            if arr.ndim != 2:
+                raise ValueError('data must be 2D')
+            ny, nx = arr.shape
+            cards = []
+            def add_card(key, val, comment=None):
+                if isinstance(val, str):
+                    v = f"'{val}'"
+                elif isinstance(val, bool):
+                    v = 'T' if val else 'F'
+                else:
+                    v = str(val)
+                if comment:
+                    cards.append(f"{key:8s}= {v:20s} / {comment}")
+                else:
+                    cards.append(f"{key:8s}= {v:20s}")
+            add_card('SIMPLE', True, 'file does conform to FITS standard')
+            add_card('BITPIX', -64, 'number of bits per data pixel')
+            add_card('NAXIS', 2, 'number of data axes')
+            add_card('NAXIS1', nx, 'length of data axis 1')
+            add_card('NAXIS2', ny, 'length of data axis 2')
+            add_card('EXTEND', True, 'FITS dataset may contain extensions')
+            if header_cards:
+                for k, v in header_cards.items():
+                    add_card(k, v)
+            cards.append('END')
+            header_str = ''.join(card.ljust(80) for card in cards)
+            header_bytes = header_str.encode('ascii')
+            pad = (2880 - (len(header_bytes) % 2880)) % 2880
+            header_bytes += b' ' * pad
+            data_be = arr.astype('>f8')
+            data_bytes = data_be.tobytes(order='C')
+            pad2 = (2880 - (len(data_bytes) % 2880)) % 2880
+            data_bytes += b'\x00' * pad2
+            with open(path, 'wb') as f:
+                f.write(header_bytes)
+                f.write(data_bytes)
+
+        # Total A_eff from the DataFrame weights (df in closure)
+        try:
+            total_aeff_local = float(np.nansum(df['weight']))
+        except Exception:
+            total_aeff_local = float(np.nansum(weight_arr)) if 'weight_arr' in locals() else 0.0
+
+        # Compute integral on our grid (x,y defined in closure)
+        try:
+            integral_local = float(np.trapz(np.trapz(Z, x, axis=1), y, axis=0))
+        except Exception:
+            integral_local = float(np.nansum(Z))
+
+        # Pixel scales
+        pix_m_x = float(x[1] - x[0]) if x.size > 1 else 0.0
+        pix_m_y = float(y[1] - y[0]) if y.size > 1 else 0.0
+        m_to_arcsec_local = (180.0 / np.pi) * 3600.0
+        pix_as_x = pix_m_x * m_to_arcsec_local
+        pix_as_y = pix_m_y * m_to_arcsec_local
+        cdelt1 = pix_as_x / 3600.0
+        cdelt2 = pix_as_y / 3600.0
+
+        # Output path
+        ts = _time.strftime('%Y%m%d_%H%M%S')
+        out = _os.path.join('CustomPSFs', f'E2E_aggregated_{ts}.fits')
+        _os.makedirs(_os.path.dirname(out), exist_ok=True)
+        # Try to pick up author/contact from git config when available
+        def _git_cfg(k: str):
+            try:
+                import subprocess as _sub
+                out = _sub.check_output(['git', 'config', '--get', k], stderr=_sub.DEVNULL)
+                return out.decode('utf-8').strip()
+            except Exception:
+                return None
+
+        author_local = _git_cfg('user.name') or 'Unknown'
+        contact_local = _git_cfg('user.email') or 'ivo.ferreira@esa.int'
+        orcid_local = _git_cfg('user.orcid') or ''
+        inputfn = getattr(df, '_input_filename', None) or 'interactive'
+
+        header = {
+            'CREATOR': 'main.plot_sum:export_fits',
+            'DATE': _time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'TOT_AEFF': total_aeff_local,
+            'INTG_Z': integral_local,
+            'CDELT1': float(cdelt1),
+            'CDELT2': float(cdelt2),
+            'PIXAS1': float(pix_as_x),
+            'PIXAS2': float(pix_as_y),
+            'PIXM1': float(pix_m_x),
+            'PIXM2': float(pix_m_y),
+            'AUTHOR': author_local,
+            'CONTACT': contact_local,
+            'ORCID': orcid_local,
+            'INPUTFN': inputfn,
+        }
+        _write_simple_fits(out, Z, header_cards=header)
+        print('Wrote FITS to', out)
     
     def show_context_menu(x, y):
         """Display context menu at given position"""
@@ -1634,7 +1793,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         menu_text = "┌─────────────────────────────┐\n"
         menu_text += "│  1. Export PSF Plot         │\n"
         menu_text += "│  2. Export EEF Plot         │\n"
-        menu_text += "│  3. Cancel                  │\n"
+        menu_text += "│  3. Export FITS             │\n"
+        menu_text += "│  4. Export EEF CSV         │\n"
+        menu_text += "│  5. Cancel                  │\n"
         menu_text += "└─────────────────────────────┘"
         
         menu_annotation = fig.text(x, y, menu_text,
@@ -1686,16 +1847,22 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     # Calculate relative position within menu (from bottom)
                     relative_y = (event.y - bbox.y0) / bbox.height
                     
-                    # Menu structure (from top to bottom):
-                    # Top border, Option 1, Option 2, Option 3, Bottom border
-                    # Inverted because we calculate from bottom: higher y = higher in menu
-                    if 0.60 < relative_y < 0.85:  # Option 1 (Export PSF)
+                    # Menu structure for 5 options (top-to-bottom):
+                    # Top border, Opt1, Opt2, Opt3, Opt4, Opt5, Bottom border
+                    # Ranges chosen empirically to match text layout
+                    if 0.80 < relative_y <= 0.95:  # Option 1 (Export PSF)
                         hide_context_menu()
                         export_psf_plot()
-                    elif 0.40 < relative_y < 0.60:  # Option 2 (Export EEF)
+                    elif 0.62 < relative_y <= 0.80:  # Option 2 (Export EEF)
                         hide_context_menu()
                         export_eef_plot()
-                    elif 0.15 < relative_y < 0.40:  # Option 3 (Cancel)
+                    elif 0.44 < relative_y <= 0.62:  # Option 3 (Export FITS)
+                        hide_context_menu()
+                        export_fits()
+                    elif 0.26 < relative_y <= 0.44:  # Option 4 (Export EEF CSV)
+                        hide_context_menu()
+                        export_eef_csv()
+                    elif 0.08 < relative_y <= 0.26:  # Option 5 (Cancel)
                         hide_context_menu()
                 else:
                     # Clicked outside menu, hide it
@@ -1712,13 +1879,21 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             elif event.key in ['2', 'e']:
                 hide_context_menu()
                 export_eef_plot()
-            elif event.key in ['3', 'escape']:
+            elif event.key in ['3', 'f']:
+                hide_context_menu()
+                export_fits()
+            elif event.key in ['4', 'c']:
+                hide_context_menu()
+                export_eef_csv()
+            elif event.key in ['5', 'escape']:
                 hide_context_menu()
         else:
             if event.key in ['p', '1']:
                 export_psf_plot()
             elif event.key in ['e', '2']:
                 export_eef_plot()
+            elif event.key in ['f', '3']:
+                export_fits()
             elif event.key == 'h':
                 print("\nKeyboard shortcuts:")
                 print("  'p' or '1' - Export PSF plot")
@@ -1736,6 +1911,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     print("  'e' or '2' - Export Encircled Energy plot")
     print("  Right-click (or Ctrl+click on Mac) on plots - Show context menu")
     print("  'h' - Show help")
+    print("  'f' or '3' - Export FITS (aggregated E2E PSF)")
     
     if output:
         plt.savefig(output, dpi=150)  # Save the combined plot

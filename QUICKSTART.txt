@@ -120,6 +120,8 @@ Save without opening a window:
 
 Press 'p' to export PSF plot (saved to Figures/ folder)
 Press 'e' to export Encircled Energy plot (saved to Figures/ folder)
+Press 'f' to export aggregated E2E PSF to FITS (saved to CustomPSFs/; header includes AUTHOR/CONTACT/ORCID/INPUTFN)
+Press '4' or 'c' to export Encircled Energy Function data to CSV (saved to CustomPSFs/ as E2E_EEF_YYYYMMDD_HHMMSS.csv)
 
 FOLDER STRUCTURE
 ----------------
