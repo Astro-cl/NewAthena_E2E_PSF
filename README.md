@@ -3,6 +3,7 @@
 [![Python CI](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml/badge.svg)](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml)
 
 A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of mirror module configurations with support for multiple distribution types, perturbation analysis, and an interactive GUI.
+Documentation, comments and Unit tests written by AI.
 
 ## Table of Contents
 - [Features](#features)
@@ -38,6 +39,15 @@ A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of
 - **Free Mode**: Full manual control over all PSF parameters
 
 ## Installation
+## Author
+
+- **Ivo Ferreira** — primary author and maintainer.
+- **Affiliation:** European Space Agency
+- **Contact:** ivo.ferreira@esa.int
+
+- **ORCID:** https://orcid.org/0000-0002-9501-862X
+
+
 
 ## Release v3 (2026-01-28)
 
