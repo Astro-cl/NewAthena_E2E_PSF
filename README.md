@@ -1227,9 +1227,19 @@ mkdir -p Figures
 
 ## Version Information
 
-**Version**: 2.0  
-**Date**: January 2026  
+**Version**: 3.0  
+**Date**: 2026-01-28  
 **Python**: 3.8+
+
+### Notable changes in v3.0
+
+- Deterministic per‑MM sampling for presets: CSV and Excel generation now expand presets into numeric per‑MM `sigma`/`alpha` values, reproducible for a given filename/preset/index.
+- CSV fast-path parity with Excel: multi-sheet CSVs are materialized and handled equivalently to `.xlsx` inputs.
+- Removed legacy in‑memory/pickle flows and debug helper tools; generator no longer relies on persisted `.pkl` inputs and temporary persisted input folders were cleaned.
+- Renamed directory `sensivitiy` → `sensitivity` and updated code references and tests accordingly.
+- Replaced ad-hoc debug prints with proper `logging`; added `pytest.ini` and unit tests to validate CSV parsing and distribution parsing (tests run locally).
+- Documentation updates: `QUICKSTART.txt`, `README.md`, and `requirements.txt` updated (includes tkinter install notes for macOS/Linux/Windows).
+- Release prep: created release package and pushed tag `v3` to remote.
 
 ### Notable changes in v2.0
 
