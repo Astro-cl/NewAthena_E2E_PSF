@@ -1,9 +1,9 @@
 """
-Fix MM_PSF per-MM rows in generated workbooks under `sensivitiy/input`.
+Fix MM_PSF per-MM rows in generated workbooks under `sensitivity/input`.
 
 This script:
 - Loads standard MM_PSF definitions from the baseline workbook
-- Scans each .xlsx in `sensivitiy/input`
+- Scans each .xlsx in `sensitivity/input`
 - If a workbook's `MM_PSF` sheet contains a preset that matches a standard
   definition that provides fixed sigma/alpha values, it enforces those
   fixed numeric values into the first N per-MM rows (N inferred from the
@@ -22,17 +22,17 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SENS = ROOT / 'sensivitiy'
+SENS = ROOT / 'sensitivity'
 INPUT_DIR = SENS / 'input'
 BASELINE = ROOT / 'Distributions' / 'Test_Distribution.xlsx'
 
 # import helper from sensitivity_run if possible
 try:
-    from sensivitiy.sensitivity_run import load_standard_mm_psf_defs
+    from sensitivity.sensitivity_run import load_standard_mm_psf_defs
 except Exception:
     # fallback: try to import by path
     sys.path.insert(0, str(ROOT))
-    from sensivitiy.sensitivity_run import load_standard_mm_psf_defs
+    from sensitivity.sensitivity_run import load_standard_mm_psf_defs
 
 std_defs = {}
 if BASELINE.exists():

@@ -4,7 +4,7 @@ import numpy as np, pandas as pd, hashlib, datetime
 import importlib.util
 
 # load helper to parse standard defs
-spec_path = Path('sensivitiy/sensitivity_run.py')
+spec_path = Path('sensitivity/sensitivity_run.py')
 spec = importlib.util.spec_from_file_location('srun', spec_path)
 srun = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(srun)
@@ -12,7 +12,7 @@ spec.loader.exec_module(srun)
 baseline = Path('Distributions/Test_Distribution.xlsx')
 std = srun.load_standard_mm_psf_defs(baseline)
 
-fp = Path('sensivitiy/input/20260125T112521Z_3_A_eff1_keV_MM_PSF50_Variable_Pseudo-Voigt_8_alpha_10_Alignment0_Gravity_offloadGZ_Thermal30_deg_FMS_Tilt.xlsx')
+fp = Path('sensitivity/input/20260125T112521Z_3_A_eff1_keV_MM_PSF50_Variable_Pseudo-Voigt_8_alpha_10_Alignment0_Gravity_offloadGZ_Thermal30_deg_FMS_Tilt.xlsx')
 if not fp.exists():
     raise SystemExit(f'Target not found: {fp}')
 

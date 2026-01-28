@@ -14,7 +14,7 @@ sampling-decision is evaluated.
 Change details
 --------------
 
-- File changed: `sensivitiy/sensitivity_run.py`
+- File changed: `sensitivity/sensitivity_run.py`
 - Key changes:
   - Moved detection of "force-gamma" (Variable/percent) presets and parsing
     of percent/alpha tokens to execute prior to the sampling-decision check.
@@ -41,8 +41,8 @@ Verification
 - Ran a full generate-only sweep with `--persist` and `--generate-only` to
   regenerate inputs. All produced workbooks for Variable presets now contain
   numeric, varied per-MM `sigma_rad`/`sigma_azi` columns.
-- Ran `sensivitiy/validate_mm_psf.py` to aggregate per-workbook sampling
-  diagnostics; `sensivitiy/input/validation_report.csv` was produced.
+- Ran `sensitivity/validate_mm_psf.py` to aggregate per-workbook sampling
+ diagnostics; `sensitivity/input/validation_report.csv` was produced.
 
 Impact & compatibility
 ----------------------

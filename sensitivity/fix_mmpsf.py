@@ -2,7 +2,7 @@ from pathlib import Path
 import pandas as pd
 import sys
 sys.path.insert(0, '.')
-from sensivitiy.sensitivity_run import load_standard_mm_psf_defs
+from sensitivity.sensitivity_run import load_standard_mm_psf_defs
 from gui_distributions import generate_data_from_distributions, DATA_TYPES
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl import load_workbook
@@ -41,7 +41,7 @@ mm_list = mm_cfg['MM #'].dropna().astype(int).tolist() if 'MM #' in mm_cfg.colum
 df_gen = generate_data_from_distributions(params, num_mm, DATA_TYPES['MM_PSF'])
 df_gen.insert(0, 'MM #', mm_list[:len(df_gen)])
 
-pbase = Path('sensivitiy/input')
+pbase = Path('sensitivity/input')
 name = '20260123T221943Z_3_MM_PSF10_Variable_Sym_Gaussian_4.3_Alignment0.0_Gravity_offload0.0_Thermal0.0'
 file1 = pbase / f'{name}.xlsx'
 file2 = pbase / f'{name}_placed.xlsx'

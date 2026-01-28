@@ -2,7 +2,7 @@
 Minimal sensitivity run template.
 
 Usage examples:
-  python3 sensivitiy/sensitivity_run.py --workers 64 --persist --baseline Distributions/Test_Distribution.xlsx
+  python3 sensitivity/sensitivity_run.py --workers 64 --persist --baseline Distributions/Test_Distribution.xlsx
 
 This template does the following:
 - Ensures the trial folders exist (`input`, `workbooks`, `results`, `figures`)
@@ -567,9 +567,9 @@ def main():
         args.workers = 64
         print(f"Non-persistent run (persist flag={args.persist}, SENS_PERSIST_TMP={env_persist}): using baseline {args.baseline}, forcing workers={args.workers}")
 
-    # Prepare input directory: ephemeral tempdir when non-persistent, otherwise sensivitiy/input
+    # Prepare input directory: ephemeral tempdir when non-persistent, otherwise sensitivity/input
     if non_persistent:
-        temp_input_dir = Path(tempfile.mkdtemp(prefix='sensivitiy_input_'))
+        temp_input_dir = Path(tempfile.mkdtemp(prefix='sensitivity_input_'))
         input_dir = temp_input_dir
         print(f"Using ephemeral input directory: {input_dir} (will be removed after run)")
     else:

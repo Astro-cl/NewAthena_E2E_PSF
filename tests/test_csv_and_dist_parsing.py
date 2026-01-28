@@ -48,7 +48,7 @@ def test_parse_multisheet_csv_two_sheets(tmp_path):
 
 def load_sensitivity_module():
     repo_root = Path(__file__).resolve().parents[1]
-    mod_path = repo_root / 'sensivitiy' / 'sensitivity_run.py'
+    mod_path = repo_root / 'sensitivity' / 'sensitivity_run.py'
     spec = importlib.util.spec_from_file_location('sres', str(mod_path))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

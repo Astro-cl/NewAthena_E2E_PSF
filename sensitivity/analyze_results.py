@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import pandas as pd, glob, os
 
-res_path='sensivitiy/results/sensitivity_run_results.xlsx'
+res_path='sensitivity/results/sensitivity_run_results.xlsx'
 if os.path.exists(res_path):
     df=pd.read_excel(res_path)
     print('Results rows:', len(df))
@@ -16,7 +16,7 @@ else:
 
 # scan placed workbooks for non-numeric sigmas
 bad_files=[]
-files = glob.glob('sensivitiy/input/*_placed.xlsx') + glob.glob('sensivitiy/input/*.xlsx')
+files = glob.glob('sensitivity/input/*_placed.xlsx') + glob.glob('sensitivity/input/*.xlsx')
 for f in files:
     try:
         mm=pd.read_excel(f, sheet_name='MM_PSF', engine='openpyxl')

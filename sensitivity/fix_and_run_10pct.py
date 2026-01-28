@@ -6,7 +6,7 @@ import subprocess
 import json
 
 # Target workbook that contains the 10% preset
-target = Path('sensivitiy/input/20260123T162222Z_2_MM_PSFsigma_azi0.05_arcsec_Alignment0.0_Gravity_offload0.0_Thermal0.0.xlsx')
+target = Path('sensitivity/input/20260123T162222Z_2_MM_PSFsigma_azi0.05_arcsec_Alignment0.0_Gravity_offload0.0_Thermal0.0.xlsx')
 if not target.exists():
     print('TARGET_NOT_FOUND', target)
     raise SystemExit(1)

@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 import pandas as pd
 
-INPUT_DIR = Path('sensivitiy/input')
+INPUT_DIR = Path('sensitivity/input')
 if not INPUT_DIR.exists():
     print('No input dir:', INPUT_DIR)
     raise SystemExit(1)

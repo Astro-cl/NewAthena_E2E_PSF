@@ -2,7 +2,7 @@ from pathlib import Path
 import re
 import pandas as pd
 
-inp = Path('sensivitiy/input')
+inp = Path('sensitivity/input')
 baseline = Path('Distributions/Test_Distribution.xlsx')
 
 csvs = sorted(inp.glob('*_MM_PSF_sampling_detailed_*.csv'))
@@ -31,7 +31,7 @@ for csv in csvs:
             import re
             import pandas as pd
 
-            inp = Path('sensivitiy/input')
+            inp = Path('sensitivity/input')
             baseline = Path('Distributions/Test_Distribution.xlsx')
 
             csvs = sorted(inp.glob('*_MM_PSF_sampling_detailed_*.csv'))

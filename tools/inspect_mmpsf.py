@@ -1,5 +1,5 @@
 import pickle, pandas as pd, json, sys
-p='sensivitiy/input/20260125T000456Z_2_A_eff6_keV_MM_PSF50_Variable_Pseudo-Voigt_8_alpha_10_AlignmentStandard_medialario_Gravity_offloadGZ_Thermal30_deg_FMS_Tilt.xlsx.pkl'
+p='sensitivity/input/20260125T000456Z_2_A_eff6_keV_MM_PSF50_Variable_Pseudo-Voigt_8_alpha_10_AlignmentStandard_medialario_Gravity_offloadGZ_Thermal30_deg_FMS_Tilt.xlsx.pkl'
 with open(p,'rb') as fh:
     sheets=pickle.load(fh)
 mm = sheets.get('MM_PSF')

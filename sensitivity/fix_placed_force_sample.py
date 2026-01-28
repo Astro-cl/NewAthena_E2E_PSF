@@ -12,7 +12,7 @@ baseline = ROOT / 'Distributions' / 'Test_Distribution.xlsx'
 if len(sys.argv) > 1:
     target = Path(sys.argv[1])
 else:
-    target = Path('sensivitiy/input/20260123T232615Z_3_A_eff1_keV_MM_PSF10_Variable_Sym_Gaussian_4.3_Alignment0.0_Gravity_offload0.0_Thermal0.0_placed.xlsx')
+    target = Path('sensitivity/input/20260123T232615Z_3_A_eff1_keV_MM_PSF10_Variable_Sym_Gaussian_4.3_Alignment0.0_Gravity_offload0.0_Thermal0.0_placed.xlsx')
 
 if not target.exists():
     print('Target missing:', target)
@@ -21,7 +21,7 @@ if not target.exists():
 import sys
 sys.path.insert(0, str(ROOT))
 try:
-    from sensivitiy.sensitivity_run import load_standard_mm_psf_defs
+    from sensitivity.sensitivity_run import load_standard_mm_psf_defs
     std_defs = load_standard_mm_psf_defs(baseline)
 except Exception:
     # fallback: read template area directly

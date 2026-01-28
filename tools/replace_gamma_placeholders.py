@@ -7,7 +7,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-fp = Path('sensivitiy/input/20260125T112521Z_3_A_eff1_keV_MM_PSF50_Variable_Pseudo-Voigt_8_alpha_10_Alignment0_Gravity_offloadGZ_Thermal30_deg_FMS_Tilt.xlsx')
+fp = Path('sensitivity/input/20260125T112521Z_3_A_eff1_keV_MM_PSF50_Variable_Pseudo-Voigt_8_alpha_10_Alignment0_Gravity_offloadGZ_Thermal30_deg_FMS_Tilt.xlsx')
 if not fp.exists():
     raise SystemExit(f'Target not found: {fp}')
 mm = pd.read_excel(fp, sheet_name='MM_PSF', engine='openpyxl')
