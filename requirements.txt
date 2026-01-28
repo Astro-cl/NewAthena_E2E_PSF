@@ -3,3 +3,19 @@ numpy
 pandas
 matplotlib
 openpyxl
+
+# Note about tkinter (GUI dependency)
+# ----------------------------------
+# The `tkinter` module is part of the Python standard library but depends on
+# the underlying Tcl/Tk libraries being available on the system. It is NOT
+# typically installed via pip. On macOS you can ensure Tcl/Tk is available by
+# installing it via Homebrew and using a Python build that links against it,
+# for example:
+#
+#   brew install tcl-tk
+#
+# Then either install Python from python.org (which bundles Tcl/Tk), or use
+# a Python build that is linked against Homebrew's Tcl/Tk. If you prefer
+# a packaged approach, the system Python on macOS may already include
+# tkinter, or you can install via your distribution's package manager on
+# Linux (e.g. `sudo apt install python3-tk` on Debian/Ubuntu).
