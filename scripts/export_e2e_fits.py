@@ -70,9 +70,13 @@ def write_simple_fits(path: str, data: np.ndarray, header_cards: dict | None = N
 
 def compute_and_write(input_xlsx: str = 'Distributions/Test_Distribution.xlsx', sheet: str = 'MM_PSF', out_fits: str | None = None, nx: int = 800, ny: int = 800, normalize: bool = True):
     df = mainmod.load_gaussians_from_excel(input_xlsx, sheet=sheet)
-    # Use raw A_eff weights from the sheet. We will scale the PSF so its
-    # integral equals the sum of these A_eff weights.
-    raw_w = df['weight'].to_numpy(dtype=float)
+    # Prefer an explicit adjusted A_eff column if present (e.g. accounting for
+    # vignetting). Fall back to the loader's `weight` column otherwise.
+    # The PSF integral will be scaled to the sum of these adjusted A_eff weights.
+    if 'aeff_adjusted' in df.columns:
+        raw_w = df['aeff_adjusted'].to_numpy(dtype=float)
+    else:
+        raw_w = df['weight'].to_numpy(dtype=float)
     # Replace NaNs with 0 (missing A_eff treated as zero)
     raw_w = np.nan_to_num(raw_w, nan=0.0)
     # If there are no entries, fallback to an empty weights array
