@@ -442,8 +442,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             raise ValueError(f"Invalid 'MM #' values in PSF sheet: {bad}")
         mm_as_int = mm_as_int.astype(int)
 
-        df['weight'] = mm_as_int.map(aeff_map)
-        missing_mask = df['weight'].isna()
+        # store base A_eff per-MM and initialize weight from it; vignetting
+        # adjustments will be applied later and stored as `aeff_adjusted`.
+        df['aeff_base'] = mm_as_int.map(aeff_map)
+        df['weight'] = df['aeff_base'].astype(float)
+        missing_mask = df['aeff_base'].isna()
         if missing_mask.any():
             missing_mm = sorted(set(mm_as_int[missing_mask].tolist()))
             raise ValueError(
@@ -778,6 +781,15 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
         df.attrs['vignetting_rotazi_applied'] = bool(applied_azi)
         df.attrs['vignetting_rotrad_applied'] = bool(applied_rad)
+        try:
+            # Record adjusted A_eff and vignette factor when possible
+            df['aeff_adjusted'] = df['weight'].astype(float)
+            if 'aeff_base' in df.columns:
+                # avoid divide-by-zero
+                base = df['aeff_base'].astype(float).replace({0.0: np.nan})
+                df['aeff_vig_factor'] = df['aeff_adjusted'] / base
+        except Exception:
+            pass
     except Exception:
         # non-fatal: continue without vignetting
         pass
@@ -1065,7 +1077,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Normalize per-combo weights so they sum to 1 before computing centroids and sums.
     # This ensures HEW is computed from properly normalized mixture amplitudes.
     # Use a numpy array to avoid repeatedly accessing the DataFrame.
-    if 'weight' in df.columns:
+    # Prefer adjusted A_eff weights when available
+    if 'aeff_adjusted' in df.columns:
+        weight_arr_for_center = df['aeff_adjusted'].to_numpy(dtype=float, copy=False)
+    elif 'weight' in df.columns:
         weight_arr_for_center = df['weight'].to_numpy(dtype=float, copy=False)
     else:
         weight_arr_for_center = np.ones(len(df), dtype=float) if len(df) > 0 else np.array([], dtype=float)
