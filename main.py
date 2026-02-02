@@ -454,6 +454,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                         'd_align_azi': float(row.get('d_align_azi [µm]', 0)) * 1e-6,
                         'd_align_z': float(row.get('d_align_z [µm]', 0)) * 1e-6,
                         'd_align_rotz': float(row.get('d_align_rotz [arcsec]', 0)),
+                        'd_align_rotx': float(row.get('d_align_rotx [arcsec]', 0)),
+                        'd_align_roty': float(row.get('d_align_roty [arcsec]', 0)),
                     }
             elif 'MM #' in align_df.columns:
                 # Legacy fallback: if the sheet is keyed by MM #
@@ -469,6 +471,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                         'd_align_azi': float(row.get('d_align_azi [µm]', 0)) * 1e-6,
                         'd_align_z': float(row.get('d_align_z [µm]', 0)) * 1e-6,
                         'd_align_rotz': float(row.get('d_align_rotz [arcsec]', 0)),
+                        'd_align_rotx': float(row.get('d_align_rotx [arcsec]', 0)),
+                        'd_align_roty': float(row.get('d_align_roty [arcsec]', 0)),
                     }
         except Exception:
             pass
@@ -481,7 +485,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                 tmp = gravity_df.copy()
                 tmp['Position #'] = pd.to_numeric(tmp['Position #'], errors='coerce')
                 tmp = tmp[tmp['Position #'].notna()]
-                for c in ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]']:
+                for c in ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]', 'd_grav_rotx [arcsec]', 'd_grav_roty [arcsec]']:
                     if c in tmp.columns:
                         tmp[c] = pd.to_numeric(tmp[c], errors='coerce').fillna(0.0)
                 grp = tmp.groupby('Position #', as_index=False).sum(numeric_only=True)
@@ -492,6 +496,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                         'd_grav_y': float(row.get('d_grav_y [µm]', 0.0)) * 1e-6,
                         'd_grav_z': float(row.get('d_grav_z [µm]', 0.0)) * 1e-6,
                         'd_grav_rotz': float(row.get('d_grav_rotz [arcsec]', 0.0)),
+                        'd_grav_rotx': float(row.get('d_grav_rotx [arcsec]', 0.0)),
+                        'd_grav_roty': float(row.get('d_grav_roty [arcsec]', 0.0)),
                     }
             elif 'MM #' in gravity_df.columns:
                 for _, row in gravity_df.iterrows():
@@ -507,6 +513,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                         'd_grav_y': prev['d_grav_y'] + float(row.get('d_grav_y [µm]', 0.0)) * 1e-6,
                         'd_grav_z': prev['d_grav_z'] + float(row.get('d_grav_z [µm]', 0.0)) * 1e-6,
                         'd_grav_rotz': prev['d_grav_rotz'] + float(row.get('d_grav_rotz [arcsec]', 0.0)),
+                        'd_grav_rotx': prev.get('d_grav_rotx', 0.0) + float(row.get('d_grav_rotx [arcsec]', 0.0)),
+                        'd_grav_roty': prev.get('d_grav_roty', 0.0) + float(row.get('d_grav_roty [arcsec]', 0.0)),
                     }
         except Exception:
             pass
@@ -519,7 +527,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                 tmp = thermal_df.copy()
                 tmp['Position #'] = pd.to_numeric(tmp['Position #'], errors='coerce')
                 tmp = tmp[tmp['Position #'].notna()]
-                for c in ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]']:
+                for c in ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]', 'd_therm_rotx [arcsec]', 'd_therm_roty [arcsec]']:
                     if c in tmp.columns:
                         tmp[c] = pd.to_numeric(tmp[c], errors='coerce').fillna(0.0)
                 grp = tmp.groupby('Position #', as_index=False).sum(numeric_only=True)
@@ -530,6 +538,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                         'd_therm_y': float(row.get('d_therm_y [µm]', 0.0)) * 1e-6,
                         'd_therm_z': float(row.get('d_therm_z [µm]', 0.0)) * 1e-6,
                         'd_therm_rotz': float(row.get('d_therm_rotz [arcsec]', 0.0)),
+                        'd_therm_rotx': float(row.get('d_therm_rotx [arcsec]', 0.0)),
+                        'd_therm_roty': float(row.get('d_therm_roty [arcsec]', 0.0)),
                     }
             elif 'MM #' in thermal_df.columns:
                 for _, row in thermal_df.iterrows():
@@ -545,6 +555,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None) -> pd.DataFra
                         'd_therm_y': prev['d_therm_y'] + float(row.get('d_therm_y [µm]', 0.0)) * 1e-6,
                         'd_therm_z': prev['d_therm_z'] + float(row.get('d_therm_z [µm]', 0.0)) * 1e-6,
                         'd_therm_rotz': prev['d_therm_rotz'] + float(row.get('d_therm_rotz [arcsec]', 0.0)),
+                        'd_therm_rotx': prev.get('d_therm_rotx', 0.0) + float(row.get('d_therm_rotx [arcsec]', 0.0)),
+                        'd_therm_roty': prev.get('d_therm_roty', 0.0) + float(row.get('d_therm_roty [arcsec]', 0.0)),
                     }
         except Exception:
             pass

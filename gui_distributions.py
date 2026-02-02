@@ -18,34 +18,40 @@ DATA_TYPES = {
         'sheet_name': 'Alignment',
         'tab_label': 'Alignment',
         # Use radial/azimuthal names to match preset table headers
-        'params': ['d_align_rad [µm]', 'd_align_azi [µm]', 'd_align_z [µm]', 'd_align_rotz [arcsec]'],
+        'params': ['d_align_rad [µm]', 'd_align_azi [µm]', 'd_align_z [µm]', 'd_align_rotz [arcsec]', 'd_align_rotx [arcsec]', 'd_align_roty [arcsec]'],
         'defaults': {
             'd_align_rad [µm]': (0, 0.1),
             'd_align_azi [µm]': (0, 0.1),
             'd_align_z [µm]': (0, 0.1),
-            'd_align_rotz [arcsec]': (0, 0.01)
+            'd_align_rotz [arcsec]': (0, 0.01),
+            'd_align_rotx [arcsec]': (0, 0.01),
+            'd_align_roty [arcsec]': (0, 0.01)
         }
     },
     'Thermal': {
         'sheet_name': 'Thermal',
         'tab_label': 'Thermal',
-        'params': ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]'],
+        'params': ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]', 'd_therm_rotx [arcsec]', 'd_therm_roty [arcsec]'],
         'defaults': {
             'd_therm_x [µm]': (0, 0.1),
             'd_therm_y [µm]': (0, 0.1),
             'd_therm_z [µm]': (0, 0.1),
-            'd_therm_rotz [arcsec]': (0, 0.01)
+            'd_therm_rotz [arcsec]': (0, 0.01),
+            'd_therm_rotx [arcsec]': (0, 0.01),
+            'd_therm_roty [arcsec]': (0, 0.01)
         }
     },
     'Gravity offload': {
         'sheet_name': 'Gravity offload',
         'tab_label': 'Gravity offload',
-        'params': ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]'],
+        'params': ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]', 'd_grav_rotx [arcsec]', 'd_grav_roty [arcsec]'],
         'defaults': {
             'd_grav_x [µm]': (0, 0.1),
             'd_grav_y [µm]': (0, 0.1),
             'd_grav_z [µm]': (0, 0.1),
-            'd_grav_rotz [arcsec]': (0, 0.01)
+            'd_grav_rotz [arcsec]': (0, 0.01),
+            'd_grav_rotx [arcsec]': (0, 0.01),
+            'd_grav_roty [arcsec]': (0, 0.01)
         }
     },
     'MM_PSF': {
@@ -773,8 +779,23 @@ class ExtendedGUI:
 
         try:
             start_row = 0
-            name_col = 6
-            first_var_col = 7
+            # Historically presets lived starting at column G (index 6). New workbooks
+            # may place preset names in M/N (indexes 12/13). Try common candidates
+            # and fall back to 6 when none are populated.
+            candidate_name_cols = [6, 12, 13]
+            name_col = None
+            first_var_col = None
+            for c in candidate_name_cols:
+                if c < df.shape[1]:
+                    # check if there is at least one non-empty preset name below header
+                    col_vals = df.iloc[start_row + 1 : start_row + 20, c]
+                    if col_vals.notna().any():
+                        name_col = c
+                        break
+            if name_col is None:
+                name_col = 6
+            # variable specs historically start to the right of the name column
+            first_var_col = name_col + 1
 
             if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
                 return
@@ -836,8 +857,17 @@ class ExtendedGUI:
         self.thermal_standard_presets = {}
         try:
             start_row = 0
-            name_col = 6
-            first_var_col = 7
+            candidate_name_cols = [6, 12, 13]
+            name_col = None
+            for c in candidate_name_cols:
+                if c < df.shape[1]:
+                    col_vals = df.iloc[start_row + 1 : start_row + 20, c]
+                    if col_vals.notna().any():
+                        name_col = c
+                        break
+            if name_col is None:
+                name_col = 6
+            first_var_col = name_col + 1
             if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
                 return
 
@@ -894,8 +924,17 @@ class ExtendedGUI:
         self.gravity_standard_presets = {}
         try:
             start_row = 0
-            name_col = 6
-            first_var_col = 7
+            candidate_name_cols = [6, 12, 13]
+            name_col = None
+            for c in candidate_name_cols:
+                if c < df.shape[1]:
+                    col_vals = df.iloc[start_row + 1 : start_row + 20, c]
+                    if col_vals.notna().any():
+                        name_col = c
+                        break
+            if name_col is None:
+                name_col = 6
+            first_var_col = name_col + 1
             if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
                 return
 

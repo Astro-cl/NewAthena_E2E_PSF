@@ -1163,6 +1163,8 @@ def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], 
                     "d_align_azi": float(row.get("d_align_azi [µm]", 0.0)) * 1e-6,
                     "d_align_z": float(row.get("d_align_z [µm]", 0.0)) * 1e-6,
                     "d_align_rotz": float(row.get("d_align_rotz [arcsec]", 0.0)),
+                    "d_align_rotx": float(row.get("d_align_rotx [arcsec]", 0.0)),
+                    "d_align_roty": float(row.get("d_align_roty [arcsec]", 0.0)),
                 }
     except Exception:
         pass
@@ -1182,7 +1184,7 @@ def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], 
             grp = _sum_by_position(
                 grav_df,
                 "Position #",
-                ["d_grav_x [µm]", "d_grav_y [µm]", "d_grav_z [µm]", "d_grav_rotz [arcsec]"],
+                ["d_grav_x [µm]", "d_grav_y [µm]", "d_grav_z [µm]", "d_grav_rotz [arcsec]", "d_grav_rotx [arcsec]", "d_grav_roty [arcsec]"],
             )
             for _, row in grp.iterrows():
                 pos = int(row["Position #"])
@@ -1191,6 +1193,8 @@ def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], 
                     "d_grav_y": float(row.get("d_grav_y [µm]", 0.0)) * 1e-6,
                     "d_grav_z": float(row.get("d_grav_z [µm]", 0.0)) * 1e-6,
                     "d_grav_rotz": float(row.get("d_grav_rotz [arcsec]", 0.0)),
+                    "d_grav_rotx": float(row.get("d_grav_rotx [arcsec]", 0.0)),
+                    "d_grav_roty": float(row.get("d_grav_roty [arcsec]", 0.0)),
                 }
     except Exception:
         pass
@@ -1201,7 +1205,7 @@ def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], 
             grp = _sum_by_position(
                 therm_df,
                 "Position #",
-                ["d_therm_x [µm]", "d_therm_y [µm]", "d_therm_z [µm]", "d_therm_rotz [arcsec]"],
+                ["d_therm_x [µm]", "d_therm_y [µm]", "d_therm_z [µm]", "d_therm_rotz [arcsec]", "d_therm_rotx [arcsec]", "d_therm_roty [arcsec]"],
             )
             for _, row in grp.iterrows():
                 pos = int(row["Position #"])
@@ -1210,6 +1214,8 @@ def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], 
                     "d_therm_y": float(row.get("d_therm_y [µm]", 0.0)) * 1e-6,
                     "d_therm_z": float(row.get("d_therm_z [µm]", 0.0)) * 1e-6,
                     "d_therm_rotz": float(row.get("d_therm_rotz [arcsec]", 0.0)),
+                    "d_therm_rotx": float(row.get("d_therm_rotx [arcsec]", 0.0)),
+                    "d_therm_roty": float(row.get("d_therm_roty [arcsec]", 0.0)),
                 }
     except Exception:
         pass
