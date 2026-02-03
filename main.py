@@ -2093,9 +2093,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 f.write(header_bytes)
                 f.write(data_bytes)
 
-        # Total A_eff from the DataFrame weights (df in closure)
+        # Total A_eff from the DataFrame weights (df in closure).
+        # Prefer the adjusted A_eff (after vignetting) when available.
         try:
-            total_aeff_local = float(np.nansum(df['weight']))
+            if 'aeff_adjusted' in df.columns:
+                total_aeff_local = float(np.nansum(df['aeff_adjusted']))
+            else:
+                total_aeff_local = float(np.nansum(df['weight']))
         except Exception:
             total_aeff_local = float(np.nansum(weight_arr)) if 'weight_arr' in locals() else 0.0
 
