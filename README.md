@@ -3,18 +3,27 @@
 [![Python CI](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml/badge.svg)](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml)
 
 A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of mirror module configurations with support for multiple distribution types, perturbation analysis, and an interactive GUI.
-Documentation, comments and Unit tests written by AI.
 
-## Table of Contents
+> **Documentation, comments and Unit tests written by AI.**
+
+## Documentation Index
+
+| Document | Description |
+|----------|-------------|
+| [README.md](README.md) | This file - main project overview and guide |
+| [QUICKSTART.txt](QUICKSTART.txt) | Quick start instructions for common tasks |
+| [DOCS_GUI.md](DOCS_GUI.md) | GUI user manual with screenshots and workflows |
+| [DOCS_SUMMARY.md](DOCS_SUMMARY.md) | Summary of core modules and API reference |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Guidelines for contributors |
+| [RELEASE_NOTES.md](RELEASE_NOTES.md) | Release history and change log |
+| [SENSITIVITY_QUICKSTART.txt](SENSITIVITY_QUICKSTART.txt) | Sensitivity pipeline guide |
+
+## Quick Links
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Directory Structure](#directory-structure)
 - [Usage](#usage)
 - [Distribution Types](#distribution-types)
-- [GUI Guide](#gui-guide)
-- [Command Line Usage](#command-line-usage)
-- [File Formats](#file-formats)
 
 ## Sensitivity Pipeline
 
@@ -177,28 +186,41 @@ See `DOCS_SUMMARY.md` for a short map of key files and recommended next steps.
 
 ## Docs Index
 
+For detailed documentation, see:
+
+| Topic | Document |
+|-------|----------|
+| Core CLI & analysis | [README.md](README.md) |
+| GUI usage & screenshots | [DOCS_GUI.md](DOCS_GUI.md) |
+| API reference | [DOCS_SUMMARY.md](DOCS_SUMMARY.md) |
+| Contributing guidelines | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Release history | [RELEASE_NOTES.md](RELEASE_NOTES.md) |
+| Quick start guide | [QUICKSTART.txt](QUICKSTART.txt) |
+| Sensitivity pipeline | [SENSITIVITY_QUICKSTART.txt](SENSITIVITY_QUICKSTART.txt) |
+
+### Core Modules
 - **Core loader & CLI:** [main.py](main.py)
 - **GUI application:** [gui_distributions.py](gui_distributions.py)
 - **Distribution utilities:** [distributions_rotated.py](distributions_rotated.py)
 - **Row optimizer & helpers:** [optimize_mm_rows.py](optimize_mm_rows.py)
-- **Summary of docs:** [DOCS_SUMMARY.md](DOCS_SUMMARY.md)
 
 ## Directory Structure
 
 ```
-NewAthenaE2EPSF_v2/
+NewAthenaE2EPSF_v3/
 ├── README.md                      # This file
 ├── requirements.txt               # Python dependencies
-├── distributions_rotated.py       # Core distribution functions
 ├── main.py                        # CLI analyzer and plotter
-├── optimize_mm_rows.py             # Optimizer + placement + Excel writer (preserves formatting)
 ├── gui_distributions.py           # Interactive GUI application
+├── distributions_rotated.py       # Core distribution functions
+├── optimize_mm_rows.py            # MM optimizer + placement + Excel writer
 ├── Distributions/                 # Excel spreadsheet location
 │   ├── Test_Distribution.xlsx    # Example file
-│   └── your_data.xlsx            # Your files go here (add your own)
-└── Figures/                       # Exported plots location
-    ├── E2E_PSF_*.png
-    └── Encircled_Energy_*.png
+│   └── your_data.xlsx             # Your files go here
+├── Figures/                       # Exported plots location
+│   ├── E2E_PSF_*.png
+│   └── Encircled_Energy_*.png
+└── scripts/                       # Helper scripts for export/diagnostics
 ```
 
 ## Usage
