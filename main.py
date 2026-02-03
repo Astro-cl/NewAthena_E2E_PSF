@@ -358,14 +358,31 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     # `--input-csv` was used to provide a CSV path. In these cases we read the
     # supplied CSV directly into a DataFrame. Otherwise fall back to Excel.
     try:
-        is_csv = isinstance(path, str) and (str(path).lower().endswith('.csv') or getattr(sys.modules['__main__'], 'args', None) and getattr(sys.modules['__main__'].args, 'input_csv', None))
+        # Treat Path or str uniformly by converting to string first.
+        arg_input_csv = getattr(sys.modules.get('__main__'), 'args', None)
+        arg_input_csv = getattr(arg_input_csv, 'input_csv', None) if arg_input_csv is not None else None
+        is_csv = str(path).lower().endswith('.csv') or bool(arg_input_csv)
     except Exception:
-        is_csv = isinstance(path, str) and str(path).lower().endswith('.csv')
+        is_csv = str(path).lower().endswith('.csv')
 
     if is_csv:
         # If main was invoked with --input-csv, that path will be passed as `path`.
+        # Support two CSV flavors:
+        # 1) Plain CSV that directly contains the `MM_PSF` table.
+        # 2) Multisheet-style CSV where sheets are separated by marker lines
+        #    like '# sheet: Sheet Name' (produced by `parse_multisheet_csv`).
         try:
-            df = pd.read_csv(path)
+            # Try parsing as multisheet CSV first
+            try:
+                parsed = parse_multisheet_csv(path)
+                if isinstance(parsed, dict) and 'MM_PSF' in parsed:
+                    df = parsed['MM_PSF']
+                else:
+                    # Fallback to normal CSV read
+                    df = pd.read_csv(path)
+            except Exception:
+                # Normal CSV fallback
+                df = pd.read_csv(path)
         except Exception as e:
             # Fall back to Excel reader if CSV read fails
             kwargs = {"engine": "openpyxl"}
@@ -397,46 +414,63 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     # - map similar column names (e.g. 'm_rad', 'm_rad [arcsec]', 'm rad (arcsec)')
     # - if headerless, assume first 4 columns are the required ones
     if not all(c in df.columns for c in required):
+        # Normalize column names: remove unit suffixes in brackets, collapse
+        # whitespace, and strip punctuation so we can match flexible headers.
         cols = [str(c).strip() for c in df.columns]
-        import re
-        # build mapping by fuzzy match
+        def norm(name: str) -> str:
+            import re
+            s = str(name).lower()
+            # remove bracketed unit annotations like ' [arcsec]'
+            s = re.sub(r"\[.*?\]", "", s)
+            # replace non-alphanumeric with underscore
+            s = re.sub(r"[^0-9a-z]+", "_", s)
+            s = s.strip("_")
+            return s
+
+        norm_cols = {c: norm(c) for c in cols}
         mapping = {}
-        for req in required:
-            key = None
-            rq = req.split()[0]  # e.g. 'm_rad'
-            for c in cols:
-                low = c.lower()
-                if rq.replace('_', '') in low.replace(' ', '').replace('_', ''):
-                    key = c
+        # Desired base tokens for required names (without units)
+        desired = {
+            'm_rad [arcsec]': 'm_rad',
+            'm_azi [arcsec]': 'm_azi',
+            'sigma_rad [arcsec]': 'sigma_rad',
+            'sigma_azi [arcsec]': 'sigma_azi',
+        }
+
+        for req_full, token in desired.items():
+            found = None
+            for orig, nc in norm_cols.items():
+                if token.replace('_', '') == nc.replace('_', ''):
+                    found = orig
                     break
-                # also allow sigma_rad -> contains 'sigma' and 'rad'
-                parts = rq.replace('_', ' ').split()
-                if all(p in low for p in parts):
-                    key = c
-                    break
-            if key:
-                mapping[key] = req
+            if found is None:
+                # try more relaxed matches: token parts contained in normalized name
+                parts = token.split('_')
+                for orig, nc in norm_cols.items():
+                    if all(p in nc for p in parts):
+                        found = orig
+                        break
+            if found:
+                mapping[found] = req_full
 
         if len(mapping) == len(required):
-            # rename detected columns to required names
             df = df.rename(columns={k: v for k, v in mapping.items()})
         else:
-            # fallback: if there are at least 4 columns, assume order
+            # As a last resort, if there are >=4 columns, assume first four are
+            # the required fields (common in headerless templates). Preserve
+            # any named 'MM #' column if present elsewhere.
             if df.shape[1] >= 4:
                 orig_cols = list(df.columns)
                 warn_cols = orig_cols[:4]
                 print(f"Warning: MM_PSF appears headerless or uses non-standard headers {warn_cols}; assuming order {required}.")
                 df = df.copy()
                 df.columns = required + orig_cols[4:]
-                # If original workbook included an 'MM #' column inside the first
-                # four columns (common in some templates), restore it so later
-                # logic can locate MM # reliably.
                 if 'MM #' not in df.columns and 'MM #' in orig_cols:
                     mm_idx = orig_cols.index('MM #')
-                    # copy by position to avoid name clashes
                     df['MM #'] = df.iloc[:, mm_idx]
             else:
-                raise ValueError(f"Excel must contain columns: {required}")  # Raise error if not
+                # Provide a clearer error message that includes available columns
+                raise ValueError(f"Excel must contain columns: {required}. Found columns: {cols}")
     
     # Convert from arcsec to meters using project-specific convention.
     # Historically this code used an extra factor of 12; preserve that
@@ -534,26 +568,41 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     
     # If MM # present, always override weight from A_eff (strictly from column B).
     if 'MM #' in df.columns:
-        aeff_map = load_aeff_weight_map(path)
-
+        # For Excel inputs, load authoritative per-MM A_eff from the A_eff sheet
+        # (strict: column B). For CSV-only inputs (commonly produced by the
+        # sensitivity runner), the CSV typically contains only the MM_PSF
+        # table and no A_eff sheet. In that case, prefer an existing 'weight'
+        # column in the CSV or fall back to 1.0 to allow processing.
         mm_as_int = pd.to_numeric(df['MM #'], errors='coerce')
         if mm_as_int.isna().any():
             bad = df.loc[mm_as_int.isna(), 'MM #'].head(10).tolist()
             raise ValueError(f"Invalid 'MM #' values in PSF sheet: {bad}")
         mm_as_int = mm_as_int.astype(int)
 
-        # store base A_eff per-MM and initialize weight from it; vignetting
-        # adjustments will be applied later and stored as `aeff_adjusted`.
-        df['aeff_base'] = mm_as_int.map(aeff_map)
-        df['weight'] = df['aeff_base'].astype(float)
-        missing_mask = df['aeff_base'].isna()
-        if missing_mask.any():
-            missing_mm = sorted(set(mm_as_int[missing_mask].tolist()))
-            raise ValueError(
-                "Missing A_eff weights for some MMs. "
-                "A_eff column B must contain a numeric weight for every MM used. "
-                f"Missing examples: {missing_mm[:20]}"
-            )
+        if is_csv:
+            # If CSV provided a 'weight' column, use it per-MM; otherwise default
+            # to 1.0 for all MMs (sensitivity runner will have applied A_eff via
+            # the baseline workbook when needed).
+            if 'weight' in df.columns:
+                df['aeff_base'] = pd.to_numeric(df['weight'], errors='coerce').fillna(1.0)
+                df['weight'] = df['aeff_base'].astype(float)
+            else:
+                df['aeff_base'] = 1.0
+                df['weight'] = 1.0
+        else:
+            aeff_map = load_aeff_weight_map(path)
+            # store base A_eff per-MM and initialize weight from it; vignetting
+            # adjustments will be applied later and stored as `aeff_adjusted`.
+            df['aeff_base'] = mm_as_int.map(aeff_map)
+            df['weight'] = df['aeff_base'].astype(float)
+            missing_mask = df['aeff_base'].isna()
+            if missing_mask.any():
+                missing_mm = sorted(set(mm_as_int[missing_mask].tolist()))
+                raise ValueError(
+                    "Missing A_eff weights for some MMs. "
+                    "A_eff column B must contain a numeric weight for every MM used. "
+                    f"Missing examples: {missing_mm[:20]}"
+                )
     
     # Load all perturbation deltas and MM configuration.
     # Important: Alignment/Thermal/Gravity offload are allocated per *position* (slot),
