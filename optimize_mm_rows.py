@@ -16,13 +16,26 @@ from distributions_rotated import gaussian_2d_rotated, pseudo_voigt_2d_rotated
 
 
 def _theta_degrees_from_xy(x: float, y: float) -> float:
-    """Match compute_theta_maps() logic but for a single slot."""
+    """Return the slot angle in degrees used by placement helpers.
+
+    This mirrors the `compute_theta_maps()` convention used elsewhere:
+    - Input (x, y) are MM coordinates in meters.
+    - The returned angle is clockwise-from-Y (project convention) converted
+      into the internal `theta_degrees` convention used for per-slot rotations.
+    """
     theta_ccw = float(np.degrees(np.arctan2(x, y)))
     theta_cw_from_y = theta_ccw if theta_ccw >= 0 else 180.0 + theta_ccw
     return -(theta_cw_from_y - 90.0)
 
 
 def _mux_muy_for_slot(m_rad: float, m_azi: float, x_mm: float, y_mm: float, r_mm: float) -> tuple[float, float]:
+    """Convert polar (m_rad, m_azi) offsets into Cartesian (mux, muy) for a slot.
+
+    Parameters
+    - m_rad, m_azi: offsets in meters along radial and azimuthal axes.
+    - x_mm, y_mm: slot coordinates in meters.
+    - r_mm: radial distance; if zero, a small fallback prevents division by zero.
+    """
     r = float(r_mm) if float(r_mm) != 0.0 else 1e-9
     u_rad_x = float(x_mm) / r
     u_rad_y = float(y_mm) / r

@@ -15,7 +15,8 @@ def test_fast_metrics_matches_slow_tolerance():
     This test compares HEW and EEF90 diameters (arcsec) between the
     analytical fast path and the reference slow polar-integration path.
     """
-    path = 'Distributions/NewTest_Distribution.xlsx'
+    # Use the available test workbook in the repository
+    path = 'Distributions/Test_Distribution.xlsx'
 
     # slow (reference) path
     df_ref = load_gaussians_from_excel(path, fast_metrics=False)

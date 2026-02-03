@@ -1,3 +1,23 @@
+"""
+gui_distributions.py
+--------------------
+Tkinter-based interactive GUI for generating and exporting per-MM
+distribution parameters used by the PSF analysis pipeline.
+
+Key responsibilities:
+- Load Excel workbooks containing MM configuration, A_eff, MM_PSF presets
+    and perturbation tables (Alignment, Thermal, Gravity offload).
+- Provide a user-friendly preset selection and per-MM application flow.
+- Export generated parameter tables back to Excel while preserving other
+    workbook sheets and formatting where possible.
+
+Notes:
+- The A_eff tab includes an "Apply vignetting factors when exporting"
+    checkbox which, when set and used with a standard A_eff preset, will copy
+    the selected energy column from the `Vignetting rotazi` / `Vignetting rotrad`
+    sheets into column B of those sheets prior to saving the workbook.
+"""
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import numpy as np
@@ -277,6 +297,7 @@ class ExtendedGUI:
         self.aeff_fixed_var = tk.StringVar(value='')
         self.aeff_selected_preset_var = tk.StringVar(value='')
         self.aeff_pending_export = False
+        self.aeff_apply_vig_var = tk.BooleanVar(value=False)
         # When True, do not show modal 'Applied preset' dialogs (useful during UI setup)
         self.suppress_standard_apply_modals = False
         self.export_mode_var = tk.StringVar(value='current')
@@ -1634,6 +1655,16 @@ class ExtendedGUI:
         except Exception:
             pass
 
+        # Vignetting application checkbox (visible only for 'standard' mode)
+        self.aeff_vig_row = ttk.Frame(container)
+        self.aeff_vig_row.grid(row=4, column=0, columnspan=3, sticky='w', padx=5, pady=2)
+        self.aeff_vig_check = ttk.Checkbutton(
+            self.aeff_vig_row,
+            text='Apply vignetting factors when exporting',
+            variable=self.aeff_apply_vig_var,
+        )
+        self.aeff_vig_check.pack(side='left')
+
         # Populate preset list if already loaded
         self.refresh_aeff_preset_controls()
         self.toggle_aeff_mode()
@@ -1664,11 +1695,19 @@ class ExtendedGUI:
                 self.aeff_fixed_entry.state(['!disabled'])
             except Exception:
                 pass
+            try:
+                self.aeff_vig_row.grid_remove()
+            except Exception:
+                pass
         else:
             self.aeff_fixed_row.grid_remove()
             self.aeff_std_row.grid()
             try:
                 self.aeff_fixed_entry.state(['disabled'])
+            except Exception:
+                pass
+            try:
+                self.aeff_vig_row.grid()
             except Exception:
                 pass
 
@@ -4270,6 +4309,69 @@ class ExtendedGUI:
                         ws.cell(row=r, column=1, value=mm_i)
                         mm_to_row[mm_i] = r
                     ws.cell(row=mm_to_row[mm_i], column=2, value=float(self.aeff_weights[mm_i]))
+
+            # If user requested, apply vignetting factors: copy selected-energy column
+            # from the vignetting sheets into column B of those sheets.
+            try:
+                if self.aeff_apply_vig_var.get() and self.aeff_mode_var.get() == 'standard':
+                    preset = str(self.aeff_selected_preset_var.get()).strip()
+                    if not preset:
+                        raise ValueError('No A_eff standard preset selected for vignetting copy')
+
+                    from openpyxl.utils import column_index_from_string
+
+                    def _normalize(s):
+                        return ''.join(str(s).lower().split()).replace('@', '') if s is not None else ''
+
+                    for vig_sheet in ('Vignetting rotazi', 'Vignetting rotrad'):
+                        if vig_sheet not in wb.sheetnames:
+                            continue
+                        wsv = wb[vig_sheet]
+                        # Ensure there is at least two columns; if not, create header for B
+                        if wsv.max_column < 2:
+                            try:
+                                wsv.cell(row=1, column=2, value='factor')
+                            except Exception:
+                                pass
+
+                        # Attempt 1: if preset is a column letter like 'K', use it
+                        src_col_idx = None
+                        if re.fullmatch(r'[A-Za-z]{1,3}', preset):
+                            try:
+                                src_col_idx = column_index_from_string(preset.upper())
+                            except Exception:
+                                src_col_idx = None
+
+                        # Attempt 2: search header row for a header containing the preset string
+                        if src_col_idx is None:
+                            hdr = [ (cell.value or '') for cell in list(wsv[1]) ]
+                            norm_p = _normalize(preset)
+                            for ci, hv in enumerate(hdr, start=1):
+                                if hv is None:
+                                    continue
+                                if norm_p and norm_p in _normalize(hv):
+                                    src_col_idx = ci
+                                    break
+
+                        if src_col_idx is None:
+                            # nothing matched; skip this sheet
+                            continue
+
+                        # Copy values from src_col_idx -> column 2 (B) for all data rows
+                        for r in range(2, wsv.max_row + 1):
+                            try:
+                                v = wsv.cell(row=r, column=src_col_idx).value
+                                wsv.cell(row=r, column=2, value=v)
+                            except Exception:
+                                continue
+                    # Inform user of applied vignetting copy
+                    # (non-fatal if some sheets were missing)
+            except Exception as e:
+                # Make this non-fatal but inform the user
+                try:
+                    messagebox.showwarning('Vignetting copy', f'Could not apply vignetting copy: {e}')
+                except Exception:
+                    pass
             
             # Save workbook
             wb.save(target_path)

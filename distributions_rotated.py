@@ -1,7 +1,17 @@
 """Rotated 2D Gaussian and Pseudo-Voigt utilities.
 
-Provides gaussian_2d_rotated and pseudo_voigt_2d_rotated functions
-for angle-based rotated distributions (azi/rad coordinates).
+This module provides helpers to load separable PSF matrices and evaluate
+rotated 2D distributions used across the project.
+
+Key functions:
+- `gaussian_2d_rotated`: standard rotated 2D Gaussian.
+- `pseudo_voigt_2d_rotated`: separable 2D pseudo-Voigt built from two 1D PVs.
+- `load_psf_matrix_excel` / `eval_psf_matrix_rotated`: helpers to load and
+    resample discrete PSF matrices defined on an (x,y) grid.
+
+All distances are handled in meters in the public APIs; callers convert
+arcsec->meters using the project's `arcsec_to_m` factor before calling
+matrix loaders where appropriate.
 """
 import numpy as np
 
@@ -20,6 +30,8 @@ def _sort_axis_and_reorder(axis: np.ndarray, data: np.ndarray, axis_is_x: bool) 
     else:
         data_sorted = data[order, :]
     return axis_sorted, data_sorted
+
+
 
 
 def load_psf_matrix_excel(

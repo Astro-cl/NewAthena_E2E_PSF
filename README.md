@@ -124,6 +124,14 @@ python3 main.py -f Distributions/your_file.xlsx
 If you don’t pass `--output`, a window opens with interactive export shortcuts.
 If you pass `--output`, the combined figure is saved to that path and the script exits without opening a window.
 
+## Documentation updates (2026-02-03)
+
+- Added module-level documentation to core modules and a contributor guide.
+- Introduced `DOCS_SUMMARY.md` and `CONTRIBUTING.md` to the repository root.
+- Cleaned up transient debug scripts from `scripts/` and added placeholders where helpful.
+
+See `DOCS_SUMMARY.md` for a short map of key files and recommended next steps.
+
 ## Directory Structure
 
 ```

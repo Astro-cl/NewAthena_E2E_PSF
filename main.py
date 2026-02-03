@@ -1,4 +1,33 @@
 
+"""
+main.py
+-------
+Core loader, transformer and PSF summation utilities for the MM configuration
+workspace.
+
+This module provides the following responsibilities:
+- Read and normalize multi-sheet CSV/Excel inputs (`parse_multisheet_csv`,
+    `load_gaussians_from_excel`, `load_aeff_weight_map`).
+- Apply per-position perturbations (alignment, gravity, thermal) and compute
+    projected rotation/polar components used for vignetting lookup
+    (`compute_total_rot_polar`).
+- Convert polar offsets to Cartesian offsets and assemble per-MM Gaussian
+    parameters suitable for summation and plotting (`plot_sum`).
+
+Design notes and contracts:
+- The authoritative A_eff weights MUST come from column B of the `A_eff`
+    sheet; `load_aeff_weight_map` enforces this and raises on missing/invalid
+    numeric values.
+- Perturbation sheets (Alignment, Gravity offload, Thermal) are interpreted
+    per-position; MMs are mapped to positions using `MM configuration`.
+- Vignetting (rotazi/rotrad) is applied multiplicatively to the A_eff weight
+    after weights are initialized; the GUI may override column B during export
+    when the user requests applying vignette columns.
+
+This docstring is intentionally high-level; individual functions contain more
+detailed contracts and examples where appropriate.
+"""
+
 import argparse  # For parsing command-line arguments
 import numpy as np  # For numerical operations and arrays
 import pandas as pd  # For data manipulation and Excel reading
@@ -88,6 +117,19 @@ def load_aeff_weight_map(path: str, sheet: str = 'A_eff') -> dict[int, float]:
     - If the sheet is missing, or any MM has a missing/non-numeric weight in column B,
       this function raises ValueError.
     """
+    # Notes / examples:
+    # - Typical A_eff sheet layout (headerful):
+    #     | MM # | A_eff |
+    #     | 100  | 1.0   |
+    #     | 300  | 1.0   |
+    #   This routine prefers explicit header names but will fall back to
+    #   scanning the top rows for a headerless layout. The implementation is
+    #   conservative and will raise early if numeric weights cannot be located
+    #   for any MM present in the PSF sheet.
+    # - The caller (usually `load_gaussians_from_excel`) depends on this
+    #   function to provide the authoritative per-MM base throughput. Any
+    #   subsequent vignetting adjustments are applied multiplicatively to the
+    #   returned weights inside the loader.
     # Support CSV inputs: if a CSV path is provided, try to read weight
     # information from the CSV itself (columns 'MM #' and 'weight' or 'A_eff').
     is_csv = isinstance(path, str) and str(path).lower().endswith('.csv')
@@ -231,16 +273,25 @@ def load_aeff_weight_map_with_name(path: str, sheet: str = 'A_eff') -> tuple[dic
 
     weight_col = None
     if mm_col is not None:
-        # prefer an energy-like column (e.g. '0.25 keV') or common names
+        # Prefer explicit energy-like columns (e.g. 'A_eff @1 keV' or '@1 keV').
+        # This ensures users get the per-energy A_eff instead of a generic
+        # normalized 'A_eff' column that may contain placeholder ones.
         for c in cols:
-            if re.search(r"\d+\.?\d*\s*(keV)?", c, flags=re.IGNORECASE) or c.lower().strip() in {'a_eff', 'weight'}:
+            if re.search(r"\d+\.?\d*\s*(keV)?", c, flags=re.IGNORECASE):
                 weight_col = c
                 break
+        # Fallbacks: specific common names, then any 'a_eff'/'eff'/'weight' match
+        if weight_col is None:
+            for c in cols:
+                if c.lower().strip() in {'a_eff', 'weight'}:
+                    weight_col = c
+                    break
         if weight_col is None:
             for c in cols:
                 if re.search(r"a[_ ]?eff|eff|weight", c, flags=re.IGNORECASE):
                     weight_col = c
                     break
+        # Final fallback: the column after the MM column
         if weight_col is None:
             try:
                 idx = cols.index(mm_col)
@@ -250,6 +301,42 @@ def load_aeff_weight_map_with_name(path: str, sheet: str = 'A_eff') -> tuple[dic
                 weight_col = None
 
     mapping = load_aeff_weight_map(path, sheet=sheet)
+
+    # If the headerful sheet contains explicit energy columns, prefer them
+    # (choose '@1 keV' if present, otherwise the first 'A_eff @' column).
+    try:
+        raw = pd.read_excel(path, sheet_name=sheet, engine='openpyxl')
+        pref = None
+        for c in raw.columns:
+            if isinstance(c, str) and '@1 keV' in c.lower():
+                pref = c
+                break
+        if pref is None:
+            for c in raw.columns:
+                if isinstance(c, str) and 'a_eff @' in c.lower():
+                    pref = c
+                    break
+        if pref is not None:
+            # find MM column name
+            mm_col = None
+            for cc in raw.columns:
+                if isinstance(cc, str) and re.search(r"\bmm\b|mm#", cc, flags=re.IGNORECASE):
+                    mm_col = cc
+                    break
+            if mm_col is None:
+                mm_col = raw.columns[0]
+            mm = pd.to_numeric(raw[mm_col], errors='coerce')
+            wt = pd.to_numeric(raw[pref], errors='coerce')
+            valid = mm.notna()
+            mm = mm[valid].astype(int)
+            wt = wt[valid].astype(float)
+            tmp = pd.DataFrame({'MM #': mm.to_numpy(), 'weight': wt.to_numpy()})
+            if not tmp.empty:
+                mapping = dict(zip(tmp['MM #'].astype(int), tmp['weight'].astype(float)))
+                weight_col = pref
+    except Exception:
+        pass
+
     return mapping, weight_col
 
 
@@ -676,6 +763,13 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         applied_rad = False
 
         # Read rotazi sheet (A->B interpretation: col0 = delta, col1 = factor)
+        # Supported layouts:
+        # - Two-column A->B (delta in col0, factor in col1): used for a single
+        #   global vignette curve applied to every position.
+        # - Multi-column with numeric column headers: columns after col0 are
+        #   interpreted as per-position factor series (header=Position #).
+        # - Header-heavy workbooks often still contain the intended A->B mapping
+        #   in the first two columns; we try that as a final fallback.
         try:
             vdf_azi = pd.read_excel(path, sheet_name='Vignetting rotazi', engine='openpyxl')
             xs_azi = ys_azi = None
@@ -711,12 +805,30 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         if ys_by_pos_azi:
                             xs_azi = xs[np.argsort(xs)]
                             azi_mode = 'per_pos'
+                    # Fallback: sometimes the sheet contains many header columns
+                    # (e.g. per-energy columns) but the intended A->B mapping is
+                    # still in the first two columns. If no per-position columns
+                    # were detected above, try treating column 1 as the factor
+                    # series (A->B) when it contains numeric data.
+                    if azi_mode == 'none' and vdf_azi.shape[1] >= 2:
+                        trial_y = pd.to_numeric(vdf_azi.iloc[:, 1], errors='coerce').dropna().to_numpy(dtype=float)
+                        if trial_y.size > 0:
+                            order = np.argsort(xs)
+                            xs_azi = xs[order]
+                            ys_azi = trial_y[order] if trial_y.size == xs_azi.size else trial_y
+                            azi_mode = 'single'
                     if azi_mode != 'none':
                         applied_azi = True
         except Exception:
             xs_azi = ys_azi = None
 
         # Read rotrad sheet (A->B interpretation)
+        # Read rotrad sheet (same layout rules as rotazi):
+        # - 'single' mode: xs_rad/ys_rad forms a single curve (delta->factor)
+        # - 'per_pos' mode: ys_by_pos_rad[pos] contains the factor array for that slot
+        # During application we prefer per_pos series when present, else fall
+        # back to the single global curve. If neither is present we leave
+        # the weight unchanged for that component.
         try:
             vdf_rad = pd.read_excel(path, sheet_name='Vignetting rotrad', engine='openpyxl')
             xs_rad = ys_rad = None
@@ -748,12 +860,31 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         if ys_by_pos_rad:
                             xs_rad = xs[np.argsort(xs)]
                             rad_mode = 'per_pos'
+                    # Fallback: if no per-position columns found, try using
+                    # the second column as the A->B mapping (common layout
+                    # when energy columns appear as extra headers).
+                    if rad_mode == 'none' and vdf_rad.shape[1] >= 2:
+                        trial_y = pd.to_numeric(vdf_rad.iloc[:, 1], errors='coerce').dropna().to_numpy(dtype=float)
+                        if trial_y.size > 0:
+                            order = np.argsort(xs)
+                            xs_rad = xs[order]
+                            ys_rad = trial_y[order] if trial_y.size == xs_rad.size else trial_y
+                            rad_mode = 'single'
                     if rad_mode != 'none':
                         applied_rad = True
         except Exception:
             xs_rad = ys_rad = None
 
         # Apply per-row interpolation multiplicatively to the already-initialized weight
+        # Apply per-row interpolation multiplicatively to the already-initialized weight.
+        # For each MM row we:
+        # 1) determine its Position # (slot) using `mm_to_pos` mapping;
+        # 2) for each of rot_rad and rot_azi, select the appropriate factor series
+        #    (per-position series preferred, otherwise the single global curve);
+        # 3) interpolate the factor at the computed angular offset and multiply
+        #    it into the existing weight. Radial and azimuthal factors both
+        #    multiply the weight (order is irrelevant since multiplication is
+        #    commutative), but we apply radial first then azimuthal for clarity.
         if 'weight' in df.columns:
             for idx, row in df.iterrows():
                 mm_num = row.get('MM #')
@@ -967,48 +1098,47 @@ def compute_total_rot_polar(mm_to_pos: dict, mm_config_map: dict, alignment_by_p
     """Compute total rotation components and their projections onto polar axes.
 
     Returns (rotx, roty, rot_rad, rot_azi) where each is a dict keyed by position.
-    rot_rad = rotx*u_rad_x + roty*u_rad_y
-    rot_azi = -rotx*u_rad_y + roty*u_rad_x
+    See module-level documentation for units and conventions (arcsec, direct
+    polar terms versus projected X/Y rotations).
     """
     rotx = {}
     roty = {}
     rot_rad = {}
     rot_azi = {}
 
-    # positions from mm_to_pos values and any explicit keys
+    # Gather all positions that may be present in any of the inputs
     positions = set()
-    positions.update(mm_to_pos.values() if mm_to_pos is not None else [])
-    positions.update(alignment_by_pos.keys() if alignment_by_pos is not None else [])
-    positions.update(gravity_by_pos.keys() if gravity_by_pos is not None else [])
-    positions.update(thermal_by_pos.keys() if thermal_by_pos is not None else [])
+    if mm_to_pos:
+        positions.update(mm_to_pos.values())
+    if alignment_by_pos:
+        positions.update(alignment_by_pos.keys())
+    if gravity_by_pos:
+        positions.update(gravity_by_pos.keys())
+    if thermal_by_pos:
+        positions.update(thermal_by_pos.keys())
 
-    # Build reverse mapping mm -> pos was provided; we need pos -> mm candidate
+    # Reverse mapping: position -> an example MM for geometry lookup
     pos_to_mm = {}
     if mm_to_pos:
         for mm, p in mm_to_pos.items():
-            if p not in pos_to_mm:
-                pos_to_mm[p] = mm
+            pos_to_mm.setdefault(p, mm)
 
     for pos in positions:
-        # sum sources for rotx/roty
-        rtx = 0.0
-        rty = 0.0
-        if alignment_by_pos and pos in alignment_by_pos:
-            rtx += float(alignment_by_pos[pos].get('d_align_rotx', 0.0)) if alignment_by_pos[pos] else 0.0
-            rty += float(alignment_by_pos[pos].get('d_align_roty', 0.0)) if alignment_by_pos[pos] else 0.0
+        # Sum rotx/roty contributions from gravity and thermal only
+        rtx_total = 0.0
+        rty_total = 0.0
         if gravity_by_pos and pos in gravity_by_pos:
-            rtx += float(gravity_by_pos[pos].get('d_grav_rotx', 0.0))
-            rty += float(gravity_by_pos[pos].get('d_grav_roty', 0.0))
+            rtx_total += float(gravity_by_pos[pos].get('d_grav_rotx', 0.0) or 0.0)
+            rty_total += float(gravity_by_pos[pos].get('d_grav_roty', 0.0) or 0.0)
         if thermal_by_pos and pos in thermal_by_pos:
-            rtx += float(thermal_by_pos[pos].get('d_therm_rotx', 0.0))
-            rty += float(thermal_by_pos[pos].get('d_therm_roty', 0.0))
+            rtx_total += float(thermal_by_pos[pos].get('d_therm_rotx', 0.0) or 0.0)
+            rty_total += float(thermal_by_pos[pos].get('d_therm_roty', 0.0) or 0.0)
 
-        rotx[pos] = rtx
-        roty[pos] = rty
+        rotx[pos] = rtx_total
+        roty[pos] = rty_total
 
-        # determine radial unit vector
-        ux = 1.0
-        uy = 0.0
+        # Compute radial unit vector from MM geometry if available
+        ux, uy = 1.0, 0.0
         mm_choice = pos_to_mm.get(pos)
         if mm_choice is not None and mm_choice in mm_config_map:
             cfg = mm_config_map.get(mm_choice, {})
@@ -1018,24 +1148,29 @@ def compute_total_rot_polar(mm_to_pos: dict, mm_config_map: dict, alignment_by_p
             if r_mm > 0.0:
                 ux = x_mm / r_mm
                 uy = y_mm / r_mm
-        # else leave fallback (1,0)
 
-        rot_rad[pos] = rotx[pos] * ux + roty[pos] * uy
-        rot_azi[pos] = -rotx[pos] * uy + roty[pos] * ux
+        # Project rotx/roty into polar components
+        proj_rotrad = rtx_total * ux + rty_total * uy
+        proj_rotazi = -rtx_total * uy + rty_total * ux
 
-        # Include any direct polar-rotation contributions (rotazi/rotrad)
-        # from alignment, gravity, or thermal sheets. These values are
-        # already in arcsec in the sheets and should be added directly.
-        rot_rad[pos] += (
-            (alignment_by_pos.get(pos, {}).get('d_align_rotrad', 0.0) if alignment_by_pos else 0.0)
-            + (gravity_by_pos.get(pos, {}).get('d_grav_rotrad', 0.0) if gravity_by_pos else 0.0)
-            + (thermal_by_pos.get(pos, {}).get('d_therm_rotrad', 0.0) if thermal_by_pos else 0.0)
-        )
-        rot_azi[pos] += (
-            (alignment_by_pos.get(pos, {}).get('d_align_rotazi', 0.0) if alignment_by_pos else 0.0)
-            + (gravity_by_pos.get(pos, {}).get('d_grav_rotazi', 0.0) if gravity_by_pos else 0.0)
-            + (thermal_by_pos.get(pos, {}).get('d_therm_rotazi', 0.0) if thermal_by_pos else 0.0)
-        )
+        # Add any direct polar contributions from alignment/gravity/thermal
+        direct_rotrad = 0.0
+        direct_rotazi = 0.0
+        if alignment_by_pos and pos in alignment_by_pos:
+            direct_rotrad += float(alignment_by_pos[pos].get('d_align_rotrad', 0.0) or 0.0)
+            direct_rotazi += float(alignment_by_pos[pos].get('d_align_rotazi', 0.0) or 0.0)
+        if gravity_by_pos and pos in gravity_by_pos:
+            direct_rotrad += float(gravity_by_pos[pos].get('d_grav_rotrad', 0.0) or 0.0)
+            direct_rotazi += float(gravity_by_pos[pos].get('d_grav_rotazi', 0.0) or 0.0)
+        if thermal_by_pos and pos in thermal_by_pos:
+            direct_rotrad += float(thermal_by_pos[pos].get('d_therm_rotrad', 0.0) or 0.0)
+            direct_rotazi += float(thermal_by_pos[pos].get('d_therm_rotazi', 0.0) or 0.0)
+
+        total_rotrad = proj_rotrad + direct_rotrad
+        total_rotazi = proj_rotazi + direct_rotazi
+
+        rot_rad[pos] = total_rotrad
+        rot_azi[pos] = total_rotazi
 
     return rotx, roty, rot_rad, rot_azi
 
@@ -2003,7 +2138,6 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             pct_best = profile_pct if 'profile_pct' in locals() else (frac_profile * 100 if 'frac_profile' in locals() else [])
             diam_best = profile_diam if 'profile_diam' in locals() else (2 * r_profile * m_to_arcsec if 'r_profile' in locals() else [])
             pct_orig = profile_pct_00 if 'profile_pct_00' in locals() else (frac_00 * 100 if 'frac_00' in locals() else [])
-            diam_orig = profile_diam_00 if 'profile_diam_00' in locals() else (2 * r_profile_00 * m_to_arcsec if 'r_profile_00' in locals() else [])
         except Exception:
             pct_best, diam_best, pct_orig, diam_orig = [], [], [], []
 
