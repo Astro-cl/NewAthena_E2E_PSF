@@ -1821,7 +1821,7 @@ def compute_mm_hew_at_origin(
 
 def _load_base_params_from_workbook(input_path: str) -> pd.DataFrame:
     """Load intrinsic MM PSF params from MM_PSF (no position deltas applied)."""
-    arcsec_to_m = np.pi / 180.0 / 3600.0
+    arcsec_to_m = 12 * np.pi / 180 / 3600
     psf = pd.read_excel(input_path, sheet_name="MM_PSF", engine="openpyxl")
     base_params = pd.DataFrame({
         "MM #": pd.to_numeric(psf["MM #"], errors="coerce").astype(int),
