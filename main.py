@@ -2,6 +2,7 @@
 import argparse  # For parsing command-line arguments
 import numpy as np  # For numerical operations and arrays
 import pandas as pd  # For data manipulation and Excel reading
+import matplotlib
 import matplotlib.pyplot as plt  # For plotting
 import matplotlib.gridspec as gridspec
 import os
@@ -16,6 +17,16 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+
+# When running under pytest, force a non-interactive backend to avoid
+# tests hanging on GUI display calls (e.g. plt.show()). Detect pytest via
+# the environment variable set by pytest runner.
+import os as _os
+if _os.environ.get('PYTEST_CURRENT_TEST'):
+    try:
+        matplotlib.use('Agg')
+    except Exception:
+        pass
 
 
 def parse_multisheet_csv(path: str) -> dict:
@@ -1640,8 +1651,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1.set_xlabel('x [µm]')
     ax1.set_ylabel('y [µm]')
     
-    # Add secondary axes for arcsec (1 arcsec = 12*π/180/3600 m, so 1 m = 54000/π arcsec)
-    m_to_arcsec = (180.0 / np.pi) * 3600.0  # meters to arcsec
+    # Add secondary axes for arcsec. Use the same project convention as
+    # `arcsec_to_m` (1 arcsec = 12*π/180/3600 m), therefore 1 m equals
+    # the reciprocal: 1 / (12*π/180/3600) arcsec. Compute explicitly.
+    m_to_arcsec = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)
     um_to_arcsec = m_to_arcsec * 1e-6  # microns to arcsec
     
     # Top axis for x in arcsec
@@ -1689,7 +1702,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     plt.xlim((xlim_min - margin_x)*1e6, (xlim_max + margin_x)*1e6)
     plt.ylim((ylim_min - margin_y)*1e6, (ylim_max + margin_y)*1e6)
     # Precompute arcsec conversions for legend/value annotations
-    m_to_arcsec = (180.0 / np.pi) * 3600.0
+    m_to_arcsec = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)
 
     def _min_interval_width(axis_vals: np.ndarray, prof: np.ndarray, frac: float = 0.5) -> float | None:
         """Smallest interval (anywhere) containing a fraction of 1D energy.
