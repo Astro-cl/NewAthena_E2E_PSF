@@ -3,6 +3,7 @@ numpy
 pandas
 matplotlib
 openpyxl
+numba
 
 # Note about tkinter (GUI dependency)
 # ----------------------------------

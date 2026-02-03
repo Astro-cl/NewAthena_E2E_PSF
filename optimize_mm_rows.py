@@ -203,7 +203,7 @@ class IncrementalHEWApprox:
             d_rotz_arcsec += float(self.thermal_by_pos[pos_num].get("d_therm_rotz", 0.0))
         if d_rotz_arcsec != 0.0:
             d_rotz_rad = np.radians(d_rotz_arcsec / 3600.0)
-            m_azi += float(self.slot_r[slot_pos]) * d_rotz_rad
+            m_azi += r_mm * d_rotz_rad
 
         mux, muy = _mux_muy_for_slot(
             m_rad,
@@ -1163,8 +1163,6 @@ def _load_position_deltas(path: str) -> tuple[dict[int, dict], dict[int, dict], 
                     "d_align_azi": float(row.get("d_align_azi [µm]", 0.0)) * 1e-6,
                     "d_align_z": float(row.get("d_align_z [µm]", 0.0)) * 1e-6,
                     "d_align_rotz": float(row.get("d_align_rotz [arcsec]", 0.0)),
-                    "d_align_rotx": float(row.get("d_align_rotx [arcsec]", 0.0)),
-                    "d_align_roty": float(row.get("d_align_roty [arcsec]", 0.0)),
                 }
     except Exception:
         pass
@@ -1823,7 +1821,7 @@ def compute_mm_hew_at_origin(
 
 def _load_base_params_from_workbook(input_path: str) -> pd.DataFrame:
     """Load intrinsic MM PSF params from MM_PSF (no position deltas applied)."""
-    arcsec_to_m = 12 * np.pi / 180 / 3600
+    arcsec_to_m = np.pi / 180.0 / 3600.0
     psf = pd.read_excel(input_path, sheet_name="MM_PSF", engine="openpyxl")
     base_params = pd.DataFrame({
         "MM #": pd.to_numeric(psf["MM #"], errors="coerce").astype(int),

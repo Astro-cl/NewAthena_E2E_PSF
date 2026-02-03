@@ -340,8 +340,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             else:
                 raise ValueError(f"Excel must contain columns: {required}")  # Raise error if not
     
-    # Convert from arcsec to meters: 1 arcsec = 12*π/180/3600 m
-    arcsec_to_m = 12 * np.pi / 180 / 3600
+    # Convert from arcsec to radians: 1 arcsec = π / 180 / 3600 radians.
+    # (If a focal-length-based linear conversion is required, multiply
+    # by the focal length elsewhere.) The previous factor incorrectly
+    # multiplied by 12.
+    arcsec_to_m = np.pi / 180.0 / 3600.0
     # Coerce to numeric to support placeholder strings like '-'
     for col in ['m_rad [arcsec]', 'm_azi [arcsec]', 'sigma_rad [arcsec]', 'sigma_azi [arcsec]']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -1133,7 +1136,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Custom PSF cache (by distribution name/stem)
     builtins = {'gaussian', 'pseudo-voigt', 'voigt'}
     workbook_path = df.attrs.get('workbook_path', None)
-    arcsec_to_m = 12 * np.pi / 180 / 3600
+    arcsec_to_m = np.pi / 180.0 / 3600.0
     custom_psf_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     custom_sigma_hint: list[float] = []
     if workbook_path is not None:

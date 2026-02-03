@@ -17,41 +17,42 @@ DATA_TYPES = {
     'Alignment': {
         'sheet_name': 'Alignment',
         'tab_label': 'Alignment',
-        # Use radial/azimuthal names to match preset table headers
-        'params': ['d_align_rad [µm]', 'd_align_azi [µm]', 'd_align_z [µm]', 'd_align_rotz [arcsec]', 'd_align_rotx [arcsec]', 'd_align_roty [arcsec]'],
+        # Keep translational parameters first; move rotation-related
+        # parameters to the end so they appear last in the GUI.
+        'params': ['d_align_rad [µm]', 'd_align_azi [µm]', 'd_align_z [µm]', 'd_align_rotazi [arcsec]', 'd_align_rotrad [arcsec]', 'd_align_rotz [arcsec]'],
         'defaults': {
             'd_align_rad [µm]': (0, 0.1),
             'd_align_azi [µm]': (0, 0.1),
             'd_align_z [µm]': (0, 0.1),
-            'd_align_rotz [arcsec]': (0, 0.01),
-            'd_align_rotx [arcsec]': (0, 0.01),
-            'd_align_roty [arcsec]': (0, 0.01)
+            'd_align_rotazi [arcsec]': (0, 0.01),
+            'd_align_rotrad [arcsec]': (0, 0.01),
+            'd_align_rotz [arcsec]': (0, 0.01)
         }
     },
     'Thermal': {
         'sheet_name': 'Thermal',
         'tab_label': 'Thermal',
-        'params': ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]', 'd_therm_rotx [arcsec]', 'd_therm_roty [arcsec]'],
+        'params': ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotx [arcsec]', 'd_therm_roty [arcsec]', 'd_therm_rotz [arcsec]'],
         'defaults': {
             'd_therm_x [µm]': (0, 0.1),
             'd_therm_y [µm]': (0, 0.1),
             'd_therm_z [µm]': (0, 0.1),
-            'd_therm_rotz [arcsec]': (0, 0.01),
             'd_therm_rotx [arcsec]': (0, 0.01),
-            'd_therm_roty [arcsec]': (0, 0.01)
+            'd_therm_roty [arcsec]': (0, 0.01),
+            'd_therm_rotz [arcsec]': (0, 0.01)
         }
     },
     'Gravity offload': {
         'sheet_name': 'Gravity offload',
         'tab_label': 'Gravity offload',
-        'params': ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotz [arcsec]', 'd_grav_rotx [arcsec]', 'd_grav_roty [arcsec]'],
+        'params': ['d_grav_x [µm]', 'd_grav_y [µm]', 'd_grav_z [µm]', 'd_grav_rotx [arcsec]', 'd_grav_roty [arcsec]', 'd_grav_rotz [arcsec]'],
         'defaults': {
             'd_grav_x [µm]': (0, 0.1),
             'd_grav_y [µm]': (0, 0.1),
             'd_grav_z [µm]': (0, 0.1),
-            'd_grav_rotz [arcsec]': (0, 0.01),
             'd_grav_rotx [arcsec]': (0, 0.01),
-            'd_grav_roty [arcsec]': (0, 0.01)
+            'd_grav_roty [arcsec]': (0, 0.01),
+            'd_grav_rotz [arcsec]': (0, 0.01)
         }
     },
     'MM_PSF': {
@@ -592,6 +593,19 @@ class ExtendedGUI:
         except Exception as e:
             print(f"Error loading standard distributions: {e}")
             self.standard_distributions = {}
+        # If none loaded from workbook, populate with fallback list provided by user
+        if not self.standard_distributions:
+            fallback = [
+                'Standard medialario',
+                '10% worse medialario',
+                '30% worse medialario',
+                '50% worse medialario',
+                '100% worse medialario',
+            ]
+            for name in fallback:
+                # minimal placeholder definition
+                self.standard_distributions[name] = {'name': name, 'type': 'gaussian', 'sigma_rad': None, 'sigma_azi': None, 'alpha_rad': None, 'alpha_azi': None}
+            print(f"Populated fallback standard distributions: {fallback}")
 
     def refresh_standard_distribution_controls(self) -> None:
         """Refresh standard preset dropdowns after (re)loading an Excel file.
@@ -778,31 +792,60 @@ class ExtendedGUI:
         self.alignment_standard_presets = {}
 
         try:
-            start_row = 0
+            # Determine header row by scanning the top few rows for expected variable names
+            expected_bases = [p.split(' ')[0].strip() for p in DATA_TYPES['Alignment']['params']]
+            header_row = None
+            for r in range(min(5, df.shape[0])):
+                row_vals = [str(x).strip() for x in df.iloc[r].tolist()]
+                found = False
+                for v in row_vals:
+                    if not v:
+                        continue
+                    for base in expected_bases:
+                        if base in v or v.startswith(base):
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    header_row = r
+                    break
+            if header_row is None:
+                header_row = 0
+
             # Historically presets lived starting at column G (index 6). New workbooks
             # may place preset names in M/N (indexes 12/13). Try common candidates
-            # and fall back to 6 when none are populated.
-            candidate_name_cols = [6, 12, 13]
+            # and fall back to 6 when none are populated. Look for non-empty name
+            # cells below the detected header row.
+            # Prefer column I (index 8) for standard preset names, then historical G (6), then M/N (12/13)
+            candidate_name_cols = [8, 6, 12, 13]
             name_col = None
-            first_var_col = None
             for c in candidate_name_cols:
                 if c < df.shape[1]:
-                    # check if there is at least one non-empty preset name below header
-                    col_vals = df.iloc[start_row + 1 : start_row + 20, c]
-                    if col_vals.notna().any():
+                    col_vals = df.iloc[header_row + 1 : min(header_row + 21, df.shape[0]), c]
+                    # Prefer columns with at least one non-empty, letter-containing value
+                    if col_vals.dropna().astype(str).str.contains(r'[A-Za-z]').any():
+                        name_col = c
+                        break
+            if name_col is None:
+                # fallback: scan for any column with non-numeric entries below header
+                for c in range(min(df.shape[1], 30)):
+                    col_vals = df.iloc[header_row + 1 : min(header_row + 21, df.shape[0]), c]
+                    if col_vals.dropna().astype(str).str.strip().apply(lambda s: not re.fullmatch(r"\s*\d+(?:\.\d+)?\s*", s)).any():
                         name_col = c
                         break
             if name_col is None:
                 name_col = 6
+
             # variable specs historically start to the right of the name column
             first_var_col = name_col + 1
 
-            if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
+            if df.shape[0] <= header_row or df.shape[1] <= first_var_col:
                 return
 
             headers: dict[int, str] = {}
             for c in range(first_var_col, min(df.shape[1], first_var_col + 8)):
-                h = df.iloc[start_row, c]
+                h = df.iloc[header_row, c]
                 if pd.isna(h) or str(h).strip() == '':
                     continue
                 headers[c] = str(h).strip()
@@ -813,11 +856,15 @@ class ExtendedGUI:
                 base = str(p).split(' ')[0].strip()
                 param_map[base] = p
 
-            row_idx = start_row + 1
+            row_idx = header_row + 1
             while row_idx < df.shape[0]:
                 preset_name = df.iloc[row_idx, name_col] if name_col < df.shape[1] else None
                 if pd.isna(preset_name) or str(preset_name).strip() == '':
                     break
+                # Avoid treating plain numeric values (e.g., 0) as preset names
+                if isinstance(preset_name, (int, float)) and float(preset_name) == 0:
+                    row_idx += 1
+                    continue
                 preset_name = str(preset_name).strip()
 
                 preset_specs: dict[str, str] = {}
@@ -857,23 +904,56 @@ class ExtendedGUI:
         self.thermal_standard_presets = {}
         try:
             start_row = 0
-            candidate_name_cols = [6, 12, 13]
+            # Try historically common positions first, then scan broadly for a
+            # column that contains non-numeric, non-empty preset names in rows 1..20.
+            preferred = [8, 6, 12, 13, 9]
             name_col = None
-            for c in candidate_name_cols:
+            for c in preferred:
                 if c < df.shape[1]:
-                    col_vals = df.iloc[start_row + 1 : start_row + 20, c]
-                    if col_vals.notna().any():
+                    col_vals = df.iloc[start_row + 1 : min(start_row + 21, df.shape[0]), c]
+                    # Prefer columns with at least one non-empty cell containing letters
+                    if col_vals.dropna().astype(str).str.contains(r'[A-Za-z]').any():
+                        name_col = c
+                        break
+            if name_col is None:
+                # Fallback: scan all columns for a likely name column
+                for c in range(min(df.shape[1], 30)):
+                    col_vals = df.iloc[start_row + 1 : min(start_row + 21, df.shape[0]), c]
+                    if col_vals.dropna().astype(str).str.strip().apply(lambda s: not re.fullmatch(r"\s*\d+(?:\.\d+)?\s*", s)).any():
                         name_col = c
                         break
             if name_col is None:
                 name_col = 6
             first_var_col = name_col + 1
-            if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
+            # If the header is embedded earlier/later, try to find it by looking
+            # for expected variable base names in the top few rows.
+            header_row = None
+            expected_bases = [p.split(' ')[0].strip() for p in DATA_TYPES['Thermal']['params']]
+            for r in range(min(5, df.shape[0])):
+                row_vals = [str(x).strip() for x in df.iloc[r].tolist()]
+                found = False
+                for v in row_vals:
+                    if not v:
+                        continue
+                    for base in expected_bases:
+                        if base in v or v.startswith(base):
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    header_row = r
+                    break
+
+            if header_row is None:
+                header_row = start_row
+
+            if df.shape[0] <= header_row:
                 return
 
             headers = {}
             for c in range(first_var_col, min(df.shape[1], first_var_col + 16)):
-                h = df.iloc[start_row, c]
+                h = df.iloc[header_row, c]
                 if pd.isna(h) or str(h).strip() == '':
                     continue
                 headers[c] = str(h).strip()
@@ -882,8 +962,12 @@ class ExtendedGUI:
             for p in DATA_TYPES['Thermal']['params']:
                 base = str(p).split(' ')[0].strip()
                 param_map[base] = p
+            # Build normalized map to tolerate header typos (remove non-alnum, lowercase)
+            def _norm(s: str) -> str:
+                return re.sub(r'[^a-z0-9]', '', str(s).lower())
+            param_map_norm = { _norm(k): v for k, v in param_map.items() }
 
-            row_idx = start_row + 1
+            row_idx = header_row + 1
             while row_idx < df.shape[0]:
                 preset_name = df.iloc[row_idx, name_col] if name_col < df.shape[1] else None
                 if pd.isna(preset_name) or str(preset_name).strip() == '':
@@ -900,8 +984,19 @@ class ExtendedGUI:
                     var = str(h).strip()
                     if var.endswith('_'):
                         var = var[:-1]
-                    if var in param_map:
-                        preset_specs[param_map[var]] = str(raw_spec).strip()
+                    # normalize and attempt fuzzy match to param_map (tolerate typos)
+                    var_norm = _norm(var)
+                    matched = None
+                    if var_norm in param_map_norm:
+                        matched = param_map_norm[var_norm]
+                    else:
+                        # try substring matches (header may be abbreviated/typo)
+                        for pk, pv in param_map_norm.items():
+                            if pk in var_norm or var_norm in pk:
+                                matched = pv
+                                break
+                    if matched:
+                        preset_specs[matched] = str(raw_spec).strip()
 
                 if preset_specs:
                     self.thermal_standard_presets[preset_name] = preset_specs
@@ -924,23 +1019,54 @@ class ExtendedGUI:
         self.gravity_standard_presets = {}
         try:
             start_row = 0
-            candidate_name_cols = [6, 12, 13]
+            preferred = [8, 6, 12, 13, 9]
             name_col = None
-            for c in candidate_name_cols:
+            for c in preferred:
                 if c < df.shape[1]:
-                    col_vals = df.iloc[start_row + 1 : start_row + 20, c]
-                    if col_vals.notna().any():
+                    col_vals = df.iloc[start_row + 1 : min(start_row + 21, df.shape[0]), c]
+                    # Prefer columns with at least one non-empty cell containing letters
+                    if col_vals.dropna().astype(str).str.contains(r'[A-Za-z]').any():
+                        name_col = c
+                        break
+            if name_col is None:
+                for c in range(min(df.shape[1], 30)):
+                    col_vals = df.iloc[start_row + 1 : min(start_row + 21, df.shape[0]), c]
+                    if col_vals.dropna().astype(str).str.contains(r'[A-Za-z]').any():
                         name_col = c
                         break
             if name_col is None:
                 name_col = 6
+
             first_var_col = name_col + 1
-            if df.shape[0] <= start_row or df.shape[1] <= first_var_col:
+
+            # Detect header row containing variable headers (look for expected base names)
+            header_row = None
+            expected_bases = [p.split(' ')[0].strip() for p in DATA_TYPES['Gravity offload']['params']]
+            for r in range(min(5, df.shape[0])):
+                row_vals = [str(x).strip() for x in df.iloc[r].tolist()]
+                found = False
+                for v in row_vals:
+                    if not v:
+                        continue
+                    for base in expected_bases:
+                        if base in v or v.startswith(base):
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    header_row = r
+                    break
+
+            if header_row is None:
+                header_row = start_row
+
+            if df.shape[0] <= header_row or df.shape[1] <= first_var_col:
                 return
 
             headers = {}
             for c in range(first_var_col, min(df.shape[1], first_var_col + 16)):
-                h = df.iloc[start_row, c]
+                h = df.iloc[header_row, c]
                 if pd.isna(h) or str(h).strip() == '':
                     continue
                 headers[c] = str(h).strip()
@@ -950,7 +1076,7 @@ class ExtendedGUI:
                 base = str(p).split(' ')[0].strip()
                 param_map[base] = p
 
-            row_idx = start_row + 1
+            row_idx = header_row + 1
             while row_idx < df.shape[0]:
                 preset_name = df.iloc[row_idx, name_col] if name_col < df.shape[1] else None
                 if pd.isna(preset_name) or str(preset_name).strip() == '':
@@ -3709,6 +3835,14 @@ class ExtendedGUI:
             else:
                 data_df = generate_data_from_distributions(params, num_mm, config)
             
+            # Ensure parameter columns are in the canonical order defined by config['params']
+            try:
+                param_order = [p for p in config.get('params', []) if p in data_df.columns]
+                other_cols = [c for c in data_df.columns if c not in param_order]
+                data_df = data_df.loc[:, param_order + other_cols]
+            except Exception:
+                pass
+
             # Add distribution column for MM_PSF BEFORE alpha parameters
             if config.get('has_distribution', False) and data_type_key in self.distribution_widgets:
                 dist_type = self.distribution_widgets[data_type_key]['dist_type'].get()
