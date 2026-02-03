@@ -359,6 +359,13 @@ class ExtendedGUI:
         self.build_preview_tab()
 
     def build_load_tab(self):
+        """Build the initial 'Load File' tab.
+
+        The Load tab provides a button to open an Excel workbook, and when a
+        workbook is selected the function loads relevant sheets (MM configuration,
+        A_eff, Alignment, Thermal, Gravity offload, MM_PSF) into memory and
+        prepares standard preset lists for the UI.
+        """
         frame = self.tab_load
         ttk.Label(frame, text='Load Excel File with MM Configuration', font=('Arial', 14)).pack(pady=10)
         ttk.Button(frame, text='Load Excel File', command=self.load_excel).pack(pady=5)
@@ -404,6 +411,15 @@ class ExtendedGUI:
         self.selection_feedback.pack(pady=5)
 
     def load_excel(self):
+        """Open an Excel file and load known configuration sheets.
+
+        Loads the `MM configuration` sheet into `self.mm_config_df` and any
+        known data-type sheets (as defined in `DATA_TYPES`) into
+        `self.data_dfs`. Also attempts to load standard presets from the
+        `MM_PSF`, `Alignment`, `Thermal`, `Gravity offload` and `A_eff`
+        sheets when present. Any recoverable errors are printed rather than
+        raised to keep the GUI responsive.
+        """
         path = filedialog.askopenfilename(initialdir="./Distributions", filetypes=[('Excel files', '*.xlsx *.xls')])
         if not path:
             return
@@ -1356,6 +1372,11 @@ class ExtendedGUI:
         self.enabled_data_types = new_enabled
 
     def build_config_tab(self):
+        """Build the MM Configuration tab UI.
+
+        This tab displays the per-MM table (selection, filtering, sorting)
+        and provides convenience buttons to select/deselect/toggle rows.
+        """
         frame = self.tab_config
         ttk.Label(frame, text='MM Configuration - Select MMs', font=('Arial', 14)).pack(pady=10)
         
@@ -1512,6 +1533,12 @@ class ExtendedGUI:
         self.update_tree_display()
 
     def update_tree_display(self):
+        """Refresh the visible Treeview contents from `self.mm_data`.
+
+        Applies optional row filtering and sorting state then inserts rows
+        with formatted numeric columns for display. Selection markers are
+        rendered as simple unicode checkboxes for a compact UI.
+        """
         for item in self.tree.get_children():
             self.tree.delete(item)
         
@@ -1555,6 +1582,12 @@ class ExtendedGUI:
             ))
 
     def update_config_display(self):
+        """Populate the treeview data store from the loaded MM configuration.
+
+        Converts workbook values to the minimal set of fields expected by the
+        tree display (selected, pos, row, mm_num, x_mm, y_mm, z_mm, r_mm).
+        Called after loading a workbook or when selections change.
+        """
         self.mm_data.clear()
         self.selected_mm_numbers = []
         
@@ -1586,6 +1619,12 @@ class ExtendedGUI:
             self.update_selected_mms()
 
     def update_selected_mms(self):
+        """Update `self.selected_mm_numbers` from the current tree selection.
+
+        Iterates `self.mm_data` and builds a sorted list of MM numbers that are
+        currently marked selected. This list is used by generation and export
+        operations to decide which MMs to include.
+        """
         selected = []
         for data in self.mm_data.values():
             if not data.get('selected'):
@@ -1597,6 +1636,15 @@ class ExtendedGUI:
         self.selected_mm_numbers = sorted(selected)
 
     def build_aeff_tab(self):
+        """Build the A_eff tab controls.
+
+        The tab allows selecting a standard A_eff preset or a fixed value and
+        applying the chosen weights to selected MMs. When a standard preset is
+        selected the UI exposes an optional checkbox `Apply vignetting factors
+        when exporting` which, if enabled, triggers the export-time behavior
+        that copies the chosen energy column from Vignetting sheets into column
+        B before saving.
+        """
         frame = self.tab_aeff
         ttk.Label(frame, text='A_eff - Apply weights to selected MMs', font=('Arial', 14)).pack(pady=10)
 
@@ -1670,6 +1718,12 @@ class ExtendedGUI:
         self.toggle_aeff_mode()
 
     def refresh_aeff_preset_controls(self):
+        """Refresh the A_eff preset combobox values and select a sensible default.
+
+        Prefers a preset named '1 keV' when present, otherwise selects the
+        first available preset. Triggers an update to the displayed expression
+        summary via `on_aeff_standard_selected`.
+        """
         presets = list(self.aeff_standard_presets.keys()) if self.aeff_standard_presets else []
         try:
             self.aeff_std_combo['values'] = presets
@@ -1712,6 +1766,11 @@ class ExtendedGUI:
                 pass
 
     def on_aeff_standard_selected(self):
+        """Update the small expression summary when a standard preset is chosen.
+
+        Reads the chosen preset name from `self.aeff_selected_preset_var` and
+        writes a human-friendly 'Values: ...' string to the UI label.
+        """
         name = self.aeff_selected_preset_var.get().strip()
         expr = self.aeff_standard_presets.get(name, '')
         self.aeff_expr_label.configure(text=f'Values: {expr}')
@@ -1813,6 +1872,13 @@ class ExtendedGUI:
             return None
 
     def _value_from_column_letter(self, row_idx: int, col_letter: str) -> float:
+        """Return the numeric value from `self.aeff_raw_df` at the given row and Excel column letter.
+
+        row_idx is a zero-based index into the dataframe. `col_letter` may be
+        a single Excel column letter (e.g. 'A', 'J'). Raises ValueError when the
+        sheet is not loaded or the requested cell is non-numeric or out of
+        range.
+        """
         if self.aeff_raw_df is None:
             raise ValueError('A_eff sheet not loaded')
         col_letter = str(col_letter).strip().upper()
@@ -1832,6 +1898,13 @@ class ExtendedGUI:
             raise ValueError(f'Non-numeric value at A_eff row {row_idx + 1}, col {col_letter}: {v!r}')
 
     def _evaluate_aeff_preset_for_mm(self, mm: int, values_expr: str) -> float:
+        """Evaluate a `Values` expression from an A_eff preset for MM `mm`.
+
+        Supported expressions include simple column-letter references like
+        'J', additive forms like 'J+gaussian(0,20%J)', and gaussian(...) forms
+        referencing a column. The function reads the base column value for the
+        requested MM and evaluates the expression returning a float.
+        """
         s = str(values_expr).strip()
         if not s:
             raise ValueError('Empty Values expression')
@@ -1887,6 +1960,14 @@ class ExtendedGUI:
         raise ValueError(f'Unsupported Values expression: {values_expr!r}')
 
     def apply_aeff_to_selected(self):
+        """Apply the currently selected A_eff mode (fixed or standard preset).
+
+        For `fixed` mode the user-provided numeric value is applied to all
+        selected MMs. For `standard` mode the preset's `Values` expression is
+        evaluated per-MM using the A_eff sheet; failures are reported to the
+        user while successful updates mark `self.aeff_pending_export` so the
+        export operation can commit changes to disk.
+        """
         if not self.selected_mm_numbers:
             messagebox.showwarning('No MMs selected', 'Select MMs in the "MM Configuration" tab first.')
             return
@@ -2824,6 +2905,13 @@ class ExtendedGUI:
 
 
     def choose_custom_psf_file(self) -> None:
+        """Prompt the user to choose an external PSF matrix file and copy it into `CustomPSFs/`.
+
+        The chosen file is moved into the repository `CustomPSFs` directory when
+        possible (or copied if it lives outside the repo). Updates
+        `self.custom_psf_path_var` and `self.custom_psf_stem_var` with the
+        destination path and stem respectively.
+        """
         path = filedialog.askopenfilename(initialdir="./Distributions", filetypes=[('Excel files', '*.xlsx *.xls')])
         if not path:
             return
@@ -3962,6 +4050,13 @@ class ExtendedGUI:
             messagebox.showerror('Error', str(e))
 
     def build_preview_tab(self):
+        """Build the Preview & Export tab UI.
+
+        The tab displays a textual preview of the generated per-MM tables and
+        exposes simple export controls. Export supports overwriting the loaded
+        workbook or saving to a new file while preserving existing sheets and
+        formulae where possible.
+        """
         frame = self.tab_preview
         ttk.Label(frame, text='Preview & Export', font=('Arial', 14)).pack(pady=10)
         
@@ -3991,6 +4086,12 @@ class ExtendedGUI:
         self.update_export_controls()
 
     def update_export_controls(self):
+        """Enable or disable the export path entry depending on mode.
+
+        When `export_mode_var` is `'current'` the path entry is disabled since
+        the loaded file will be updated. When `'new'` the entry is enabled so
+        the user can choose a destination path.
+        """
         mode = self.export_mode_var.get()
         if mode == 'current':
             self.export_path_entry.state(['disabled'])
@@ -3998,19 +4099,28 @@ class ExtendedGUI:
             self.export_path_entry.state(['!disabled'])
 
     def browse_export_path(self):
+        """Ask the user for a save-path when exporting to a new file.
+
+        Updates `self.export_path_var` when the user selects a path.
+        """
         path = filedialog.asksaveasfilename(initialdir="./Distributions", defaultextension='.xlsx', filetypes=[('Excel files', '*.xlsx *.xls')])
         if path:
             self.export_path_var.set(path)
 
     def update_preview(self):
+        """Write a brief textual preview of selected MM configuration and generated data.
+
+        Shows the first few rows of each generated dataframe to help the user
+        verify content before exporting.
+        """
         self.preview_text.delete('1.0', tk.END)
-        
+
         if self.mm_config_df is not None:
             config_preview = 'MM Configuration (Selected):\n'
             selected_config = self.mm_config_df[self.mm_config_df['MM #'].isin(self.selected_mm_numbers)]
             config_preview += str(selected_config.head(10))
             self.preview_text.insert(tk.END, config_preview + '\n\n')
-        
+
         # Only show preview for enabled data types
         for data_type_key, config in DATA_TYPES.items():
             if data_type_key in self.enabled_data_types and self.data_dfs[data_type_key] is not None:
@@ -4018,12 +4128,19 @@ class ExtendedGUI:
                 self.preview_text.insert(tk.END, str(self.data_dfs[data_type_key].head(20)) + '\n\n')
 
     def export_to_excel(self):
+        """Export generated data and/or pending A_eff edits to an Excel workbook.
+
+        Writes generated dataframes to their corresponding sheets, updates the
+        A_eff sheet when pending edits exist, and (optionally) copies the
+        selected vignetting column into column B of vignetting sheets.
+        """
+
         # Check if any data has been generated for enabled types OR A_eff has pending edits
         has_data = any(self.data_dfs[dt] is not None for dt in self.enabled_data_types)
         if not has_data and not self.aeff_pending_export:
             messagebox.showwarning('No Data', 'Please generate data for at least one enabled type first (or apply A_eff edits).')
             return
-        
+
         # Determine target path
         target_path = None
         if self.export_mode_var.get() == 'current':

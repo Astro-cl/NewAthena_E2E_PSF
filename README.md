@@ -130,7 +130,44 @@ If you pass `--output`, the combined figure is saved to that path and the script
 - Introduced `DOCS_SUMMARY.md` and `CONTRIBUTING.md` to the repository root.
 - Cleaned up transient debug scripts from `scripts/` and added placeholders where helpful.
 
+## Release v4 (2026-02-03)
+
+- Fixed dz→dm projection and ensured per‑MM dz outputs are correct when
+   running `--log-dz` (proper polar/cartesian projection and use of
+   alignment/gravity/thermal rotations).
+- Re-ordered vignetting application to run after A_eff initialization and
+   added explicit bookkeeping: `aeff_base`, `aeff_adjusted`, and
+   `aeff_vig_factor` so plots and aggregations use the adjusted effective
+   area.
+- Improved vignetting parsing to support both two-column (delta→factor)
+   sheets and per-position columns; MM300 now receives the combined
+   vignette factor when multiple factors apply (e.g. 0.1×0.1→0.01).
+- Updated rotation totals computation to include: alignment direct polar +
+   projected contributions from gravity/thermal rotx/roty + direct
+   gravity/thermal polar terms. Removed deprecated `d_align_rotx` and
+   `d_align_roty` usage.
+- GUI changes: added `Apply vignetting factors when exporting` checkbox
+   in the `A_eff` tab; when enabled, the selected preset column from the
+   vignetting sheets is copied into column B during export (matches by
+   explicit column letter or header substring).
+- Documentation: substantial docstring pass across `main.py`,
+   `gui_distributions.py`, `distributions_rotated.py`, and
+   `optimize_mm_rows.py`; added `DOCS_GUI.md` with examples and generated
+   thumbnail screenshots in `Figures/`.
+- Tests: updated tests and workbook references; full local test suite
+   passes (34 tests) after these changes.
+
+See `DOCS_GUI.md` for usage examples, screenshots and troubleshooting notes.
+
 See `DOCS_SUMMARY.md` for a short map of key files and recommended next steps.
+
+## Docs Index
+
+- **Core loader & CLI:** [main.py](main.py)
+- **GUI application:** [gui_distributions.py](gui_distributions.py)
+- **Distribution utilities:** [distributions_rotated.py](distributions_rotated.py)
+- **Row optimizer & helpers:** [optimize_mm_rows.py](optimize_mm_rows.py)
+- **Summary of docs:** [DOCS_SUMMARY.md](DOCS_SUMMARY.md)
 
 ## Directory Structure
 
