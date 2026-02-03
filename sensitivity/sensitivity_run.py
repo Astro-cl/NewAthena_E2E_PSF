@@ -41,6 +41,31 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
+def _cleanup_input_dir(input_dir: Path, max_files: int = 100):
+    """Keep only the newest `max_files` files in `input_dir` (by mtime).
+
+    This is called after creating input workbooks so the folder does not
+    grow unbounded. It's a best-effort cleanup: failures are ignored.
+    """
+    try:
+        if not input_dir.exists() or not input_dir.is_dir():
+            return
+        files = [p for p in input_dir.iterdir() if p.is_file()]
+        if len(files) <= int(max_files):
+            return
+        # sort by modification time, oldest first
+        files_sorted = sorted(files, key=lambda p: p.stat().st_mtime)
+        # remove oldest leaving the newest `max_files`
+        to_remove = files_sorted[: max(0, len(files_sorted) - int(max_files))]
+        for p in to_remove:
+            try:
+                p.unlink()
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
 def write_multisheet_csv(sheets: dict, out_path: Path):
     """Write a single CSV file containing multiple named sheets.
 
@@ -549,10 +574,15 @@ def main():
     p.add_argument("--dry-run", action="store_true", help="Create folders and copy baseline but don't execute driver")
     p.add_argument("--generate-only", action="store_true", help="Only generate input workbooks, do not run jobs")
     p.add_argument("--no-excel", action="store_true", help="Do not create Excel workbooks per combo; use pickled DataFrame inputs instead")
-    p.add_argument("--csv-only", action="store_true", default=True, help="Do not create Excel workbooks; generate per-combo MM_PSF CSVs and call main.py on them (default)")
+    p.add_argument("--csv-only", action="store_true", default=False, help="Do not create Excel workbooks; generate per-combo MM_PSF CSVs and call main.py on them")
     p.add_argument("--no-csv", dest='csv_only', action='store_false', help="Disable CSV-only fast path and create Excel workbooks instead")
     p.add_argument("--force-timestamp", type=str, default=None, help="Force the UTC timestamp used in generated filenames (e.g. 20260125T000945Z)")
+    # jitter removed: deterministic fixed presets remain fixed
     args = p.parse_args()
+
+    # Force excel-workbook mode to ensure per-combo presets are fully applied
+    # (CSV-only path has been flaky for applying workbook presets reliably).
+    args.csv_only = False
 
     ensure_dirs()
 
@@ -568,13 +598,11 @@ def main():
         print(f"Non-persistent run (persist flag={args.persist}, SENS_PERSIST_TMP={env_persist}): using baseline {args.baseline}, forcing workers={args.workers}")
 
     # Prepare input directory: ephemeral tempdir when non-persistent, otherwise sensitivity/input
-    if non_persistent:
-        temp_input_dir = Path(tempfile.mkdtemp(prefix='sensitivity_input_'))
-        input_dir = temp_input_dir
-        print(f"Using ephemeral input directory: {input_dir} (will be removed after run)")
-    else:
-        input_dir = SENS_DIR / 'input'
-        input_dir.mkdir(parents=True, exist_ok=True)
+    # Always persist input workbooks in the `sensitivity/input` folder so per-combo
+    # presets and partial results are available after the run.
+    input_dir = SENS_DIR / 'input'
+    input_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Using input directory: {input_dir}")
     if args.baseline:
         try:
             if not getattr(args, 'csv_only', False):
@@ -591,8 +619,8 @@ def main():
         print("Dry run complete — folders created and baseline copied (if provided)")
         return
 
-    # Read sensitivity specification from Distributions/Sensitivity.xlsx
-    sens_path = ROOT / 'Distributions' / 'Sensitivity.xlsx'
+    # Read sensitivity specification from sensitivity/sensitivity_input.xlsx
+    sens_path = SENS_DIR / 'sensitivity_input.xlsx'
     if not sens_path.exists():
         print(f"Sensitivity file not found: {sens_path}")
         return
@@ -624,7 +652,7 @@ def main():
             choices_map[col] = uniq
 
     if not choices_map:
-        print("No choices found in Sensitivity.xlsx. Nothing to run.")
+        print("No choices found in sensitivity_input.xlsx. Nothing to run.")
         return
 
     # Cartesian product of choices
@@ -633,7 +661,7 @@ def main():
     for prod in product(*(choices_map[c] for c in cols)):
         combos.append(dict(zip(cols, prod)))
 
-    print(f"Prepared {len(combos)} combos from Sensitivity.xlsx")
+    print(f"Prepared {len(combos)} combos from sensitivity_input.xlsx")
 
     # Prepare baseline workbook path
     baseline = Path(args.baseline) if args.baseline else (ROOT / 'Distributions' / 'Test_Distribution.xlsx')
@@ -664,7 +692,7 @@ def main():
     # Load standard Alignment presets from baseline (if any)
     std_alignment = load_standard_alignment_defs(baseline)
 
-    # If Sensitivity.xlsx contains an A_eff placeholder like '1 keV [row#]',
+    # If sensitivity_input.xlsx contains an A_eff placeholder like '1 keV [row#]',
     # expand that combo once per distinct Row # defined in the `MM configuration` sheet.
     try:
         # attempt to read row numbers from mm_cfg (flexible header)
@@ -1630,6 +1658,168 @@ def main():
         except Exception:
             pass
 
+    def _mask_alpha_for_non_pseudo_voigt(workbook_path: Path, num_mm: int):
+        """Set alpha_rad/alpha_azi to '-' for per-MM rows where the distribution
+        column does not indicate a pseudo-voigt / voigt distribution.
+
+        Only touches the first `num_mm` data rows and only writes into the
+        alpha columns (if present). This keeps alpha cells explicit '-' for
+        gaussian/uniform presets.
+        """
+        try:
+            from openpyxl import load_workbook
+            fp = Path(workbook_path)
+            wb = load_workbook(fp)
+            # find MM_PSF sheet (case-insensitive)
+            sheet_key = None
+            for s in wb.sheetnames:
+                if s.lower().replace(' ', '_').startswith('mm_psf') or s.lower() == 'mm_psf':
+                    sheet_key = s
+                    break
+            if sheet_key is None:
+                wb.save(fp)
+                return
+            ws = wb[sheet_key]
+            # Map header names to columns
+            header = {}
+            for c in range(1, ws.max_column + 1):
+                hv = ws.cell(row=1, column=c).value
+                if hv is None:
+                    continue
+                header[str(hv).strip().lower()] = c
+
+            # Heuristic: find distribution column (name containing 'distrib' or 'distribution')
+            distrib_col = None
+            for k, v in header.items():
+                if 'distrib' in k or 'distribution' in k:
+                    distrib_col = v
+                    break
+            # find alpha columns by fragments
+            ar_col = None
+            aa_col = None
+            for k, v in header.items():
+                if 'alpha_rad' in k or 'alpha rad' in k:
+                    ar_col = v
+                if 'alpha_azi' in k or 'alpha azi' in k:
+                    aa_col = v
+
+            # If no alpha columns found, try tolerant matching on header tokens
+            if ar_col is None or aa_col is None:
+                for c in range(1, ws.max_column + 1):
+                    hv = str(ws.cell(row=1, column=c).value or '').strip().lower()
+                    if ar_col is None and 'alpha' in hv and 'rad' in hv:
+                        ar_col = c
+                    if aa_col is None and 'alpha' in hv and 'azi' in hv:
+                        aa_col = c
+
+            # Only operate on rows 2..1+num_mm
+            for r in range(2, min(ws.max_row, 1 + int(num_mm)) + 1):
+                # determine distribution text for this row
+                is_pseudo = False
+                if distrib_col is not None:
+                    val = ws.cell(row=r, column=distrib_col).value
+                    if val is not None:
+                        s = str(val).strip().lower()
+                        if 'pseudo' in s or 'voigt' in s or 'pv' in s:
+                            is_pseudo = True
+                # If not pseudo-voigt, set alpha cells to '-'
+                if not is_pseudo:
+                    if ar_col is not None:
+                        try:
+                            ws.cell(row=r, column=ar_col, value='-')
+                        except Exception:
+                            pass
+                    if aa_col is not None:
+                        try:
+                            ws.cell(row=r, column=aa_col, value='-')
+                        except Exception:
+                            pass
+            wb.save(fp)
+        except Exception:
+            return
+
+    def _enforce_mmpsf_column_bounds(workbook_path: Path, baseline_path: Path, num_mm: int):
+        """Ensure MM_PSF per-MM rows only differ in columns B..H.
+
+        For rows 2..(1+num_mm), restore any columns beyond H (index 8) from the
+        baseline workbook. Also set alpha_rad (G,7) and alpha_azi (H,8) to '-'
+        for rows that are not pseudo-voigt distributions.
+        """
+        try:
+            from openpyxl import load_workbook
+            fp = Path(workbook_path)
+            bp = Path(baseline_path)
+            wb = load_workbook(fp)
+            # load baseline evaluated values
+            try:
+                wb_base = load_workbook(bp, data_only=True)
+            except Exception:
+                wb_base = None
+
+            sheet_key = None
+            for s in wb.sheetnames:
+                if s.lower().replace(' ', '_').startswith('mm_psf') or s.lower() == 'mm_psf':
+                    sheet_key = s
+                    break
+            if sheet_key is None:
+                wb.save(fp)
+                return
+            ws = wb[sheet_key]
+
+            base_ws = None
+            if wb_base is not None and sheet_key in wb_base.sheetnames:
+                base_ws = wb_base[sheet_key]
+
+            # ensure header exists and extend columns up to H (8) if needed
+            max_need_col = 8
+            if ws.max_column < max_need_col:
+                # create header placeholders as needed
+                for c in range(ws.max_column + 1, max_need_col + 1):
+                    if ws.cell(row=1, column=c).value is None:
+                        ws.cell(row=1, column=c, value=f'col{c}')
+
+            # Identify distribution column if present
+            distrib_col = None
+            for c in range(1, ws.max_column + 1):
+                hv = ws.cell(row=1, column=c).value
+                if hv is None:
+                    continue
+                hvs = str(hv).strip().lower()
+                if 'distrib' in hvs or 'distribution' in hvs:
+                    distrib_col = c
+                    break
+
+            # For each per-MM row, enforce alpha masking and restore tail columns
+            for r in range(2, min(ws.max_row, 1 + int(num_mm)) + 1):
+                # check if this row is pseudo-voigt by distrib_col
+                is_pseudo = False
+                if distrib_col is not None:
+                    v = ws.cell(row=r, column=distrib_col).value
+                    if v is not None and isinstance(v, str):
+                        s = v.strip().lower()
+                        if 'pseudo' in s or 'voigt' in s or 'pv' in s:
+                            is_pseudo = True
+                # set alpha_rad (G=7) and alpha_azi (H=8)
+                try:
+                    if not is_pseudo:
+                        ws.cell(row=r, column=7, value='-')
+                        ws.cell(row=r, column=8, value='-')
+                except Exception:
+                    pass
+
+                # restore baseline columns beyond H (9..end) if baseline exists
+                if base_ws is not None:
+                    for c in range(9, ws.max_column + 1):
+                        try:
+                            base_val = base_ws.cell(row=r, column=c).value if base_ws.max_column >= c and base_ws.max_row >= r else None
+                            ws.cell(row=r, column=c, value=base_val)
+                        except Exception:
+                            continue
+
+            wb.save(fp)
+        except Exception:
+            return
+
 
     def _apply_alignment_preset_to_workbook(workbook_path: Path, specs: dict, num_mm: int, preset_name: str | None):
         """Apply a standard Alignment preset by sampling per-MM values and writing into columns B..E.
@@ -1762,12 +1952,16 @@ def main():
                             hv = ws_raw.cell(row=1, column=col).value
                             if isinstance(hv, str) and hv.strip() in param_labels:
                                 target_col_map[hv.strip()] = col
-                        # ensure defaults B..E for missing targets
+                        # ensure defaults B..G for missing targets, but do not assign beyond G
                         next_col = 2
                         for p_label in param_labels:
                             if p_label not in target_col_map:
-                                target_col_map[p_label] = next_col
-                                next_col += 1
+                                if next_col <= 7:
+                                    target_col_map[p_label] = next_col
+                                    next_col += 1
+                                else:
+                                    # cannot assign beyond column G; leave absent
+                                    pass
 
                         for p_label in param_labels:
                             crefs = defs.get(p_label, {}).get('col_ref')
@@ -1789,11 +1983,12 @@ def main():
                                     if v is None:
                                         # fallback to raw cell if evaluation not available
                                         v = ws_raw.cell(row=2 + i, column=src_idx).value
-                                    # force numeric overwrite into the raw workbook
-                                    try:
-                                        ws_raw.cell(row=2 + i, column=tgt_idx, value=float(v) if v is not None else 0.0)
-                                    except Exception:
-                                        ws_raw.cell(row=2 + i, column=tgt_idx, value=v)
+                                    # force numeric overwrite into the raw workbook, only in B..G
+                                    if 2 <= tgt_idx <= 7:
+                                        try:
+                                            ws_raw.cell(row=2 + i, column=tgt_idx, value=float(v) if v is not None else 0.0)
+                                        except Exception:
+                                            ws_raw.cell(row=2 + i, column=tgt_idx, value=v)
                                 except Exception:
                                     continue
                         wb_raw.save(fp)
@@ -1867,17 +2062,21 @@ def main():
                             for p_label in param_labels:
                                 if hvn == p_label:
                                     col_map[p_label] = col
-                    # default to B..E for missing labels
+                    # default to B..G for missing labels but do not assign beyond G
                     next_col = 2
                     for p_label in param_labels:
                         if p_label not in col_map:
-                            col_map[p_label] = next_col
-                            next_col += 1
+                            if next_col <= 7:
+                                col_map[p_label] = next_col
+                                next_col += 1
+                            else:
+                                # cannot map further columns beyond G
+                                pass
 
                     for i in range(n):
                         for p_label in param_labels:
                             col_idx = col_map.get(p_label, None)
-                            if col_idx is None:
+                            if col_idx is None or not (2 <= col_idx <= 7):
                                 continue
                             v = samples.get(p_label)[i]
                             try:
@@ -2011,8 +2210,11 @@ def main():
                         next_col = 2
                         for p_label in param_labels:
                             if p_label not in target_col_map:
-                                target_col_map[p_label] = next_col
-                                next_col += 1
+                                if next_col <= 7:
+                                    target_col_map[p_label] = next_col
+                                    next_col += 1
+                                else:
+                                    pass
 
                         for p_label in param_labels:
                             crefs = defs.get(p_label, {}).get('col_ref')
@@ -2031,10 +2233,12 @@ def main():
                                     v = ws_val.cell(row=2 + i, column=src_idx).value
                                     if v is None:
                                         v = ws_raw.cell(row=2 + i, column=src_idx).value
-                                    try:
-                                        ws_raw.cell(row=2 + i, column=tgt_idx, value=float(v) if v is not None else 0.0)
-                                    except Exception:
-                                        ws_raw.cell(row=2 + i, column=tgt_idx, value=v)
+                                    # only write into allowed columns B..G
+                                    if 2 <= tgt_idx <= 7:
+                                        try:
+                                            ws_raw.cell(row=2 + i, column=tgt_idx, value=float(v) if v is not None else 0.0)
+                                        except Exception:
+                                            ws_raw.cell(row=2 + i, column=tgt_idx, value=v)
                                 except Exception:
                                     continue
                         wb_raw.save(fp)
@@ -2093,13 +2297,16 @@ def main():
                     next_col = 2
                     for p_label in param_labels:
                         if p_label not in col_map:
-                            col_map[p_label] = next_col
-                            next_col += 1
+                            if next_col <= 7:
+                                col_map[p_label] = next_col
+                                next_col += 1
+                            else:
+                                pass
 
                     for i in range(n):
                         for p_label in param_labels:
                             col_idx = col_map.get(p_label, None)
-                            if col_idx is None:
+                            if col_idx is None or not (2 <= col_idx <= 7):
                                 continue
                             v = samples.get(p_label)[i]
                             try:
@@ -2349,7 +2556,7 @@ def main():
         ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
     combo_id_map = {}
     for i, combo in enumerate(combos, start=1):
-        print(f"Processing combo {i}: {combo}")
+        print(f"Processing combo {i}/{len(combos)}: {combo}")
         parts = [f"{k}={v}" for k, v in combo.items()]
         name_suffix = '_'.join(_sanitize_filename(p) for p in parts)
         out_name = f"{ts}_{i}_{name_suffix}.xlsx"
@@ -2553,7 +2760,204 @@ def main():
                         sheets_out['MM_PSF'] = df_gen
                         # If out_path is a CSV, write as multi-sheet CSV; otherwise fallback to single-sheet CSV
                         if str(out_path).lower().endswith('.csv'):
-                            write_multisheet_csv(sheets_out, Path(out_path))
+                            try:
+                                # Attempt to materialize a temporary workbook, apply
+                                # per-combo Alignment/Thermal/Gravity presets using the
+                                # workbook helpers, then read the modified sheets back
+                                # into sheets_out so CSV contains the per-combo variants.
+                                tmp_fp = None
+                                try:
+                                    import tempfile as _tempfile
+                                    # create a temp copy of the baseline workbook we can modify
+                                    tf = _tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
+                                    tf.close()
+                                    tmp_fp = Path(tf.name)
+                                    shutil.copy2(baseline, tmp_fp)
+                                    # Apply A_eff per-row expansion if requested in combo
+                                    try:
+                                        if 'A_eff' in combo:
+                                            import re as _re
+                                            aeff_val = str(combo.get('A_eff'))
+                                            mrow = _re.match(r'^(.+?)\s*\[row\s*(\d+)\]$', aeff_val, flags=_re.IGNORECASE)
+                                            if mrow:
+                                                preset_name = mrow.group(1).strip()
+                                                target_row = int(mrow.group(2))
+                                                try:
+                                                    aeff_raw = pd.read_excel(baseline, sheet_name='A_eff', engine='openpyxl', header=0)
+                                                except Exception:
+                                                    aeff_raw = None
+                                                if isinstance(aeff_raw, pd.DataFrame):
+                                                    # find preset column in A_eff sheet
+                                                    preset_col = None
+                                                    for c in aeff_raw.columns:
+                                                        try:
+                                                            if preset_name.lower() in str(c).lower():
+                                                                preset_col = c
+                                                                break
+                                                        except Exception:
+                                                            continue
+                                                    # build mm -> row mapping if mm_cfg is available
+                                                    mm_to_row = {}
+                                                    try:
+                                                        if mm_cfg is not None:
+                                                            mm_col = None
+                                                            row_col = None
+                                                            for c in mm_cfg.columns:
+                                                                if isinstance(c, str) and 'mm' in c.lower():
+                                                                    mm_col = c
+                                                                    break
+                                                            for c in mm_cfg.columns:
+                                                                if isinstance(c, str) and 'row' in c.lower():
+                                                                    row_col = c
+                                                                    break
+                                                            if mm_col and row_col:
+                                                                for _, r in mm_cfg.iterrows():
+                                                                    try:
+                                                                        mmn = int(r.get(mm_col))
+                                                                        rown = int(r.get(row_col))
+                                                                        mm_to_row[mmn] = rown
+                                                                    except Exception:
+                                                                        continue
+                                                    except Exception:
+                                                        mm_to_row = {}
+                                                    # construct new A_eff DF
+                                                    rows = []
+                                                    for _, r in aeff_raw.iterrows():
+                                                        try:
+                                                            mmn = int(r.get('MM #')) if 'MM #' in aeff_raw.columns else None
+                                                        except Exception:
+                                                            mmn = None
+                                                        if mmn is None:
+                                                            continue
+                                                        rown = mm_to_row.get(mmn, None)
+                                                        if rown == target_row and preset_col is not None:
+                                                            try:
+                                                                wt = float(r.get(preset_col, 0.0))
+                                                            except Exception:
+                                                                wt = 0.0
+                                                        else:
+                                                            try:
+                                                                wt = float(r.get('A_eff', 0.0)) if 'A_eff' in aeff_raw.columns else 0.0
+                                                            except Exception:
+                                                                wt = 0.0
+                                                        rows.append({'MM #': int(mmn), 'A_eff': float(wt)})
+                                                    new_aeff_df = pd.DataFrame(rows)
+                                                    try:
+                                                        sheets_tmp = pd.read_excel(tmp_fp, sheet_name=None, engine='openpyxl')
+                                                    except Exception:
+                                                        sheets_tmp = {}
+                                                    sheets_tmp['A_eff'] = new_aeff_df
+                                                    try:
+                                                        with pd.ExcelWriter(tmp_fp, engine='openpyxl') as writer:
+                                                            for sname, sdf in (sheets_tmp or {}).items():
+                                                                try:
+                                                                    if isinstance(sdf, pd.DataFrame):
+                                                                        sdf.to_excel(writer, sheet_name=sname, index=False)
+                                                                except Exception:
+                                                                    continue
+                                                    except Exception:
+                                                        pass
+                                    except Exception:
+                                        pass
+                                    # Apply standard presets if present in combo
+                                    try:
+                                        local_std_alignment = load_standard_alignment_defs(baseline)
+                                        if 'Alignment' in combo and local_std_alignment:
+                                            try:
+                                                import re as _re
+                                                target = combo.get('Alignment')
+                                                target_norm = _re.sub(r"[^a-z0-9 ]", "", str(target).lower().replace('_', ' ')).strip()
+                                                mk_a = None
+                                                for k in (local_std_alignment or {}).keys():
+                                                    if _re.sub(r"[^a-z0-9 ]", "", str(k).lower().replace('_', ' ')).strip() == target_norm:
+                                                        mk_a = k
+                                                        break
+                                            except Exception:
+                                                mk_a = None
+                                            if mk_a:
+                                                specs = local_std_alignment.get(mk_a)
+                                                _apply_alignment_preset_to_workbook(tmp_fp, specs, num_mm, mk_a)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        local_std_thermal = load_standard_thermal_defs(baseline)
+                                        if 'Thermal' in combo and local_std_thermal:
+                                            try:
+                                                import re as _re
+                                                target = combo.get('Thermal')
+                                                target_norm = _re.sub(r"[^a-z0-9 ]", "", str(target).lower().replace('_', ' ')).strip()
+                                                mk_t = None
+                                                for k in (local_std_thermal or {}).keys():
+                                                    if _re.sub(r"[^a-z0-9 ]", "", str(k).lower().replace('_', ' ')).strip() == target_norm:
+                                                        mk_t = k
+                                                        break
+                                            except Exception:
+                                                mk_t = None
+                                            if mk_t:
+                                                specs = local_std_thermal.get(mk_t)
+                                                _apply_thermal_preset_to_workbook(tmp_fp, specs, num_mm, mk_t)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        local_std_gravity = load_standard_gravity_defs(baseline)
+                                        if 'Gravity offload' in combo and local_std_gravity:
+                                            try:
+                                                import re as _re
+                                                target = combo.get('Gravity offload')
+                                                target_norm = _re.sub(r"[^a-z0-9 ]", "", str(target).lower().replace('_', ' ')).strip()
+                                                mk_g = None
+                                                for k in (local_std_gravity or {}).keys():
+                                                    if _re.sub(r"[^a-z0-9 ]", "", str(k).lower().replace('_', ' ')).strip() == target_norm:
+                                                        mk_g = k
+                                                        break
+                                            except Exception:
+                                                mk_g = None
+                                            if mk_g:
+                                                specs = local_std_gravity.get(mk_g)
+                                                _apply_gravity_preset_to_workbook(tmp_fp, specs, num_mm, mk_g)
+                                    except Exception:
+                                        pass
+
+                                    # Read back modified sheets where available and merge into sheets_out
+                                    try:
+                                        for sname in ('A_eff', 'MM configuration', 'Alignment', 'Thermal', 'Gravity offload'):
+                                            try:
+                                                df_s = pd.read_excel(tmp_fp, sheet_name=sname, engine='openpyxl')
+                                                # prefer per-combo modified sheet over existing
+                                                sheets_out[sname] = df_s
+                                            except Exception:
+                                                # leave existing sheets_out entry if present
+                                                pass
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                                finally:
+                                    # cleanup temp file if created
+                                    try:
+                                        if tmp_fp is not None and tmp_fp.exists():
+                                            tmp_fp.unlink()
+                                    except Exception:
+                                        pass
+
+                                # Ensure A_eff and other baseline sheets are present for downstream consumers
+                                if isinstance(sheets_out, dict):
+                                    if 'A_eff' not in sheets_out:
+                                        try:
+                                            aeff_full = pd.read_excel(baseline, sheet_name='A_eff', engine='openpyxl')
+                                            sheets_out['A_eff'] = aeff_full
+                                        except Exception:
+                                            pass
+                                    for sname in ('MM configuration', 'Alignment', 'Thermal', 'Gravity offload'):
+                                        if sname not in sheets_out:
+                                            try:
+                                                df_s = pd.read_excel(baseline, sheet_name=sname, engine='openpyxl')
+                                                sheets_out[sname] = df_s
+                                            except Exception:
+                                                pass
+                                write_multisheet_csv(sheets_out, Path(out_path))
+                            except Exception:
+                                pass
                         else:
                             # write MM_PSF only into CSV for backwards compatibility
                             df_gen.to_csv(out_path, index=False)
@@ -2576,6 +2980,11 @@ def main():
                 pass
             input_files.append((out_path, combo))
             combo_id_map[out_name] = i
+            # cleanup input directory to cap number of stored workbooks
+            try:
+                _cleanup_input_dir(input_dir, max_files=100)
+            except Exception:
+                pass
             continue
         if args.no_excel:
             # create pickled sheets dict instead of Excel workbook
@@ -2939,8 +3348,8 @@ def main():
         def _zero_out_sheet_params(workbook_path: Path, sheet_name: str, param_cores: list[str]):
             """Zero only the input variable columns (B-E) on the given sheet.
 
-            This is intentionally conservative: we only touch columns 2..5 to avoid
-            altering template columns or other sheets such as `MM_PSF`.
+            This is intentionally conservative: only touch columns B..G (2..7)
+            to avoid altering template columns or other sheets such as `MM_PSF`.
             """
             try:
                 from openpyxl import load_workbook
@@ -2960,23 +3369,118 @@ def main():
                     return
                 ws = wb[sheet_key]
 
-                # target columns B..E -> indices 2..5
-                for col_idx in range(2, 6):
-                    for r in range(2, ws.max_row + 1):
-                        ws.cell(row=r, column=col_idx, value=0)
+                # Attempt to find header columns that match any of the requested
+                # param core names (case-insensitive, tolerant matching). If any
+                # are found, zero those columns only. Otherwise fall back to
+                # zeroing the conservative default B..E range.
+                header_map = {}
+                try:
+                    for col in range(1, ws.max_column + 1):
+                        hv = ws.cell(row=1, column=col).value
+                        if hv is None:
+                            continue
+                        hn = str(hv).strip().lower().replace(' ', '').replace('-', '').replace('.', '').replace('\n','')
+                        header_map[hn] = col
+                except Exception:
+                    header_map = {}
 
+                # normalize requested cores and attempt to match header columns
+                cores_norm = [str(x).strip().lower().replace(' ', '').replace('-', '').replace('.', '') for x in (param_cores or [])]
+                matched_cols = []
+                for hn, col in header_map.items():
+                    for pc in cores_norm:
+                        if not pc:
+                            continue
+                        if pc in hn or hn in pc:
+                            # Only consider matches that fall within allowed columns B..G (2..7)
+                            if 2 <= col <= 7:
+                                matched_cols.append(col)
+                            break
+
+                if matched_cols:
+                    for col_idx in set(matched_cols):
+                        for r in range(2, ws.max_row + 1):
+                            ws.cell(row=r, column=col_idx, value=0)
+                else:
+                    # fallback: target columns B..G -> indices 2..7
+                    for col_idx in range(2, min(8, ws.max_column + 1)):
+                        for r in range(2, ws.max_row + 1):
+                            ws.cell(row=r, column=col_idx, value=0)
+
+                wb.save(workbook_path)
+            except Exception:
+                return
+
+        def _set_specific_zero_columns(workbook_path: Path, sheet_name: str, target_names: list[str], num_rows: int):
+            """Set columns matching any of `target_names` to 0 for rows 2..(1+num_rows).
+
+            Matching is tolerant (case-insensitive, ignore spaces/dashes/dots). Only
+            writes into columns B..G (2..7) to avoid touching templates.
+            """
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(workbook_path)
+                sheet_key = None
+                for s in wb.sheetnames:
+                    if s.lower() == sheet_name.lower():
+                        sheet_key = s
+                        break
+                if sheet_key is None:
+                    wb.save(workbook_path)
+                    return
+                ws = wb[sheet_key]
+
+                # build normalized header map
+                header_map = {}
+                for col in range(1, ws.max_column + 1):
+                    hv = ws.cell(row=1, column=col).value
+                    if hv is None:
+                        continue
+                    hn = str(hv).strip().lower()
+                    hn = hn.replace(' ', '').replace('-', '').replace('.', '')
+                    header_map[hn] = col
+
+                targets_norm = [str(x).strip().lower().replace(' ', '').replace('-', '').replace('.', '') for x in (target_names or [])]
+                matched = []
+                for hn, col in header_map.items():
+                    for t in targets_norm:
+                        if not t:
+                            continue
+                        if t in hn or hn in t:
+                            if 2 <= col <= 7:
+                                matched.append(col)
+                            break
+
+                if not matched:
+                    wb.save(workbook_path)
+                    return
+
+                for col_idx in set(matched):
+                    for r in range(2, min(ws.max_row, 1 + int(num_rows)) + 1):
+                        ws.cell(row=r, column=col_idx, value=0)
                 wb.save(workbook_path)
             except Exception:
                 return
 
         # apply zeroing logic (constrained to B:E on the sheet)
         try:
+            # Enforce explicit zeros for requested parameter pairs, constrained to B..G
             if 'Alignment' in combo and _is_zero_choice(combo.get('Alignment')):
-                _zero_out_sheet_params(out_path, 'Alignment', ['d_align_rad', 'd_align_azi', 'd_align_z', 'd_align_rotz'])
-            if 'Gravity offload' in combo and _is_zero_choice(combo.get('Gravity offload')):
-                _zero_out_sheet_params(out_path, 'Gravity offload', ['d_grav_x', 'd_grav_y', 'd_grav_z', 'd_grav_rotz'])
+                _set_specific_zero_columns(out_path, 'Alignment', ['d_align_rotazi', 'd_align_rotrad'], num_mm)
             if 'Thermal' in combo and _is_zero_choice(combo.get('Thermal')):
-                _zero_out_sheet_params(out_path, 'Thermal', ['d_therm_x', 'd_therm_y', 'd_therm_z', 'd_therm_rotz'])
+                _set_specific_zero_columns(out_path, 'Thermal', ['d_therm_rotx', 'd_therm_roty'], num_mm)
+            if 'Gravity offload' in combo and _is_zero_choice(combo.get('Gravity offload')):
+                _set_specific_zero_columns(out_path, 'Gravity offload', ['d_grav_rotx', 'd_grav_roty'], num_mm)
+            # keep conservative fallback zeroing for any remaining related inputs
+            try:
+                if 'Alignment' in combo and _is_zero_choice(combo.get('Alignment')):
+                    _zero_out_sheet_params(out_path, 'Alignment', ['d_align_rotazi', 'd_align_rotrad', 'd_align_rad', 'd_align_azi', 'd_align_z', 'd_align_rotz'])
+                if 'Gravity offload' in combo and _is_zero_choice(combo.get('Gravity offload')):
+                    _zero_out_sheet_params(out_path, 'Gravity offload', ['d_grav_rotx', 'd_grav_rott', 'd_grav_x', 'd_grav_y', 'd_grav_z', 'd_grav_rotz'])
+                if 'Thermal' in combo and _is_zero_choice(combo.get('Thermal')):
+                    _zero_out_sheet_params(out_path, 'Thermal', ['d_therm_rotx', 'd_therm_roty', 'd_therm_x', 'd_therm_y', 'd_therm_z', 'd_therm_rotz'])
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -3048,6 +3552,14 @@ def main():
                         _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
                     except Exception:
                         pass
+                    try:
+                        _mask_alpha_for_non_pseudo_voigt(out_path, num_mm)
+                    except Exception:
+                        pass
+                    try:
+                        _enforce_mmpsf_column_bounds(out_path, baseline, num_mm)
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"Failed to generate MM_PSF for combo {combo}: {e}")
         elif mk is not None:
@@ -3070,6 +3582,14 @@ def main():
                     # Ensure per-MM sigma columns are numeric for this input immediately
                     try:
                         _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
+                    except Exception:
+                        pass
+                    try:
+                        _mask_alpha_for_non_pseudo_voigt(out_path, num_mm)
+                    except Exception:
+                        pass
+                    try:
+                        _enforce_mmpsf_column_bounds(out_path, baseline, num_mm)
                     except Exception:
                         pass
                 except Exception as e:
@@ -3312,6 +3832,11 @@ def main():
         input_files.append((out_path, combo))
         # Record generated filename for later lookups
         combo_id_map[out_name] = i
+        # cleanup input directory to cap number of stored workbooks
+        try:
+            _cleanup_input_dir(input_dir, max_files=100)
+        except Exception:
+            pass
 
     if getattr(args, 'csv_only', False):
         print(f"Generated {len(input_files)} input CSVs in {input_dir}")
@@ -3347,10 +3872,18 @@ def main():
                             pass
 
                 # Ensure per-MM sigma columns are numeric (deterministic sampling when needed)
-                try:
-                    _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
-                except Exception:
-                    pass
+                    try:
+                        _sample_per_mm_sigmas_and_write(out_path, std_mm_psf, mk, num_mm)
+                    except Exception:
+                        pass
+                    try:
+                        _mask_alpha_for_non_pseudo_voigt(out_path, num_mm)
+                    except Exception:
+                        pass
+                    try:
+                        _enforce_mmpsf_column_bounds(out_path, baseline, num_mm)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -3422,7 +3955,9 @@ def main():
 
     # Force 64 workers as requested
     max_workers = 64
-    print(f"Running {len(input_files)} jobs with {max_workers} workers...")
+    batch_size = 64
+    total_jobs = len(input_files)
+    print(f"Running {total_jobs} jobs in batches of {batch_size} (workers={max_workers})...")
     # If user requested a single-file check-and-fix, perform it now and run that single job.
     if args.check_and_fix:
         # allow auto-detection of the latest placed 4.3 file
@@ -3485,11 +4020,71 @@ def main():
             print('Run result:')
             print(json.dumps(res, indent=2, ensure_ascii=False))
             return
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(run_one, pc): pc for pc in input_files}
-        for fut in as_completed(futures):
-            res = fut.result()
-            results.append(res)
+    # Process inputs in batches: generate up to `batch_size` workbooks, run them
+    # in parallel, append partial results as each job finishes, then optionally
+    # delete the batch input files and continue until all jobs are processed.
+    def _write_partial_row(res):
+        try:
+            partial_dir = SENS_DIR / 'results'
+            partial_dir.mkdir(parents=True, exist_ok=True)
+            partial_path = partial_dir / 'sensitivity_run_partial.csv'
+            def _flatten_result(r):
+                row = {}
+                combo = r.get('combo', {}) or {}
+                try:
+                    fid = r.get('file')
+                    if fid:
+                        bn = Path(str(fid)).name
+                        row['combo_id'] = combo_id_map.get(bn)
+                    else:
+                        row['combo_id'] = None
+                except Exception:
+                    row['combo_id'] = None
+                for k, v in combo.items():
+                    row[k] = v
+                try:
+                    row['input_file'] = Path(str(r.get('file'))).name if r.get('file') else None
+                except Exception:
+                    row['input_file'] = r.get('file')
+                if 'metrics' in r and isinstance(r.get('metrics'), dict):
+                    m = r.get('metrics')
+                    for key in ['hew_origin_arcsec', 'hew_best_arcsec', 'eef90_origin_arcsec', 'eef90_best_arcsec', 'hew_opt_arcsec', 'eef90_opt_arcsec']:
+                        row[key] = m.get(key)
+                else:
+                    row['error'] = r.get('error')
+                return row
+
+            single_row = _flatten_result(res)
+            import pandas as _pd
+            df_row = _pd.DataFrame([single_row])
+            if not partial_path.exists():
+                df_row.to_csv(partial_path, index=False)
+            else:
+                df_row.to_csv(partial_path, mode='a', header=False, index=False)
+        except Exception:
+            pass
+
+    # iterate batches
+    for batch_start in range(0, total_jobs, batch_size):
+        batch = input_files[batch_start: batch_start + batch_size]
+        batch_idx = (batch_start // batch_size) + 1
+        print(f"Running batch {batch_idx}: jobs {batch_start+1}-{batch_start+len(batch)} (count={len(batch)})")
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(run_one, pc): pc for pc in batch}
+            for fut in as_completed(futures):
+                res = fut.result()
+                results.append(res)
+                _write_partial_row(res)
+
+        # After batch completes, optionally delete generated input files to free space
+        if not args.persist:
+            for path_obj, _combo in batch:
+                try:
+                    p = Path(path_obj)
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    continue
 
     # Consolidate results into DataFrame
     rows = []
@@ -3619,16 +4214,7 @@ def main():
     out_df = out_df[cols_present + remaining]
     out_df.to_excel(out_path, index=False)
     print(f"Wrote results to: {out_path}")
-    # Clean up ephemeral input files when non-persistent
-    try:
-        if non_persistent:
-            try:
-                shutil.rmtree(input_dir)
-                print(f"Removed ephemeral input directory: {input_dir}")
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Do not remove input workbooks; keep partial results for inspection
 
 
 if __name__ == '__main__':

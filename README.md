@@ -16,6 +16,20 @@ Documentation, comments and Unit tests written by AI.
 - [Command Line Usage](#command-line-usage)
 - [File Formats](#file-formats)
 
+## Sensitivity Pipeline
+
+The repository includes a small sensitivity-run template and driver under the `sensitivity/` folder.
+
+- **Per-combo input workbooks:** generated Excel inputs are written to `sensitivity/input/` as `TIMESTAMP_index_<combo>.xlsx`. These workbooks are preserved by default but the runner will prune the folder to keep only the newest 100 files to avoid unbounded growth.
+- **MM_PSF edits:** when the pipeline writes or expands the `MM_PSF` sheet it only modifies per‑MM input columns `B`..`H` (left-side per‑MM table). Columns to the right (template/tail columns) are preserved or restored from the baseline workbook.
+- **Alpha masking:** for presets that are not pseudo‑voigt (i.e. Gaussian/Uniform), the `alpha_rad` and `alpha_azi` values in the `MM_PSF` per‑MM rows are set to `-` (columns G and H) to explicitly mark them as not applicable.
+- **Alignment / Thermal / Gravity zeroing:** when a combo requests `Alignment=0`, the runner sets `d_align_rotazi` and `d_align_rotrad` to `0` in the `Alignment` sheet (only within columns B..G). Similarly, `Thermal=0` zeros `d_therm_rotx` and `d_therm_roty` in the `Thermal` sheet, and `Gravity offload=0` zeros `d_grav_rotx` and `d_grav_roty` in the `Gravity offload` sheet; other columns are left untouched.
+- **Partial results:** as jobs complete the runner appends a per-job summary row to `sensitivity/results/sensitivity_run_partial.csv` (best-effort). The final consolidated Excel results are written at the end to `sensitivity/results/sensitivity_run_results.xlsx`.
+- **Run modes:**
+   - Generate-only: `python3 sensitivity/sensitivity_run.py --generate-only --baseline <file>` creates the per-combo input workbooks without executing jobs.
+   - Full run: `python3 sensitivity/sensitivity_run.py --baseline <file>` generates inputs and runs the jobs, producing both the partial CSV as jobs finish and the final Excel at completion.
+
+
 ## Features
 
 ### Core Capabilities
