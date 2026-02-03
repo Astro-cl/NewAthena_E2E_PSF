@@ -46,3 +46,6 @@ venv.bak/
 # Some distribution files
 Distributions/TestDistribution_optimised.xlsx
 Distributions/TestDistribution_placed.xlsx
+
+# Ignore generated sensitivity input workbooks and sampling details
+sensitivity/input/
