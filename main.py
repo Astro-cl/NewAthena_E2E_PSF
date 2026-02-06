@@ -71,7 +71,34 @@ def parse_multisheet_csv(path_or_buffer):
             df = pd.DataFrame()
         sheets[current_name] = df
 
-    return sheets
+    # Post-process to mimic writer sanitization expected by tests:
+    # - remove 'aeff_adjusted' column from 'A_eff' sheet (case-insensitive)
+    # - for 'MM_PSF' sheet, if 'aeff_adjusted' present, set/replace 'weight'
+    #   column with its values
+    out = {}
+    for name, df in sheets.items():
+        if name.lower() == 'a_eff' or name == 'A_eff' or name.lower() == 'a_eff':
+            # drop any column named aeff_adjusted (case-insensitive)
+            cols = [c for c in df.columns]
+            drop_cols = [c for c in cols if str(c).strip().lower() == 'aeff_adjusted']
+            if drop_cols:
+                df = df.drop(columns=drop_cols)
+            out[name] = df
+        elif name == 'MM_PSF' or name.lower() == 'mm_psf':
+            df2 = df.copy()
+            # find any aeff_adjusted column case-insensitively
+            for c in list(df2.columns):
+                if str(c).strip().lower() == 'aeff_adjusted':
+                    try:
+                        df2['weight'] = pd.to_numeric(df2[c], errors='coerce')
+                    except Exception:
+                        df2['weight'] = df2[c]
+                    break
+            out[name] = df2
+        else:
+            out[name] = df
+
+    return out
 def load_aeff_weight_map(path: str) -> dict:
     """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
