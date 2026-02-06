@@ -15,6 +15,63 @@ from distributions_rotated import (
 )
 import json
 import sys
+import io
+import re
+
+
+def parse_multisheet_csv(path_or_buffer):
+    """Parse a multisheet-style CSV file created by `write_multisheet_csv`.
+
+    The file uses marker lines of the form:
+      # sheet: Sheet Name
+
+    Returns a dict mapping sheet name -> pandas.DataFrame.
+    Accepts a filesystem path or any file-like / string buffer.
+    """
+    text = None
+    # Accept file path or file-like object or raw string content
+    if hasattr(path_or_buffer, 'read'):
+        text = path_or_buffer.read()
+    else:
+        try:
+            # try treating as path
+            with open(str(path_or_buffer), 'r', encoding='utf-8') as fh:
+                text = fh.read()
+        except Exception:
+            # fallback: treat as raw string content
+            text = str(path_or_buffer)
+
+    sheets = {}
+    current_name = None
+    current_lines = []
+    for raw in text.splitlines():
+        m = re.match(r"^#\s*sheet:\s*(.+)$", raw)
+        if m:
+            # flush previous
+            if current_name is not None:
+                buf = io.StringIO('\n'.join(current_lines))
+                try:
+                    df = pd.read_csv(buf)
+                except Exception:
+                    # empty or unparsable -> empty DataFrame
+                    df = pd.DataFrame()
+                sheets[current_name] = df
+            current_name = m.group(1).strip()
+            current_lines = []
+        else:
+            # skip leading/trailing blank lines
+            current_lines.append(raw)
+
+    # flush last
+    if current_name is not None:
+        buf = io.StringIO('\n'.join(current_lines))
+        try:
+            df = pd.read_csv(buf)
+        except Exception:
+            df = pd.DataFrame()
+        sheets[current_name] = df
+
+    return sheets
 def load_aeff_weight_map(path: str) -> dict:
     """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
