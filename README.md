@@ -974,7 +974,7 @@ Preview and save all generated data.
 │    ◉ Update current file    ○ Create new file                  │
 │                                                                  │
 │  Output Path:                                                   │
-│    [Distributions/Test_Distribution.xlsx    ] [Browse...]       │
+│    [Distributions/TestDistribution.xlsx    ] [Browse...]       │
 │                                                                  │
 │  Data Preview:                                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -1155,7 +1155,7 @@ Load different Excel files without restarting GUI - each Load clears previous co
 
 2. **Load MM Configuration**:
    - Click "Load Excel File"
-   - Select `Distributions/Test_Distribution.xlsx` (or your file)
+   - Select `Distributions/TestDistribution.xlsx` (or your file)
    - MM configuration automatically loads
 
 3. **Select MMs** (MM Configuration tab):

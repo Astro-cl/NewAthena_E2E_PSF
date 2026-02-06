@@ -2,7 +2,7 @@
 Minimal sensitivity run template.
 
 Usage examples:
-  python3 sensitivity/sensitivity_run.py --workers 64 --persist --baseline Distributions/Test_Distribution.xlsx
+    python3 sensitivity/sensitivity_run.py --workers 64 --persist --baseline Distributions/TestDistribution.xlsx
 
 This template does the following:
 - Ensures the trial folders exist (`input`, `workbooks`, `results`, `figures`)
@@ -592,7 +592,7 @@ def main():
     non_persistent = (not args.persist) or persist_disabled_by_env
     if non_persistent:
         if not args.baseline:
-            args.baseline = str(ROOT / 'Distributions' / 'Test_Distribution.xlsx')
+            args.baseline = str(ROOT / 'Distributions' / 'TestDistribution.xlsx')
         # force worker count for non-persistent runs
         args.workers = 64
         print(f"Non-persistent run (persist flag={args.persist}, SENS_PERSIST_TMP={env_persist}): using baseline {args.baseline}, forcing workers={args.workers}")
@@ -664,7 +664,7 @@ def main():
     print(f"Prepared {len(combos)} combos from sensitivity_input.xlsx")
 
     # Prepare baseline workbook path
-    baseline = Path(args.baseline) if args.baseline else (ROOT / 'Distributions' / 'Test_Distribution.xlsx')
+    baseline = Path(args.baseline) if args.baseline else (ROOT / 'Distributions' / 'TestDistribution.xlsx')
     if not baseline.exists():
         print(f"Baseline workbook not found: {baseline}")
         return
@@ -3583,7 +3583,7 @@ def main():
                             if isinstance(c, str) and ('row' in c.lower()):
                                 row_col = c
                                 break
-                        # fallback: if row_col not found, try 3rd column (index 2) as per Test_Distribution.xlsx
+                        # fallback: if row_col not found, try 3rd column (index 2) as per TestDistribution.xlsx
                         if row_col is None and len(mm_cfg.columns) >= 3:
                             row_col = mm_cfg.columns[2]
                         if mm_col is None and len(mm_cfg.columns) >= 1:

@@ -5,7 +5,7 @@ from main import compute_hew_eef_metrics
 
 
 def test_compute_hew_eef_metrics_keys():
-    metrics = compute_hew_eef_metrics(file='Distributions/Test_Distribution.xlsx', sheet='MM_PSF', normalize=True, fast=True)
+    metrics = compute_hew_eef_metrics(file='Distributions/TestDistribution.xlsx', sheet='MM_PSF', normalize=True, fast=True)
     assert isinstance(metrics, dict)
     required_keys = [
         'hew_origin_arcsec', 'hew_best_arcsec', 'eef90_origin_arcsec', 'eef90_best_arcsec',
@@ -24,7 +24,7 @@ def test_compute_hew_eef_metrics_keys():
 
 def test_cli_return_metrics_only_json():
     res = subprocess.run(
-        ['python3', 'main.py', '-f', 'Distributions/Test_Distribution.xlsx', '--return_metrics_only'],
+        ['python3', 'main.py', '-f', 'Distributions/TestDistribution.xlsx', '--return_metrics_only'],
         capture_output=True,
         text=True,
         check=True,

@@ -7,7 +7,7 @@ from gui_distributions import generate_data_from_distributions, DATA_TYPES
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl import load_workbook
 
-base = Path('Distributions/Test_Distribution.xlsx')
+base = Path('Distributions/TestDistribution.xlsx')
 std = load_standard_mm_psf_defs(base)
 key = '10% Variable Sym Gaussian 4.3"'
 if key not in std:
