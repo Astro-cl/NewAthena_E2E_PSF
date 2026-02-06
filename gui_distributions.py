@@ -3914,17 +3914,8 @@ class ExtendedGUI:
             
 
 
-            if __name__ == '__main__':
-                root = tk.Tk()
-                apply_macos_input_fixes(root)
-                app = ExtendedGUI(root)
-                root.mainloop()
-                
-                
-                self.data_dfs[data_type_key] = data_df
-                messagebox.showinfo('Success', f"Custom PSF '{stem}' set for {num_mm} selected MMs!")
-                self.update_preview()
-                return
+            # (removed accidental debug path that re-launched the GUI when
+            # this module was executed as __main__; keep normal in-app flow)
 
             params = {}
             col_specs: dict[str, str] = {}
