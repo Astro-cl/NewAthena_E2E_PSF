@@ -1390,8 +1390,7 @@ def main():
         # expand them here into numeric per-MM samples. Otherwise use the
         # preset definitions (vectorized sampling) via _sample.
         eps = 1e-6
-        # collect detailed per-index sampling records for debugging
-        detailed_rows = []
+        # (debugging records removed)
         if template_placeholders and (template_sr_col or template_sa_col):
             new_sr = _np.zeros(n)
             new_sa = _np.zeros(n)
@@ -1483,21 +1482,7 @@ def main():
                     else:
                         new_sa[i] = float(fallback_sa) if fallback_sa is not None else 0.0
 
-                # record detailed decision for this index
-                try:
-                    seed_used = int(h + int(i))
-                except Exception:
-                    seed_used = int(h)
-                detailed_rows.append({
-                    'index': int(i),
-                    'sr_template': (str(mm_df.at[i, template_sr_col]) if template_sr_col and template_sr_col in mm_df.columns else ''),
-                    'sa_template': (str(mm_df.at[i, template_sa_col]) if template_sa_col and template_sa_col in mm_df.columns else ''),
-                    'sr_def': (str(sr_def) if sr_def is not None else ''),
-                    'sa_def': (str(sa_def) if sa_def is not None else ''),
-                    'seed': seed_used,
-                    'sampled_sr_raw': float(new_sr[i]),
-                    'sampled_sa_raw': float(new_sa[i]),
-                })
+                # detailed per-index logging removed
 
             new_sr = _np.where(new_sr <= 0, eps, new_sr)
             new_sa = _np.where(new_sa <= 0, eps, new_sa)
@@ -1539,20 +1524,7 @@ def main():
                 else:
                     new_sa[i] = float(fallback_sa) if fallback_sa is not None else 0.0
 
-                try:
-                    seed_used = int(h + int(i))
-                except Exception:
-                    seed_used = int(h)
-                detailed_rows.append({
-                    'index': int(i),
-                    'sr_template': '',
-                    'sa_template': '',
-                    'sr_def': (str(sr_def) if sr_def is not None else ''),
-                    'sa_def': (str(sa_def) if sa_def is not None else ''),
-                    'seed': seed_used,
-                    'sampled_sr_raw': float(new_sr[i]),
-                    'sampled_sa_raw': float(new_sa[i]),
-                })
+                # detailed per-index logging removed
             new_sr = _np.where(new_sr <= 0, eps, new_sr)
             new_sa = _np.where(new_sa <= 0, eps, new_sa)
 
@@ -1645,18 +1617,7 @@ def main():
             pass
         wb.save(fp)
 
-        # write detailed per-index sampling CSV for debugging (if we collected rows)
-        try:
-            if detailed_rows:
-                try:
-                    import pandas as _pd
-                    csv_name = fp.with_name(fp.stem + f"_MM_PSF_sampling_detailed_{int(datetime.utcnow().timestamp())}.csv")
-                    _pd.DataFrame(detailed_rows).to_csv(csv_name, index=False)
-                except Exception:
-                    # best-effort only; do not raise
-                    pass
-        except Exception:
-            pass
+        # detailed per-index sampling CSV output removed
 
     def _mask_alpha_for_non_pseudo_voigt(workbook_path: Path, num_mm: int):
         """Set alpha_rad/alpha_azi to '-' for per-MM rows where the distribution
