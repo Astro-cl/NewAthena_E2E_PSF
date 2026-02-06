@@ -4,10 +4,10 @@ The repository includes a sensitivity runner that generates per-combo Excel inpu
 and can execute them.
 
 Generate per-combo input workbooks only:
-  python3 sensitivity/sensitivity_run.py --generate-only --baseline Distributions/Test_Distribution.xlsx
+  python3 sensitivity/sensitivity_run.py --generate-only --baseline Distributions/TestDistribution.xlsx
 
 Run the full sensitivity job (generate inputs and execute jobs):
-  python3 sensitivity/sensitivity_run.py --baseline Distributions/Test_Distribution.xlsx
+  python3 sensitivity/sensitivity_run.py --baseline Distributions/TestDistribution.xlsx
 
 Notes:
 - Generated input workbooks are written to `sensitivity/input/` (kept, newest 100 preserved).

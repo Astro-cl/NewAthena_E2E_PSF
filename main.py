@@ -3163,7 +3163,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 print("Interactive display failed — no GUI available. To save the plot use --output <file.png> or run in a GUI session.")
 
 
-def compute_hew_eef_metrics(file: str = 'Distributions/Test_Distribution.xlsx', sheet: str = 'MM_PSF', normalize: bool = True, fast: bool = True, df_optimized: pd.DataFrame = None) -> dict:
+def compute_hew_eef_metrics(file: str = 'Distributions/TestDistribution.xlsx', sheet: str = 'MM_PSF', normalize: bool = True, fast: bool = True, df_optimized: pd.DataFrame = None) -> dict:
     """Convenience wrapper: load workbook and return HEW/EEF metrics (no plotting).
 
     Returns a dict matching the CLI JSON output.
@@ -3182,7 +3182,7 @@ if __name__ == '__main__':
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Plot sum of rotated Gaussians from Excel.')
-    parser.add_argument('-f','--file', default='Distributions/Test_Distribution.xlsx', help='Excel file path')
+    parser.add_argument('-f','--file', default='Distributions/TestDistribution.xlsx', help='Excel file path')
     parser.add_argument('-s','--sheet', default='MM_PSF', help='Sheet name to read (default MM_PSF)')
     parser.add_argument('--normalize', dest='normalize', action='store_true', default=True, help='Normalize each Gaussian to integrate to 1 (default on)')
     parser.add_argument('--no-normalize', dest='normalize', action='store_false', help='Disable normalization')

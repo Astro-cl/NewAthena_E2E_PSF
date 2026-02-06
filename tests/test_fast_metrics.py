@@ -16,7 +16,7 @@ def test_fast_metrics_matches_slow_tolerance():
     analytical fast path and the reference slow polar-integration path.
     """
     # Use the available test workbook in the repository
-    path = 'Distributions/Test_Distribution.xlsx'
+    path = 'Distributions/TestDistribution.xlsx'
 
     # slow (reference) path
     df_ref = load_gaussians_from_excel(path, fast_metrics=False)

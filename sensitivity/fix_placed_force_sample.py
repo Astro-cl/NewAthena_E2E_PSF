@@ -7,7 +7,7 @@ import hashlib
 from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
-baseline = ROOT / 'Distributions' / 'Test_Distribution.xlsx'
+baseline = ROOT / 'Distributions' / 'TestDistribution.xlsx'
 
 if len(sys.argv) > 1:
     target = Path(sys.argv[1])

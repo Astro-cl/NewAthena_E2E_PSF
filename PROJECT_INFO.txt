@@ -17,7 +17,7 @@ Documentation:
   ✓ PROJECT_INFO.txt         - This file
 
 Sample Data:
-  ✓ Distributions/Test_Distribution.xlsx - Example Excel file with MM configuration and PSF data
+  ✓ Distributions/TestDistribution.xlsx - Example Excel file with MM configuration and PSF data
 
 Directories:
   ✓ Distributions/           - For Excel files (load/save)
@@ -46,7 +46,7 @@ Documentation (merged into README.md):
 
 Generated Outputs (examples):
   ✗ *.png files
-  ✗ Old test files (cleaned up, only Test_Distribution.xlsx retained)
+  ✗ Old test files (cleaned up, only TestDistribution.xlsx retained)
   ✗ __pycache__/
 
 KEY CHANGES FROM ORIGINAL
@@ -60,7 +60,7 @@ KEY CHANGES FROM ORIGINAL
    - Timestamped filenames: E2E_PSF_YYYYMMDD_HHMMSS.png
 
 3. Default Paths:
-   - main.py: Default Excel path is Distributions/Test_Distribution.xlsx
+  - main.py: Default Excel path is Distributions/TestDistribution.xlsx
 
 4. Documentation:
    - All documentation consolidated into comprehensive README.md
