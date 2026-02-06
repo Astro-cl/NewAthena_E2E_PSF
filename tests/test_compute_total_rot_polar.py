@@ -1,3 +1,54 @@
+import pytest
+
+from main import compute_total_rot_polar
+
+
+def test_projection_case1_nontrivial_geometry():
+    # MM at (x,y) with given radius -> ux,uy as in real workbook
+    mm_to_pos = {1: 1}
+    mm_config_map = {
+        1: {
+            'x_MM': 0.0434013330,
+            'y_MM': 0.2711059987,
+            'r_MM': 0.2745580781,
+        }
+    }
+    alignment_by_pos = {}
+    gravity_by_pos = {1: {'d_grav_rotx': 120.0, 'd_grav_roty': 0.0}}
+    thermal_by_pos = {}
+
+    rotx, roty, rot_rad, rot_azi = compute_total_rot_polar(
+        mm_to_pos, mm_config_map, alignment_by_pos, gravity_by_pos, thermal_by_pos
+    )
+
+    ux = mm_config_map[1]['x_MM'] / mm_config_map[1]['r_MM']
+    uy = mm_config_map[1]['y_MM'] / mm_config_map[1]['r_MM']
+
+    expected_proj_rotrad = 120.0 * ux + 0.0 * uy
+    expected_proj_rotazi = -120.0 * uy + 0.0 * ux
+
+    assert rotx[1] == pytest.approx(120.0)
+    assert roty[1] == pytest.approx(0.0)
+    assert rot_rad[1] == pytest.approx(expected_proj_rotrad)
+    assert rot_azi[1] == pytest.approx(expected_proj_rotazi)
+
+
+def test_projection_case2_axis_aligned():
+    # MM along +y axis: ux=0, uy=1 => rotx projects to rotazi with negative sign
+    mm_to_pos = {2: 2}
+    mm_config_map = {2: {'x_MM': 0.0, 'y_MM': 1.0, 'r_MM': 1.0}}
+    alignment_by_pos = {}
+    gravity_by_pos = {2: {'d_grav_rotx': 120.0, 'd_grav_roty': 0.0}}
+    thermal_by_pos = {}
+
+    rotx, roty, rot_rad, rot_azi = compute_total_rot_polar(
+        mm_to_pos, mm_config_map, alignment_by_pos, gravity_by_pos, thermal_by_pos
+    )
+
+    assert rotx[2] == pytest.approx(120.0)
+    assert roty[2] == pytest.approx(0.0)
+    assert rot_rad[2] == pytest.approx(0.0)
+    assert rot_azi[2] == pytest.approx(-120.0)
 import os
 import sys
 

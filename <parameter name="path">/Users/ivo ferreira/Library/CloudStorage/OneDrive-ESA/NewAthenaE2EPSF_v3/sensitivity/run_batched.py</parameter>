@@ -1,0 +1,388 @@
+<parameter name="content">#!/usr/bin/env python3
+"""
+Batched sensitivity run script.
+
+Processes sensitivity combos in batches of 64 with proper parameter application.
+"""
+
+import pandas as pd
+import re
+import os
+import shutil
+import subprocess
+import json
+from pathlib import Path
+from datetime import datetime
+from itertools import product
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+ROOT = Path(__file__).resolve().parent.parent
+SENS_DIR = ROOT / 'sensitivity'
+INPUT_DIR = SENS_DIR / 'input'
+RESULTS_DIR = SENS_DIR / 'results'
+PARTIAL_CSV = RESULTS_DIR / 'sensitivity_run_partial.csv'
+FINAL_XLSX = RESULTS_DIR / 'sensitivity_results.xlsx'
+
+BATCH_SIZE = 64
+NUM_WORKERS = 64
+
+def get_timestamp():
+    return datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+
+def cleanup_input_dir():
+    if INPUT_DIR.exists():
+        for f in INPUT_DIR.iterdir():
+            if f.is_file():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+def apply_combo_to_excel(in_path: Path, out_path: Path, combo: dict):
+    """
+    Apply combo parameters to Excel file - modifies specific rows based on parameter values.
+    """
+    # Read all sheets
+    sheets = pd.read_excel(in_path, sheet_name=None, engine='openpyxl')
+    
+    # Process MM_PSF sheet - find and update the row matching combo MM_PSF
+    if 'MM_PSF' in sheets:
+        df = sheets['MM_PSF']
+        mm_psf_val = combo.get('MM_PSF', '')
+        
+        # Look for MM_PSF column
+        for col in df.columns:
+            col_str = str(col)
+            if 'MM_PSF' in col_str or 'psf' in col_str.lower():
+                # Find row where this column matches the combo value
+                for idx in df.index:
+                    cell_val = df.loc[idx, col]
+                    if pd.notna(cell_val) and str(cell_val).strip() != '-':
+                        # Update this row with combo values
+                        df.loc[idx, col] = mm_psf_val
+                        break
+                break
+    
+    # Process A_eff sheet
+    if 'A_eff' in sheets:
+        df = sheets['A_eff']
+        aeff_val = combo.get('A_eff', '')
+        
+        for col in df.columns:
+            col_str = str(col)
+            if 'A_eff' in col_str or 'eff' in col_str.lower():
+                for idx in df.index:
+                    cell_val = df.loc[idx, col]
+                    if pd.notna(cell_val) and str(cell_val).strip() != '-':
+                        df.loc[idx, col] = aeff_val
+                        break
+                break
+    
+    # Process other sheets looking for specific columns
+    for sheet_name, df in sheets.items():
+        # Look for Alignment column
+        if 'Alignment' in combo and 'Alignment' in df.columns:
+            align_val = combo['Alignment']
+            for idx in df.index:
+                cell_val = df.loc[idx, 'Alignment']
+                if pd.notna(cell_val) and str(cell_val).strip() != '-':
+                    df.loc[idx, 'Alignment'] = align_val
+                    break
+        
+        # Look for Thermal column
+        if 'Thermal' in combo and 'Thermal' in df.columns:
+            thermal_val = combo['Thermal']
+            for idx in df.index:
+                cell_val = df.loc[idx, 'Thermal']
+                if pd.notna(cell_val) and str(cell_val).strip() != '-':
+                    df.loc[idx, 'Thermal'] = thermal_val
+                    break
+        
+        # Look for Gravity offload column
+        if 'Gravity offload' in combo and 'Gravity offload' in df.columns:
+            grav_val = combo['Gravity offload']
+            for idx in df.index:
+                cell_val = df.loc[idx, 'Gravity offload']
+                if pd.notna(cell_val) and str(cell_val).strip() != '-':
+                    df.loc[idx, 'Gravity offload'] = grav_val
+                    break
+    
+    # Write to output file
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+def generate_input_files(combos: list, start_id: int, ts: str, baseline: Path) -> list:
+    """Generate input files with combo parameters applied."""
+    input_files = []
+    
+    for i, combo in enumerate(combos):
+        combo_id = start_id + i
+        
+        # Create filename
+        parts = [f"{k}={v}" for k, v in combo.items()]
+        name_suffix = '_'.join(re.sub(r'[^A-Za-z0-9._-]', '', p.replace(' ', '_')) for p in parts)
+        filename = f"{ts}_{combo_id}_{name_suffix}.xlsx"
+        out_path = INPUT_DIR / filename
+        
+        # Apply combo parameters to baseline and write
+        apply_combo_to_excel(baseline, out_path, combo)
+        
+        input_files.append((out_path, combo, combo_id))
+        print(f"  Generated [{combo_id}]: {filename}")
+    
+    return input_files
+
+def parse_metrics(output: str) -> dict:
+    """Parse JSON metrics from main.py output."""
+    start = output.rfind('{')
+    if start == -1:
+        return None
+    json_str = output[start:]
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        depth = 0
+        for i, c in enumerate(json_str):
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(json_str[:i+1])
+                    except:
+                        return None
+        return None
+
+def run_single_combo(args):
+    """Run main.py on a single combo file."""
+    out_path, combo, combo_id = args
+    
+    cmd = [
+        "python3", str(ROOT / 'main.py'),
+        "-f", str(out_path),
+        "--placement", "elliptical",
+        "--return_metrics_only"
+    ]
+    
+    try:
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
+        
+        if proc.returncode != 0:
+            return {'combo_id': combo_id, 'combo': combo, 'file': str(out_path), 'error': proc.stderr}
+        
+        metrics = parse_metrics(proc.stdout)
+        if metrics:
+            return {'combo_id': combo_id, 'combo': combo, 'file': str(out_path), 'metrics': metrics, 'error': None}
+        else:
+            return {'combo_id': combo_id, 'combo': combo, 'file': str(out_path), 'error': 'Failed to parse metrics'}
+            
+    except subprocess.TimeoutExpired:
+        return {'combo_id': combo_id, 'combo': combo, 'file': str(out_path), 'error': 'Timeout'}
+    except Exception as e:
+        return {'combo_id': combo_id, 'combo': combo, 'file': str(out_path), 'error': str(e)}
+
+def run_all_parallel(input_files: list) -> list:
+    """Run all combos in parallel."""
+    results = []
+    max_workers = min(NUM_WORKERS, len(input_files))
+    
+    print(f"\nRunning {len(input_files)} jobs with {max_workers} workers...")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(run_single_combo, args): args for args in input_files}
+        
+        completed = 0
+        total = len(futures)
+        for future in as_completed(futures):
+            completed += 1
+            args = futures[future]
+            out_path, combo, combo_id = args
+            result = future.result()
+            results.append(result)
+            
+            filename = Path(out_path).name
+            if result.get('error'):
+                print(f"  [{completed}/{total}] ERROR: {combo_id} | {filename[:40]}... | {str(result.get('error', ''))[:30]}")
+            else:
+                hew = result.get('metrics', {}).get('hew_origin_arcsec', 'N/A')
+                print(f"  [{completed}/{total}] OK: {combo_id} | {filename[:40]}... | HEW={hew}")
+    
+    return results
+
+def save_results(results: list):
+    """Save results to CSV (only rows with metrics, no duplicates)."""
+    # Filter to only results with metrics
+    valid_results = [r for r in results if r.get('metrics') and not r.get('error')]
+    
+    if not valid_results:
+        print("No valid results to save!")
+        return
+    
+    for r in valid_results:
+        combo_id = r['combo_id']
+        combo = r['combo']
+        
+        row = {
+            'combo_id': combo_id,
+            'A_eff': combo.get('A_eff', '-'),
+            'MM_PSF': combo.get('MM_PSF', '-'),
+            'Alignment': combo.get('Alignment', '-'),
+            'Thermal': combo.get('Thermal', '-'),
+            'Gravity offload': combo.get('Gravity offload', '-'),
+            'input_file': Path(r['file']).name,
+            'hew_origin_arcsec': r['metrics'].get('hew_origin_arcsec'),
+            'hew_best_arcsec': r['metrics'].get('hew_best_arcsec'),
+            'hew_opt_arcsec': r['metrics'].get('hew_opt_arcsec'),
+            'eef90_origin_arcsec': r['metrics'].get('eef90_origin_arcsec'),
+            'eef90_best_arcsec': r['metrics'].get('eef90_best_arcsec'),
+            'eef90_opt_arcsec': r['metrics'].get('eef90_opt_arcsec'),
+        }
+        
+        mode = 'a' if PARTIAL_CSV.exists() else 'w'
+        header = mode == 'w'
+        
+        df_row = pd.DataFrame([row])
+        df_row.to_csv(PARTIAL_CSV, mode=mode, header=header, index=False)
+    
+    print(f"Saved {len(valid_results)} results to {PARTIAL_CSV}")
+
+def finalize_results():
+    """Merge partial CSV to final XLSX."""
+    if not PARTIAL_CSV.exists():
+        print("No partial CSV found!")
+        return False
+    
+    try:
+        df = pd.read_csv(PARTIAL_CSV)
+        if df.empty:
+            print("Partial CSV is empty!")
+            return False
+        
+        # Remove duplicates (keep last = most recent)
+        df = df.drop_duplicates(subset=['combo_id'], keep='last')
+        
+        # Sort by combo_id
+        df = df.sort_values('combo_id')
+        
+        # Save to Excel
+        df.to_excel(FINAL_XLSX, index=False)
+        
+        print(f"Merged {len(df)} results to {FINAL_XLSX}")
+        return True
+        
+    except Exception as e:
+        print(f"Error merging results: {e}")
+        return False
+
+def main():
+    print("=" * 60)
+    print("Batched Sensitivity Run")
+    print("=" * 60)
+    
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Read sensitivity spec
+    sens_path = SENS_DIR / 'sensitivity_input.xlsx'
+    if not sens_path.exists():
+        print(f"Sensitivity file not found: {sens_path}")
+        return
+    
+    try:
+        sens_df = pd.read_excel(sens_path, engine='openpyxl')
+    except Exception as e:
+        print(f"Failed to read sensitivity spreadsheet: {e}")
+        return
+    
+    # Build combos from columns
+    choices_map = {}
+    for col in sens_df.columns:
+        vals = []
+        for v in sens_df[col].dropna().tolist():
+            if isinstance(v, str) and (',' in v or '\n' in v):
+                parts = [p.strip() for p in re.split('[,\n]', v) if p.strip()]
+                vals.extend(parts)
+            else:
+                vals.append(v)
+        # Unique preserving order
+        seen = set()
+        uniq = []
+        for v in vals:
+            if v not in seen:
+                uniq.append(v)
+                seen.add(v)
+        if uniq:
+            choices_map[col] = uniq
+    
+    if not choices_map:
+        print("No choices found!")
+        return
+    
+    cols = list(choices_map.keys())
+    combos = []
+    for prod in product(*(choices_map[c] for c in cols)):
+        combos.append(dict(zip(cols, prod)))
+    
+    print(f"Total combos: {len(combos)}")
+    print(f"Batch size: {BATCH_SIZE}")
+    
+    # Get baseline
+    baseline = ROOT / 'Distributions' / 'Test_Distribution.xlsx'
+    if not baseline.exists():
+        print(f"Baseline not found: {baseline}")
+        return
+    
+    # Process in batches
+    total = len(combos)
+    processed = 0
+    batch_num = 0
+    
+    while processed < total:
+        batch_num += 1
+        batch_start = processed
+        batch_end = min(processed + BATCH_SIZE, total)
+        batch = combos[batch_start:batch_end]
+        
+        print(f"\n{'=' * 60}")
+        print(f"Batch {batch_num}: combos {batch_start + 1} to {batch_end}")
+        print(f"{'=' * 60}")
+        
+        # Step 1: Empty input folder
+        print(f"\n[1/4] Emptying input folder...")
+        cleanup_input_dir()
+        
+        # Step 2: Generate input files with combo parameters
+        ts = get_timestamp()
+        print(f"\n[2/4] Generating {len(batch)} input files with combo parameters...")
+        input_files = generate_input_files(batch, batch_start + 1, ts, baseline)
+        
+        # Step 3: Run all in parallel
+        print(f"\n[3/4] Running all combos in parallel...")
+        results = run_all_parallel(input_files)
+        
+        # Step 4: Save results
+        print(f"\n[4/4] Saving results...")
+        save_results(results)
+        
+        # Cleanup
+        print(f"\nCleaning up input folder...")
+        cleanup_input_dir()
+        
+        processed = batch_end
+        success = sum(1 for r in results if r.get('metrics') and not r.get('error'))
+        errors = len(results) - success
+        print(f"\nBatch {batch_num} complete: {success} success, {errors} errors")
+    
+    # Finalize
+    print(f"\n{'=' * 60}")
+    print("Finalizing results...")
+    print(f"{'=' * 60}")
+    finalize_results()
+    
+    print(f"\nDone! Results saved to {FINAL_XLSX}")
+
+if __name__ == '__main__':
+    main()
+</parameter>

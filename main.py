@@ -1,33 +1,3 @@
-
-"""
-main.py
--------
-Core loader, transformer and PSF summation utilities for the MM configuration
-workspace.
-
-This module provides the following responsibilities:
-- Read and normalize multi-sheet CSV/Excel inputs (`parse_multisheet_csv`,
-    `load_gaussians_from_excel`, `load_aeff_weight_map`).
-- Apply per-position perturbations (alignment, gravity, thermal) and compute
-    projected rotation/polar components used for vignetting lookup
-    (`compute_total_rot_polar`).
-- Convert polar offsets to Cartesian offsets and assemble per-MM Gaussian
-    parameters suitable for summation and plotting (`plot_sum`).
-
-Design notes and contracts:
-- The authoritative A_eff weights MUST come from column B of the `A_eff`
-    sheet; `load_aeff_weight_map` enforces this and raises on missing/invalid
-    numeric values.
-- Perturbation sheets (Alignment, Gravity offload, Thermal) are interpreted
-    per-position; MMs are mapped to positions using `MM configuration`.
-- Vignetting (rotazi/rotrad) is applied multiplicatively to the A_eff weight
-    after weights are initialized; the GUI may override column B during export
-    when the user requests applying vignette columns.
-
-This docstring is intentionally high-level; individual functions contain more
-detailed contracts and examples where appropriate.
-"""
-
 import argparse  # For parsing command-line arguments
 import numpy as np  # For numerical operations and arrays
 import pandas as pd  # For data manipulation and Excel reading
@@ -36,309 +6,78 @@ import matplotlib.pyplot as plt  # For plotting
 import matplotlib.gridspec as gridspec
 import os
 from concurrent.futures import ThreadPoolExecutor
+import tempfile
 from distributions_rotated import (
     gaussian_2d_rotated,
     pseudo_voigt_2d_rotated,
     load_psf_matrix_excel,
     eval_psf_matrix_rotated,
-)  # Custom functions for 2D rotated distributions
+)
 import json
 import sys
-import tempfile
-from pathlib import Path
+def load_aeff_weight_map(path: str) -> dict:
+    """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
-# When running under pytest, force a non-interactive backend to avoid
-# tests hanging on GUI display calls (e.g. plt.show()). Detect pytest via
-# the environment variable set by pytest runner.
-import os as _os
-if _os.environ.get('PYTEST_CURRENT_TEST'):
-    try:
-        matplotlib.use('Agg')
-    except Exception:
-        pass
-
-
-def parse_multisheet_csv(path: str) -> dict:
-    """Parse a single CSV file that contains multiple sheets separated by
-    marker lines of the form `# sheet: Sheet Name`.
-
-    Returns a dict {sheet_name: DataFrame}.
-    If no markers are present, the file is interpreted as a single `MM_PSF` sheet.
+    Reads the `A_eff` sheet (headerless) and returns a dict mapping integer
+    MM -> float(A_eff_base). If the sheet is missing or no valid rows are
+    found an empty dict is returned.
     """
-    import re
-    from io import StringIO
+    mapping = {}
+    try:
+        raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+    except Exception:
+        return mapping
 
-    text = open(path, 'r', encoding='utf-8').read()
-    # Find markers like '# sheet: NAME' (case-insensitive)
-    parts = re.split(r'^\s*#\s*sheet\s*:\s*(.+)\s*$', text, flags=re.IGNORECASE | re.MULTILINE)
-    sheets = {}
-    if len(parts) == 1:
-        # No markers found -> treat whole file as MM_PSF
+    # Expect first column = MM #, second column = A_eff base
+    for rid in range(raw.shape[0]):
         try:
-            df = pd.read_csv(path, header=0)
+            mmv = raw.iat[rid, 0]
         except Exception:
-            df = pd.read_csv(path, header=None)
-        sheets['MM_PSF'] = df
-        return sheets
-
-    # parts is [pre, name1, body1, name2, body2, ...] where pre may be empty
-    pre = parts[0]
-    idx = 1
-    while idx < len(parts):
-        name = parts[idx].strip()
-        body = parts[idx + 1]
-        # read body into dataframe
-        buf = StringIO(body)
-        # Heuristic: certain sheets are headerless; treat MM_PSF as headerful
-        if name.strip().lower() in {'alignment', 'thermal', 'gravity offload'}:
-            try:
-                df = pd.read_csv(buf, header=None)
-            except Exception:
-                buf.seek(0)
-                df = pd.read_csv(buf, header=0)
-        else:
-            try:
-                df = pd.read_csv(buf, header=0)
-            except Exception:
-                buf.seek(0)
-                df = pd.read_csv(buf, header=None)
-        sheets[name] = df
-        idx += 2
-    return sheets
+            mmv = None
+        try:
+            aval = raw.iat[rid, 1]
+        except Exception:
+            aval = None
+        if mmv is None:
+            continue
+        try:
+            mm_int = int(float(mmv))
+        except Exception:
+            continue
+        try:
+            a_float = float(aval)
+        except Exception:
+            continue
+        mapping[mm_int] = a_float
+    return mapping
 
 
+def load_aeff_weight_map_with_name(path: str) -> tuple[dict, str | None]:
+    """Return (mapping, aeff_column_name).
 
-def load_aeff_weight_map(path: str, sheet: str = 'A_eff') -> dict[int, float]:
-    """Load weight mapping from A_eff sheet: {MM # -> weight}.
-
-    Contract (strict):
-    - Weights MUST come from column B of the 'A_eff' sheet.
-    - MM identifiers MUST come from column A of the same sheet.
-    - If the sheet is missing, or any MM has a missing/non-numeric weight in column B,
-      this function raises ValueError.
+    Attempts to detect a human-readable A_eff column name (e.g. '0.25 keV')
+    from the sheet if present; otherwise returns (mapping, None).
     """
-    # Notes / examples:
-    # - Typical A_eff sheet layout (headerful):
-    #     | MM # | A_eff |
-    #     | 100  | 1.0   |
-    #     | 300  | 1.0   |
-    #   This routine prefers explicit header names but will fall back to
-    #   scanning the top rows for a headerless layout. The implementation is
-    #   conservative and will raise early if numeric weights cannot be located
-    #   for any MM present in the PSF sheet.
-    # - The caller (usually `load_gaussians_from_excel`) depends on this
-    #   function to provide the authoritative per-MM base throughput. Any
-    #   subsequent vignetting adjustments are applied multiplicatively to the
-    #   returned weights inside the loader.
-    # Support CSV inputs: if a CSV path is provided, try to read weight
-    # information from the CSV itself (columns 'MM #' and 'weight' or 'A_eff').
-    is_csv = isinstance(path, str) and str(path).lower().endswith('.csv')
+    mapping = load_aeff_weight_map(path)
+    col_name = None
     try:
-        if is_csv:
-            raw = pd.read_csv(path, header=0)
-            # Normalize headerful DataFrame into the same shape expected below
-            # by keeping column names as-is.
-        else:
-            raw = pd.read_excel(path, sheet_name=sheet, engine='openpyxl', header=None)
-    except Exception as e:
-        # If CSV read fails or the sheet is missing, raise a clear error.
-        raise ValueError(f"Missing or unreadable '{sheet}' sheet or CSV input: {e}")
-
-    # The sheet may be returned in two shapes:
-    # 1) a raw headerless DataFrame (header=None used by caller) where the
-    #    'MM #' header appears somewhere in the first rows and the weight is
-    #    the adjacent column; or
-    # 2) a headerful DataFrame where columns already contain names like
-    #    'MM #' and one of the A_eff columns (e.g. 'A_eff', 'A_eff @1 keV').
-    # Handle both cases.
-    data = None
-    # Case A: headerful columns (detect 'MM' in column names)
-    cols = [str(c).strip() for c in list(raw.columns)]
-    import re
-    mm_col_name = None
-    for c in cols:
-        if re.search(r"\bmm\b|mm#", c, flags=re.IGNORECASE):
-            mm_col_name = c
-            break
-    if mm_col_name is not None:
-        # find a weight-like column: prefer exact 'A_eff' or 'weight', else any column containing 'a_eff' or 'eff' or 'weight'
-        weight_col_name = None
-        for c in cols:
-            if c.lower().strip() in {'a_eff', 'a_eff ', 'a_eff@0.25keV', 'weight'}:
-                weight_col_name = c
-                break
-        if weight_col_name is None:
-            for c in cols:
-                if re.search(r"a[_ ]?eff|eff|weight", c, flags=re.IGNORECASE):
-                    weight_col_name = c
-                    break
-        # Fallback: choose the next column after mm_col_name index
-        if weight_col_name is None:
-            try:
-                idx = cols.index(mm_col_name)
-                if idx + 1 < len(cols):
-                    weight_col_name = cols[idx + 1]
-            except Exception:
-                weight_col_name = None
-
-        if weight_col_name is None:
-            raise ValueError(f"Could not locate an A_eff/weight column in '{sheet}' sheet alongside '{mm_col_name}'")
-
-        data = raw[[mm_col_name, weight_col_name]].copy()
-        data.columns = ['MM #', 'weight']
-    else:
-        # Case B: headerless/raw layout - search for 'MM' header cell in the first rows
-        scan_rows = min(20, raw.shape[0])
-        header_row = None
-        header_col = None
-        for r in range(scan_rows):
-            for c in range(raw.shape[1]):
-                v = raw.iloc[r, c]
-                if isinstance(v, str) and v.strip().lower().replace(' ', '') in {'mm#', 'mm'}:
-                    header_row = r
-                    header_col = c
-                    break
-            if header_row is not None:
-                break
-
-        # Fallback: assume first two columns if we couldn't find an explicit header.
-        if header_row is None:
-            header_row = 0
-            header_col = 0
-
-        if raw.shape[1] < header_col + 2:
-            raise ValueError(f"'{sheet}' sheet must have at least two adjacent columns for MM # and weight.")
-
-        data = raw.iloc[header_row + 1 :, header_col : header_col + 2].copy()
-        data.columns = ['MM #', 'weight']
-
-    mm = pd.to_numeric(data['MM #'], errors='coerce')
-    wt = pd.to_numeric(data['weight'], errors='coerce')
-
-    # Rows with no MM are ignored; rows with an MM must have a valid numeric weight.
-    has_mm = mm.notna()
-    invalid_weight = has_mm & wt.isna()
-    if invalid_weight.any():
-        bad_rows = data.loc[invalid_weight, ['MM #', 'weight']].head(10).copy()
-        # Preserve the original raw row index to report Excel row numbers.
-        # raw/data are 0-indexed; Excel rows are 1-indexed.
-        excel_rows = [int(i) + 1 for i in bad_rows.index.tolist()]
-        bad_rows.insert(0, 'Excel row', excel_rows)
-        bad_cells = [f"{sheet}!B{r}" for r in excel_rows]
-        raise ValueError(
-            "Invalid A_eff weights in column B for some rows. "
-            "Column B must be numeric for every MM. "
-            f"Bad cells (examples): {', '.join(bad_cells)}\n"
-            "Example bad rows:\n"
-            + bad_rows.to_string(index=False)
-        )
-
-    mm = mm[has_mm].astype(int)
-    wt = wt[has_mm].astype(float)
-    if mm.empty:
-        raise ValueError(f"'{sheet}' sheet has no MM entries in column A.")
-
-    # Detect duplicates / conflicts
-    tmp = pd.DataFrame({'MM #': mm.to_numpy(), 'weight': wt.to_numpy()})
-    if tmp.duplicated(subset=['MM #']).any():
-        # Allow duplicates only if weights are identical
-        grp = tmp.groupby('MM #')['weight'].nunique(dropna=True)
-        conflict = grp[grp > 1]
-        if not conflict.empty:
-            raise ValueError(f"Conflicting weights found for MM(s): {conflict.index.tolist()[:20]}")
-        tmp = tmp.drop_duplicates(subset=['MM #'], keep='first')
-
-    return dict(zip(tmp['MM #'].astype(int), tmp['weight'].astype(float)))
-
-
-def load_aeff_weight_map_with_name(path: str, sheet: str = 'A_eff') -> tuple[dict[int, float], str | None]:
-    """Compatibility wrapper returning (mapping, chosen_weight_column_name).
-
-    Uses `load_aeff_weight_map` for the mapping and heuristics to pick the
-    most likely weight column name when the sheet has headers.
-    """
-    import re
-    try:
-        raw = pd.read_excel(path, sheet_name=sheet, engine='openpyxl')
-    except Exception:
-        # If cannot read, delegate to loader which will raise a clearer error
-        return load_aeff_weight_map(path, sheet=sheet), None
-
-    cols = [str(c).strip() for c in list(raw.columns)]
-    mm_col = None
-    for c in cols:
-        if re.search(r"\bmm\b|mm#", c, flags=re.IGNORECASE):
-            mm_col = c
-            break
-
-    weight_col = None
-    if mm_col is not None:
-        # Prefer explicit energy-like columns (e.g. 'A_eff @1 keV' or '@1 keV').
-        # This ensures users get the per-energy A_eff instead of a generic
-        # normalized 'A_eff' column that may contain placeholder ones.
-        for c in cols:
-            if re.search(r"\d+\.?\d*\s*(keV)?", c, flags=re.IGNORECASE):
-                weight_col = c
-                break
-        # Fallbacks: specific common names, then any 'a_eff'/'eff'/'weight' match
-        if weight_col is None:
-            for c in cols:
-                if c.lower().strip() in {'a_eff', 'weight'}:
-                    weight_col = c
-                    break
-        if weight_col is None:
-            for c in cols:
-                if re.search(r"a[_ ]?eff|eff|weight", c, flags=re.IGNORECASE):
-                    weight_col = c
-                    break
-        # Final fallback: the column after the MM column
-        if weight_col is None:
-            try:
-                idx = cols.index(mm_col)
-                if idx + 1 < len(cols):
-                    weight_col = cols[idx + 1]
-            except Exception:
-                weight_col = None
-
-    mapping = load_aeff_weight_map(path, sheet=sheet)
-
-    # If the headerful sheet contains explicit energy columns, prefer them
-    # (choose '@1 keV' if present, otherwise the first 'A_eff @' column).
-    try:
-        raw = pd.read_excel(path, sheet_name=sheet, engine='openpyxl')
-        pref = None
-        for c in raw.columns:
-            if isinstance(c, str) and '@1 keV' in c.lower():
-                pref = c
-                break
-        if pref is None:
-            for c in raw.columns:
-                if isinstance(c, str) and 'a_eff @' in c.lower():
-                    pref = c
-                    break
-        if pref is not None:
-            # find MM column name
-            mm_col = None
-            for cc in raw.columns:
-                if isinstance(cc, str) and re.search(r"\bmm\b|mm#", cc, flags=re.IGNORECASE):
-                    mm_col = cc
-                    break
-            if mm_col is None:
-                mm_col = raw.columns[0]
-            mm = pd.to_numeric(raw[mm_col], errors='coerce')
-            wt = pd.to_numeric(raw[pref], errors='coerce')
-            valid = mm.notna()
-            mm = mm[valid].astype(int)
-            wt = wt[valid].astype(float)
-            tmp = pd.DataFrame({'MM #': mm.to_numpy(), 'weight': wt.to_numpy()})
-            if not tmp.empty:
-                mapping = dict(zip(tmp['MM #'].astype(int), tmp['weight'].astype(float)))
-                weight_col = pref
+        raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+        # scan first few rows/cols for a string containing 'keV'
+        import re
+        for r in range(min(6, raw.shape[0])):
+            for c in range(min(6, raw.shape[1])):
+                try:
+                    v = raw.iat[r, c]
+                except Exception:
+                    v = None
+                if isinstance(v, str) and re.search(r"\bkeV\b", v, flags=re.IGNORECASE):
+                    col_name = v.strip()
+                    raise StopIteration
+    except StopIteration:
+        pass
     except Exception:
         pass
-
-    return mapping, weight_col
-
+    return mapping, col_name
 
 def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics: bool | None = None, **kwargs) -> pd.DataFrame:
     """Load gaussian parameters from Excel.
@@ -357,6 +96,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     # Support CSV inputs: either when the provided path ends with .csv or when
     # `--input-csv` was used to provide a CSV path. In these cases we read the
     # supplied CSV directly into a DataFrame. Otherwise fall back to Excel.
+    try:
+        print(f"load_gaussians_from_excel: start reading '{path}' (sheet={sheet})")
+    except Exception:
+        pass
     try:
         # Treat Path or str uniformly by converting to string first.
         arg_input_csv = getattr(sys.modules.get('__main__'), 'args', None)
@@ -590,11 +333,36 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 df['aeff_base'] = 1.0
                 df['weight'] = 1.0
         else:
-            aeff_map = load_aeff_weight_map(path)
-            # store base A_eff per-MM and initialize weight from it; vignetting
-            # adjustments will be applied later and stored as `aeff_adjusted`.
-            df['aeff_base'] = mm_as_int.map(aeff_map)
-            df['weight'] = df['aeff_base'].astype(float)
+            # Load authoritative bare A_eff from column B using existing helper
+            aeff_map_base = load_aeff_weight_map(path)
+            df['aeff_base'] = mm_as_int.map(aeff_map_base)
+
+            # Attempt to detect an adjusted-A_eff column (written into column C
+            # by the GUI/exporter) and prefer it for initial weights while
+            # preserving `aeff_base` as the bare throughput.
+            aeff_map_adjusted = {}
+            try:
+                raw_a = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+                # Expect layout: col0=MM #, col1=A_eff (base), col2=A_eff_adjusted
+                if raw_a.shape[1] >= 3:
+                    mm_col = pd.to_numeric(raw_a.iloc[:, 0], errors='coerce')
+                    adj_col = pd.to_numeric(raw_a.iloc[:, 2], errors='coerce')
+                    valid = mm_col.notna() & adj_col.notna()
+                    if valid.any():
+                        for mmv, adjv in zip(mm_col[valid].astype(int).tolist(), adj_col[valid].astype(float).tolist()):
+                            aeff_map_adjusted[int(mmv)] = float(adjv)
+            except Exception:
+                aeff_map_adjusted = {}
+
+            # Initialize weight: prefer adjusted map when available, else base.
+            if aeff_map_adjusted:
+                df['weight'] = mm_as_int.map(aeff_map_adjusted).astype(float)
+                # Fill any missing weights from base
+                df['weight'] = df['weight'].fillna(df['aeff_base'].astype(float))
+            else:
+                df['weight'] = df['aeff_base'].astype(float)
+
+            # Validate that bare A_eff exists for all MMs (column B required)
             missing_mask = df['aeff_base'].isna()
             if missing_mask.any():
                 missing_mm = sorted(set(mm_as_int[missing_mask].tolist()))
@@ -637,6 +405,31 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             mm_to_pos[mm_num_i] = int(order_i) + 1
                     else:
                         mm_to_pos[mm_num_i] = int(order_i) + 1
+
+                    # Record the MM configuration row identifier that
+                    # vignetting tables reference in column H. Prefer the
+                    # explicit 'Row #' value when present in the MM
+                    # configuration sheet; otherwise fall back to the
+                    # 1-based data row index (order_i + 1).
+                    try:
+                        raw_rownum = row.get('Row #') if 'Row #' in mm_config_df.columns else None
+                        if raw_rownum is not None and not pd.isna(raw_rownum):
+                            cfg_row_number = int(float(raw_rownum))
+                        else:
+                            cfg_row_number = int(order_i) + 1
+                    except Exception:
+                        cfg_row_number = int(order_i) + 1
+                    # Prefer explicit Position # mapping already set above
+                    # but also keep reverse lookup: position -> mm_config row.
+                    # If Position # wasn't present we still map using order.
+                    try:
+                        pos_for_row = mm_to_pos.get(mm_num_i, cfg_row_number)
+                    except Exception:
+                        pos_for_row = cfg_row_number
+                    # pos_to_cfg_row: Position # -> row number in MM configuration
+                    if 'pos_to_cfg_row' not in locals():
+                        pos_to_cfg_row = {}
+                    pos_to_cfg_row[pos_for_row] = cfg_row_number
 
                     mm_config_map[mm_num_i] = {
                         'x_MM': row.get('x_MM [m]', 0),
@@ -824,41 +617,169 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             xs_azi = ys_azi = None
             ys_by_pos_azi = {}
             azi_mode = 'none'
-            if vdf_azi is not None and not vdf_azi.empty and vdf_azi.shape[1] >= 2:
-                # first column is delta
-                xs_raw = pd.to_numeric(vdf_azi.iloc[:, 0], errors='coerce')
-                xs = xs_raw.dropna().to_numpy(dtype=float)
-                if xs.size > 0:
-                    # If sheet has exactly two columns, treat as A->B (delta->factor)
-                    if vdf_azi.shape[1] == 2:
-                        ys = pd.to_numeric(vdf_azi.iloc[:, 1], errors='coerce').dropna().to_numpy(dtype=float)
-                        if ys.size > 0:
-                            order = np.argsort(xs)
-                            xs_azi = xs[order]
-                            ys_azi = ys[order]
-                            azi_mode = 'single'
-                    else:
-                        # multi-column layout: subsequent columns are per-position factors
-                        cols = list(vdf_azi.columns)
-                        for col in cols[1:]:
+            # Try to detect new layout: table starting at column H (index 7)
+            # where column H contains MM-config row numbers, column I (8)
+            # contains rotazi x-values, column J (9) indicates energy,
+            # and column K (10) contains the factor. If present, build
+            # per-position/energy interpolation series.
+            try:
+                aeff_map, aeff_col_name = load_aeff_weight_map_with_name(path)
+            except Exception:
+                aeff_map, aeff_col_name = load_aeff_weight_map(path), None
+
+            # Try to detect the selected energy (numeric keV) from several
+            # places: preferred sources (in order):
+            # 1) explicit selection in the vignetting sheet (e.g. cell C2),
+            # 2) the A_eff column name (e.g. '7 keV'),
+            # 3) a scanned 'keV' token anywhere in the A_eff sheet.
+            sel_energy = None
+            sel_energy_from_vdf = False
+            # 1) check the vignetting sheet itself (common exporter puts
+            # selected energy into cell C2 or nearby). If present, prefer
+            # this value and do not override it from A_eff.
+            try:
+                # Read cell C2 explicitly from the workbook to avoid DataFrame
+                # header/offset issues that can make `iat[1,2]` point to the
+                # wrong cell. Use openpyxl to get the literal cell value.
+                from openpyxl import load_workbook
+                wb_tmp = load_workbook(path, data_only=True)
+                if 'Vignetting rotazi' in wb_tmp.sheetnames:
+                    ws_tmp = wb_tmp['Vignetting rotazi']
+                    candidate = ws_tmp.cell(row=2, column=3).value
+                else:
+                    candidate = None
+                if candidate is not None and not (isinstance(candidate, float) and np.isnan(candidate)):
+                    try:
+                        if isinstance(candidate, (int, float)):
+                            sel_energy = float(candidate)
+                        else:
+                            sel_energy = float(str(candidate).strip())
+                        sel_energy_from_vdf = True
+                    except Exception:
+                        import re as _re
+                        if isinstance(candidate, str):
+                            m = _re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", candidate, flags=_re.IGNORECASE)
+                            if m:
+                                sel_energy = float(m.group(1))
+                                sel_energy_from_vdf = True
+            except Exception:
+                sel_energy = None
+            # 2/3) fallback: detect from A_eff or column name
+            try:
+                # Only use the A_eff column name if sel_energy was not
+                # already determined from the vignette sheet itself.
+                import re as _re
+                if sel_energy is None and aeff_col_name and isinstance(aeff_col_name, str):
+                    m = _re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", aeff_col_name, flags=_re.IGNORECASE)
+                    if m:
+                        sel_energy = float(m.group(1))
+            except Exception:
+                pass
+
+            if sel_energy is None and not sel_energy_from_vdf:
+                try:
+                    aeff_df = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+                    import re as _re
+                    found = None
+                    for _, row in aeff_df.iterrows():
+                        for cell in row.tolist():
                             try:
-                                pos_key = int(str(col))
+                                if isinstance(cell, str):
+                                    m = _re.search(r"(\d+(?:\.\d*)?)\s*keV", cell, flags=_re.IGNORECASE)
+                                    if m:
+                                        found = float(m.group(1))
+                                        break
                             except Exception:
-                                # skip non-numeric column names
                                 continue
-                            ys_col = pd.to_numeric(vdf_azi[col], errors='coerce')
-                            ys_vals = ys_col.fillna(np.nan).to_numpy(dtype=float)
-                            if ys_vals.size > 0:
-                                order = np.argsort(xs)
-                                ys_by_pos_azi[pos_key] = ys_vals[order]
+                        if found is not None:
+                            break
+                    if found is not None:
+                        sel_energy = found
+                except Exception:
+                    sel_energy = None
+
+            if vdf_azi is not None and not vdf_azi.empty and vdf_azi.shape[1] >= 2:
+                # New table layout detection (column H-based)
+                if vdf_azi.shape[1] >= 11:
+                    # column H (index 7) should contain row numbers referencing
+                    # the MM configuration; build per-row arrays keyed by that
+                    # row number and energy marker.
+                    col_H = vdf_azi.iloc[:, 7]
+                    if col_H.notna().any():
+                        for _, r in vdf_azi.iterrows():
+                            try:
+                                cfg_row = r.iloc[7]
+                                if pd.isna(cfg_row):
+                                    continue
+                                cfg_row = int(float(cfg_row))
+                            except Exception:
+                                continue
+                            # energy marker in column J (index 9)
+                            energy_marker = r.iloc[9] if vdf_azi.shape[1] > 9 else None
+                            try:
+                                # column I contains rot delta in arcmin; convert to arcsec
+                                xval = float(r.iloc[8]) * 60.0 if not pd.isna(r.iloc[8]) else None
+                            except Exception:
+                                xval = None
+                            try:
+                                yval = float(r.iloc[10]) if vdf_azi.shape[1] > 10 and not pd.isna(r.iloc[10]) else None
+                            except Exception:
+                                yval = None
+                            if xval is None or yval is None:
+                                continue
+                            # store series keyed by (cfg_row, energy_marker)
+                            # energy in column J may be numeric or textual; preserve both representations
+                            key_str = (cfg_row, str(energy_marker).strip())
+                            key_num = None
+                            try:
+                                key_num = (cfg_row, float(energy_marker))
+                            except Exception:
+                                key_num = None
+                            if key_str not in ys_by_pos_azi:
+                                ys_by_pos_azi[key_str] = {'xs': [], 'ys': []}
+                            ys_by_pos_azi[key_str]['xs'].append(xval)
+                            ys_by_pos_azi[key_str]['ys'].append(yval)
+                            if key_num is not None:
+                                if key_num not in ys_by_pos_azi:
+                                    ys_by_pos_azi[key_num] = {'xs': [], 'ys': []}
+                                ys_by_pos_azi[key_num]['xs'].append(xval)
+                                ys_by_pos_azi[key_num]['ys'].append(yval)
+                        # sort arrays
+                        for k, v in list(ys_by_pos_azi.items()):
+                            order = np.argsort(v['xs'])
+                            xs_sorted = np.array(v['xs'], dtype=float)[order]
+                            ys_sorted = np.array(v['ys'], dtype=float)[order]
+                            ys_by_pos_azi[k] = (xs_sorted, ys_sorted)
                         if ys_by_pos_azi:
-                            xs_azi = xs[np.argsort(xs)]
-                            azi_mode = 'per_pos'
-                    # Fallback: sometimes the sheet contains many header columns
-                    # (e.g. per-energy columns) but the intended A->B mapping is
-                    # still in the first two columns. If no per-position columns
-                    # were detected above, try treating column 1 as the factor
-                    # series (A->B) when it contains numeric data.
+                            azi_mode = 'per_row_energy'
+                # Fallback to classic modes if new layout not present
+                if azi_mode == 'none':
+                    xs_raw = pd.to_numeric(vdf_azi.iloc[:, 0], errors='coerce')
+                    xs = xs_raw.dropna().to_numpy(dtype=float)
+                    if xs.size > 0:
+                        if vdf_azi.shape[1] == 2:
+                            ys = pd.to_numeric(vdf_azi.iloc[:, 1], errors='coerce').dropna().to_numpy(dtype=float)
+                            if ys.size > 0:
+                                order = np.argsort(xs)
+                                xs_azi = xs[order]
+                                ys_azi = ys[order]
+                                azi_mode = 'single'
+                        else:
+                            cols = list(vdf_azi.columns)
+                            for col in cols[1:]:
+                                try:
+                                    pos_key = int(str(col))
+                                except Exception:
+                                    continue
+                                ys_col = pd.to_numeric(vdf_azi[col], errors='coerce')
+                                ys_vals = ys_col.fillna(np.nan).to_numpy(dtype=float)
+                                if ys_vals.size > 0:
+                                    order = np.argsort(xs)
+                                    ys_by_pos_azi[pos_key] = ys_vals[order]
+                            if ys_by_pos_azi and isinstance(list(ys_by_pos_azi.keys())[0], int):
+                                xs_azi = xs[np.argsort(xs)]
+                                azi_mode = 'per_pos'
+                    # Fallback: try first two columns as A->B
                     if azi_mode == 'none' and vdf_azi.shape[1] >= 2:
                         trial_y = pd.to_numeric(vdf_azi.iloc[:, 1], errors='coerce').dropna().to_numpy(dtype=float)
                         if trial_y.size > 0:
@@ -866,8 +787,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             xs_azi = xs[order]
                             ys_azi = trial_y[order] if trial_y.size == xs_azi.size else trial_y
                             azi_mode = 'single'
-                    if azi_mode != 'none':
-                        applied_azi = True
+                if azi_mode != 'none':
+                    applied_azi = True
         except Exception:
             xs_azi = ys_azi = None
 
@@ -883,7 +804,60 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             xs_rad = ys_rad = None
             ys_by_pos_rad = {}
             rad_mode = 'none'
-            if vdf_rad is not None and not vdf_rad.empty and vdf_rad.shape[1] >= 2:
+            # Try to detect new H/I/J/K layout (same as rotazi):
+            # column H=index7 -> cfg_row, I=index8 -> delta(arcmin),
+            # J=index9 -> energy marker, K=index10 -> factor
+            try:
+                if vdf_rad is not None and not vdf_rad.empty and vdf_rad.shape[1] >= 11:
+                    col_H = vdf_rad.iloc[:, 7]
+                    if col_H.notna().any():
+                        for _, r in vdf_rad.iterrows():
+                            try:
+                                cfg_row = r.iloc[7]
+                                if pd.isna(cfg_row):
+                                    continue
+                                cfg_row = int(float(cfg_row))
+                            except Exception:
+                                continue
+                            energy_marker = r.iloc[9] if vdf_rad.shape[1] > 9 else None
+                            try:
+                                xval = float(r.iloc[8]) * 60.0 if not pd.isna(r.iloc[8]) else None
+                            except Exception:
+                                xval = None
+                            try:
+                                yval = float(r.iloc[10]) if vdf_rad.shape[1] > 10 and not pd.isna(r.iloc[10]) else None
+                            except Exception:
+                                yval = None
+                            if xval is None or yval is None:
+                                continue
+                            key_str = (cfg_row, str(energy_marker).strip())
+                            key_num = None
+                            try:
+                                key_num = (cfg_row, float(energy_marker))
+                            except Exception:
+                                key_num = None
+                            if key_str not in ys_by_pos_rad:
+                                ys_by_pos_rad[key_str] = {'xs': [], 'ys': []}
+                            ys_by_pos_rad[key_str]['xs'].append(xval)
+                            ys_by_pos_rad[key_str]['ys'].append(yval)
+                            if key_num is not None:
+                                if key_num not in ys_by_pos_rad:
+                                    ys_by_pos_rad[key_num] = {'xs': [], 'ys': []}
+                                ys_by_pos_rad[key_num]['xs'].append(xval)
+                                ys_by_pos_rad[key_num]['ys'].append(yval)
+                        # sort arrays
+                        for k, v in list(ys_by_pos_rad.items()):
+                            order = np.argsort(v['xs'])
+                            xs_sorted = np.array(v['xs'], dtype=float)[order]
+                            ys_sorted = np.array(v['ys'], dtype=float)[order]
+                            ys_by_pos_rad[k] = (xs_sorted, ys_sorted)
+                        if ys_by_pos_rad:
+                            rad_mode = 'per_row_energy'
+            except Exception:
+                pass
+
+            # Fallback to classic layouts if new layout not detected
+            if vdf_rad is not None and not vdf_rad.empty and vdf_rad.shape[1] >= 2 and rad_mode == 'none':
                 xs_raw = pd.to_numeric(vdf_rad.iloc[:, 0], errors='coerce')
                 xs = xs_raw.dropna().to_numpy(dtype=float)
                 if xs.size > 0:
@@ -909,9 +883,6 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         if ys_by_pos_rad:
                             xs_rad = xs[np.argsort(xs)]
                             rad_mode = 'per_pos'
-                    # Fallback: if no per-position columns found, try using
-                    # the second column as the A->B mapping (common layout
-                    # when energy columns appear as extra headers).
                     if rad_mode == 'none' and vdf_rad.shape[1] >= 2:
                         trial_y = pd.to_numeric(vdf_rad.iloc[:, 1], errors='coerce').dropna().to_numpy(dtype=float)
                         if trial_y.size > 0:
@@ -923,8 +894,57 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         applied_rad = True
         except Exception:
             xs_rad = ys_rad = None
+        # If sel_energy was not determined from the rotazi sheet, try rotrad's
+        # selected-energy marker (common exporter sometimes places it only
+        # on one of the vignette sheets). Normalize to float when possible.
+        try:
+            if (sel_energy is None or (isinstance(sel_energy, float) and np.isnan(sel_energy))):
+                # read rotrad sheet C2 explicitly to detect selected energy
+                try:
+                    from openpyxl import load_workbook
+                    wb_tmp2 = load_workbook(path, data_only=True)
+                    if 'Vignetting rotrad' in wb_tmp2.sheetnames:
+                        ws_tmp2 = wb_tmp2['Vignetting rotrad']
+                        candidate = ws_tmp2.cell(row=2, column=3).value
+                    else:
+                        candidate = None
+                except Exception:
+                    candidate = None
+                if candidate is not None and not (isinstance(candidate, float) and np.isnan(candidate)):
+                    try:
+                        if isinstance(candidate, (int, float)):
+                            sel_energy = float(candidate)
+                        else:
+                            sel_energy = float(str(candidate).strip())
+                        sel_energy_from_vdf = True
+                    except Exception:
+                        import re as _re
+                        if isinstance(candidate, str):
+                            m = _re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", candidate, flags=_re.IGNORECASE)
+                            if m:
+                                sel_energy = float(m.group(1))
+                                sel_energy_from_vdf = True
+        except Exception:
+            pass
 
         # Apply per-row interpolation multiplicatively to the already-initialized weight
+        # (instrumentation: print progress to help find stalls)
+        try:
+            print('DBG: starting apply vignetting to rows (will report progress every 100 rows)')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            if os.environ.get('VIG_DEBUG'):
+                try:
+                    print('DBG: azi_mode=', locals().get('azi_mode'), 'rad_mode=', locals().get('rad_mode'), 'sel_energy=', locals().get('sel_energy'))
+                    print('DBG: sample ys_by_pos_azi keys:', list(locals().get('ys_by_pos_azi', {}).keys())[:5])
+                    print('DBG: sample ys_by_pos_rad keys:', list(locals().get('ys_by_pos_rad', {}).keys())[:5])
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Apply per-row interpolation multiplicatively to the already-initialized weight.
         # For each MM row we:
         # 1) determine its Position # (slot) using `mm_to_pos` mapping;
@@ -935,7 +955,58 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         #    multiply the weight (order is irrelevant since multiplication is
         #    commutative), but we apply radial first then azimuthal for clarity.
         if 'weight' in df.columns:
+
+            # Helper to find a per-(cfg_row,energy) series robustly. The
+            # vignette sheet may store the energy marker as text or numeric;
+            # prefer numeric match, then named A_eff column, then fallback
+            # to any series for the cfg_row.
+            def _find_series(ys_map, cfg_row, sel_energy_local, aeff_col_name_local=None):
+                if not ys_map or cfg_row is None:
+                    return None
+                # try exact numeric key
+                try:
+                    keyn = (cfg_row, float(sel_energy_local))
+                    if keyn in ys_map:
+                        return ys_map[keyn]
+                except Exception:
+                    pass
+                # try named aeff column
+                try:
+                    if aeff_col_name_local is not None:
+                        key_named = (cfg_row, str(aeff_col_name_local).strip())
+                        if key_named in ys_map:
+                            return ys_map[key_named]
+                except Exception:
+                    pass
+                # try matching by numeric equivalence of the energy token
+                for k in ys_map.keys():
+                    try:
+                        if k[0] != cfg_row:
+                            continue
+                        val = k[1]
+                        try:
+                            if sel_energy_local is not None and abs(float(val) - float(sel_energy_local)) < 1e-6:
+                                return ys_map[k]
+                        except Exception:
+                            continue
+                    except Exception:
+                        continue
+                # fallback: return any series for this cfg_row
+                for k in ys_map.keys():
+                    try:
+                        if k[0] == cfg_row:
+                            return ys_map[k]
+                    except Exception:
+                        continue
+                return None
+
             for idx, row in df.iterrows():
+                if idx % 100 == 0:
+                    try:
+                        print(f'DBG: vignetting apply at row {idx}')
+                        sys.stdout.flush()
+                    except Exception:
+                        pass
                 mm_num = row.get('MM #')
                 try:
                     p = int(mm_to_pos.get(int(mm_num))) if pd.notna(mm_num) and int(mm_num) in mm_to_pos else None
@@ -947,40 +1018,504 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 # radial
                 if applied_rad and p in rot_rad_map:
                     try:
-                        if 'rad_mode' in locals() and rad_mode == 'per_pos' and p in ys_by_pos_rad:
+                        # Prefer new per-(cfg_row,energy) layout
+                        used = False
+                        if 'rad_mode' in locals() and rad_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
+                            cfg_row = pos_to_cfg_row.get(p)
+                            # Use helper to find best-matching per-(cfg_row,energy)
+                            if cfg_row is not None:
+                                series = _find_series(ys_by_pos_rad, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                                if series is not None:
+                                    xs_use, ys_use = series
+                                    factor = float(np.interp(float(rot_rad_map.get(p, 0.0)), xs_use, ys_use))
+                                    used = True
+                        if not used and 'rad_mode' in locals() and rad_mode == 'per_pos' and p in ys_by_pos_rad:
                             ys_use = ys_by_pos_rad[p]
                             factor = float(np.interp(float(rot_rad_map.get(p, 0.0)), xs_rad, ys_use))
-                        elif 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
+                        elif not used and 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
                             factor = float(np.interp(float(rot_rad_map.get(p, 0.0)), xs_rad, ys_rad))
                         else:
                             factor = 1.0
+                        # debug: print chosen key/arrays for first few rows
+                        try:
+                            if os.environ.get('VIG_DEBUG') and idx < 10:
+                                try:
+                                    sel_repr = None
+                                    try:
+                                        if 'keyn' in locals() and keyn in ys_by_pos_rad:
+                                            sel_repr = keyn
+                                        elif 'key' in locals() and key in ys_by_pos_rad:
+                                            sel_repr = key
+                                        else:
+                                            matches_local = [k for k in ys_by_pos_rad.keys() if k[0] == cfg_row] if 'cfg_row' in locals() else []
+                                            sel_repr = matches_local[0] if matches_local else None
+                                    except Exception:
+                                        sel_repr = None
+                                    rot_val = float(rot_rad_map.get(p, 0.0)) if rot_rad_map.get(p) is not None else 0.0
+                                    print(f"DBG: RAD idx={idx} pos={p} cfg_row={locals().get('cfg_row')} sel_key={sel_repr} rot_rad={rot_val} factor={factor}")
+                                    if sel_repr is not None and sel_repr in ys_by_pos_rad:
+                                        xs_print, ys_print = ys_by_pos_rad[sel_repr]
+                                        print('DBG: RAD xs[:5]=', xs_print[:5], 'ys[:5]=', ys_print[:5])
+                                        try:
+                                            print('DBG: RAD interp call ->', rot_val, xs_print.tolist(), ys_print.tolist())
+                                            interp_res = np.interp(abs(rot_val), xs_print, ys_print)
+                                            print('DBG: RAD interp result=', interp_res)
+                                            print('DBG: RAD exact matches indices for rot:', np.where(xs_print == rot_val)[0].tolist())
+                                        except Exception as _e:
+                                            print('DBG: RAD extra debug failed', _e)
+                                    sys.stdout.flush()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        # record radial factor for this position (always)
+                        if 'vig_vals_rad' not in locals():
+                            vig_vals_rad = {}
+                        if 'vig_source_rad' not in locals():
+                            vig_source_rad = {}
+                        vig_vals_rad[p] = float(factor)
+                        vig_source_rad[p] = ('per_row' if 'rad_mode' in locals() and rad_mode.startswith('per') else 'global')
                     except Exception:
                         factor = 1.0
-                    df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * factor
+                        if 'vig_vals_rad' not in locals():
+                            vig_vals_rad = {}
+                        if 'vig_source_rad' not in locals():
+                            vig_source_rad = {}
+                        vig_vals_rad[p] = float(factor)
+                        vig_source_rad[p] = ('per_row' if 'rad_mode' in locals() and rad_mode.startswith('per') else 'global')
 
                 # azimuthal
                 if applied_azi and p in rot_azi_map:
                     try:
-                        if 'azi_mode' in locals() and azi_mode == 'per_pos' and p in ys_by_pos_azi:
+                        used = False
+                        if 'azi_mode' in locals() and azi_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
+                            cfg_row = pos_to_cfg_row.get(p)
+                            if cfg_row is not None:
+                                series = _find_series(ys_by_pos_azi, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                                if series is not None:
+                                    xs_use, ys_use = series
+                                    factor = float(np.interp(abs(float(rot_azi_map.get(p, 0.0))), xs_use, ys_use))
+                                    used = True
+                        if not used and 'azi_mode' in locals() and azi_mode == 'per_pos' and p in ys_by_pos_azi:
                             ys_use = ys_by_pos_azi[p]
-                            factor = float(np.interp(float(rot_azi_map.get(p, 0.0)), xs_azi, ys_use))
-                        elif 'xs_azi' in locals() and xs_azi is not None and ys_azi is not None:
-                            factor = float(np.interp(float(rot_azi_map.get(p, 0.0)), xs_azi, ys_azi))
+                            factor = float(np.interp(abs(float(rot_azi_map.get(p, 0.0))), xs_azi, ys_use))
+                        elif not used and 'xs_azi' in locals() and xs_azi is not None and ys_azi is not None:
+                            factor = float(np.interp(abs(float(rot_azi_map.get(p, 0.0))), xs_azi, ys_azi))
                         else:
                             factor = 1.0
+                        # debug: print chosen key/arrays for first few rows (azimuthal)
+                        try:
+                            if os.environ.get('VIG_DEBUG') and idx < 10:
+                                try:
+                                    sel_repr = None
+                                    try:
+                                        if 'keyn' in locals() and keyn in ys_by_pos_azi:
+                                            sel_repr = keyn
+                                        elif 'key' in locals() and key in ys_by_pos_azi:
+                                            sel_repr = key
+                                        else:
+                                            matches_local = [k for k in ys_by_pos_azi.keys() if k[0] == cfg_row] if 'cfg_row' in locals() else []
+                                            sel_repr = matches_local[0] if matches_local else None
+                                    except Exception:
+                                        sel_repr = None
+                                    rot_val = float(rot_azi_map.get(p, 0.0)) if rot_azi_map.get(p) is not None else 0.0
+                                    print(f"DBG: AZI idx={idx} pos={p} cfg_row={locals().get('cfg_row')} sel_key={sel_repr} rot_azi={rot_val} factor={factor}")
+                                    if sel_repr is not None and sel_repr in ys_by_pos_azi:
+                                        xs_print, ys_print = ys_by_pos_azi[sel_repr]
+                                        print('DBG: AZI xs[:5]=', xs_print[:5], 'ys[:5]=', ys_print[:5])
+                                        try:
+                                            print('DBG: AZI interp call ->', rot_val, xs_print.tolist(), ys_print.tolist())
+                                            interp_res = np.interp(abs(rot_val), xs_print, ys_print)
+                                            print('DBG: AZI interp result=', interp_res)
+                                            print('DBG: AZI exact matches indices for rot:', np.where(xs_print == rot_val)[0].tolist())
+                                        except Exception as _e:
+                                            print('DBG: AZI extra debug failed', _e)
+                                    sys.stdout.flush()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                     except Exception:
                         factor = 1.0
-                    df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * factor
+                    # record azimuthal factor for this position (do not change df['weight'])
+                    if 'vig_vals_azi' not in locals():
+                        vig_vals_azi = {}
+                    if 'vig_source_azi' not in locals():
+                        vig_source_azi = {}
+                    vig_vals_azi[p] = float(factor)
+                    vig_source_azi[p] = ('per_row' if 'azi_mode' in locals() and azi_mode.startswith('per') else 'global')
 
         df.attrs['vignetting_rotazi_applied'] = bool(applied_azi)
         df.attrs['vignetting_rotrad_applied'] = bool(applied_rad)
+        # Post-pass: recompute per-position vignette values from the
+        # populated per-(cfg_row,energy) tables to avoid mismatches that
+        # can occur during the row-wise application loop. This ensures
+        # `vig_vals_azi` / `vig_vals_rad` reflect the intended
+        # interpolation from the vignetting tables.
         try:
-            # Record adjusted A_eff and vignette factor when possible
-            df['aeff_adjusted'] = df['weight'].astype(float)
+            if os.environ.get('VIG_DEBUG'):
+                print('DBG: performing post-pass recompute of vig_vals from per-row tables')
+                sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            if 'pos_to_cfg_row' in locals():
+                # ensure vig dicts exist
+                if 'vig_vals_azi' not in locals():
+                    vig_vals_azi = {}
+                if 'vig_vals_rad' not in locals():
+                    vig_vals_rad = {}
+                if 'vig_source_azi' not in locals():
+                    vig_source_azi = {}
+                if 'vig_source_rad' not in locals():
+                    vig_source_rad = {}
+
+                for pos in sorted(set(list(rot_azi_map.keys()) + list(rot_rad_map.keys()))):
+                    cfg = pos_to_cfg_row.get(pos)
+                    # azimuthal
+                    try:
+                        applied_val = None
+                        if cfg is not None and 'ys_by_pos_azi' in locals() and ys_by_pos_azi:
+                            series = _find_series(ys_by_pos_azi, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                            if series is not None:
+                                xsu, ysu = series
+                                applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xsu, ysu))
+                        if applied_val is None:
+                            # fallback to global
+                            if 'xs_azi' in locals() and xs_azi is not None and ys_azi is not None:
+                                applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_azi))
+                            else:
+                                applied_val = 1.0
+                        vig_vals_azi[pos] = float(applied_val)
+                        vig_source_azi[pos] = ('per_row' if 'ys_by_pos_azi' in locals() and any(k[0] == cfg for k in ys_by_pos_azi.keys()) else 'global')
+                    except Exception:
+                        vig_vals_azi[pos] = 1.0
+                        vig_source_azi[pos] = 'none'
+
+                    # radial
+                    try:
+                        applied_val = None
+                        if cfg is not None and 'ys_by_pos_rad' in locals() and ys_by_pos_rad:
+                            series = _find_series(ys_by_pos_rad, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                            if series is not None:
+                                xsr, ysr = series
+                                applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xsr, ysr))
+                        if applied_val is None:
+                            if 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
+                                applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_rad))
+                            else:
+                                applied_val = 1.0
+                        vig_vals_rad[pos] = float(applied_val)
+                        vig_source_rad[pos] = ('per_row' if 'ys_by_pos_rad' in locals() and any(k[0] == cfg for k in ys_by_pos_rad.keys()) else 'global')
+                    except Exception:
+                        vig_vals_rad[pos] = 1.0
+                        vig_source_rad[pos] = 'none'
+        except Exception:
+            pass
+        try:
+            # Compute adjusted A_eff per-MM from aeff_base multiplied by
+            # per-position vignetting factors (rotazi * rotrad). Do NOT alter
+            # the original A_eff column B in the workbook.
             if 'aeff_base' in df.columns:
-                # avoid divide-by-zero
                 base = df['aeff_base'].astype(float).replace({0.0: np.nan})
-                df['aeff_vig_factor'] = df['aeff_adjusted'] / base
+                # Build per-position combined factor lookup (default 1.0)
+                combined = []
+                for mm_idx, row2 in df.iterrows():
+                    mmnum = int(row2['MM #']) if not pd.isna(row2['MM #']) else None
+                    pos = mm_to_pos.get(int(mmnum)) if mmnum is not None else None
+                    f_azi = 1.0
+                    f_rad = 1.0
+                    if pos is not None:
+                        if 'vig_vals_azi' in locals() and pos in vig_vals_azi:
+                            f_azi = float(vig_vals_azi.get(pos, 1.0))
+                        if 'vig_vals_rad' in locals() and pos in vig_vals_rad:
+                            f_rad = float(vig_vals_rad.get(pos, 1.0))
+                    combined.append(f_azi * f_rad)
+                # Record source info per-MM for debugging
+                src_rad = []
+                src_azi = []
+                for mm_idx, row2 in df.iterrows():
+                    mmnum = int(row2['MM #']) if not pd.isna(row2['MM #']) else None
+                    pos = mm_to_pos.get(int(mmnum)) if mmnum is not None else None
+                    src_rad.append(vig_source_rad.get(pos, 'none') if 'vig_source_rad' in locals() else 'none')
+                    src_azi.append(vig_source_azi.get(pos, 'none') if 'vig_source_azi' in locals() else 'none')
+                df['aeff_vig_source_rotrad'] = src_rad
+                df['aeff_vig_source_rotazi'] = src_azi
+                df['aeff_vig_factor'] = np.array(combined, dtype=float)
+                df['aeff_adjusted'] = base * df['aeff_vig_factor']
+                # Make adjusted A_eff the active per-MM weight for aggregation
+                try:
+                    df['weight'] = df['aeff_adjusted'].astype(float)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Attempt to write per-position vignette factors into the workbook's
+        # Vignetting rotazi/rotrad sheets in column B for visibility. This
+        # implementation uses openpyxl to update only the specified cells
+        # (column B and C1 on vignette sheets; columns B and C on A_eff)
+        # and saves atomically to avoid corrupting the original workbook.
+        try:
+            from openpyxl import load_workbook
+            print('DBG: using openpyxl in-place vignette writer')
+            sys.stdout.flush()
+            wb = load_workbook(path)
+
+            # VIGNETTE SHEETS: write col B and C1 only
+            for sname, vig_map in (
+                ('Vignetting rotazi', vig_vals_azi if 'vig_vals_azi' in locals() else {}),
+                ('Vignetting rotrad', vig_vals_rad if 'vig_vals_rad' in locals() else {}),
+            ):
+                # Debug print of sample vig_map contents when requested
+                try:
+                    if os.environ.get('VIG_DEBUG'):
+                        sample_items = list((vig_vals_azi if sname.endswith('rotazi') else vig_vals_rad).items())[:10]
+                        print(f"DBG: sample vig_map for {sname}: {sample_items}")
+                        sys.stdout.flush()
+                except Exception:
+                    pass
+
+                # Extra debug: show a few per-position arrays and rot offsets for pos 1
+                try:
+                    if os.environ.get('VIG_DEBUG'):
+                        p0 = 1
+                        print('DBG: rot_rad_map[1]=', rot_rad_map.get(1))
+                        print('DBG: rot_azi_map[1]=', rot_azi_map.get(1))
+                        if 'pos_to_cfg_row' in locals():
+                            cfg = pos_to_cfg_row.get(p0)
+                            print('DBG: pos_to_cfg_row[1]=', cfg)
+                            if 'ys_by_pos_azi' in locals():
+                                matches = [k for k in ys_by_pos_azi.keys() if k[0] == cfg]
+                                print('DBG: azi matches for cfg:', matches[:5])
+                                if matches:
+                                    k = matches[0]
+                                    xsu, ysu = ys_by_pos_azi[k]
+                                    print('DBG: sample azi xs[:5]=', xsu[:5], 'ys[:5]=', ysu[:5])
+                            if 'ys_by_pos_rad' in locals():
+                                matchesr = [k for k in ys_by_pos_rad.keys() if k[0] == cfg]
+                                print('DBG: rad matches for cfg:', matchesr[:5])
+                                if matchesr:
+                                    kr = matchesr[0]
+                                    xsr, ysr = ys_by_pos_rad[kr]
+                                    print('DBG: sample rad xs[:5]=', xsr[:5], 'ys[:5]=', ysr[:5])
+                        sys.stdout.flush()
+                except Exception:
+                    pass
+
+                if not (vig_map and isinstance(vig_map, dict)):
+                    continue
+                if sname not in wb.sheetnames:
+                    continue
+                ws = wb[sname]
+                max_r = ws.max_row or 0
+
+                # Prefer sheet-specific selected energy in cell C2 only (ignore C1)
+                sheet_energy = None
+                try:
+                    c2 = ws.cell(row=2, column=3).value
+                    if c2 is not None and not (isinstance(c2, float) and np.isnan(c2)):
+                        try:
+                            sheet_energy = float(c2)
+                        except Exception:
+                            import re as _re
+                            if isinstance(c2, str):
+                                m = _re.search(r"(\d+(?:\.\d*)?)", c2)
+                                if m:
+                                    sheet_energy = float(m.group(1))
+                except Exception:
+                    sheet_energy = None
+                if sheet_energy is None:
+                    sheet_energy = locals().get('sel_energy') if 'sel_energy' in locals() else None
+
+                # Build mapping row->position from column A (explicit mapping expected)
+                pos_row_map = {}
+                for r in range(1, max_r + 1):
+                    try:
+                        v = ws.cell(row=r, column=1).value
+                        if v is None:
+                            continue
+                        if isinstance(v, (int,)) or (isinstance(v, float) and float(v).is_integer()):
+                            pos_row_map[int(v)] = r
+                        else:
+                            s = str(v).strip()
+                            if s.isdigit():
+                                pos_row_map[int(s)] = r
+                    except Exception:
+                        continue
+
+                written = 0
+                total = len(pos_row_map)
+                # For each position recorded in column A, compute/write factor into column B
+                # Rebuild a robust pos->cfg_row mapping from MM configuration if available
+                local_pos_to_cfg = {}
+                try:
+                    mmcfg = pd.read_excel(path, sheet_name='MM configuration', engine='openpyxl')
+                    if 'Position #' in mmcfg.columns:
+                        tmp = mmcfg.copy()
+                        tmp['Position #'] = pd.to_numeric(tmp['Position #'], errors='coerce')
+                        tmp = tmp[tmp['Position #'].notna()]
+                        for order_i, (_, rr) in enumerate(tmp.iterrows()):
+                            try:
+                                pval = int(rr['Position #'])
+                                # Prefer explicit 'Row #' when present; otherwise
+                                # fall back to the enumerated row index.
+                                raw_rownum = rr.get('Row #') if 'Row #' in mmcfg.columns else None
+                                if raw_rownum is not None and not pd.isna(raw_rownum):
+                                    local_pos_to_cfg[pval] = int(float(raw_rownum))
+                                else:
+                                    local_pos_to_cfg[pval] = order_i + 1
+                            except Exception:
+                                continue
+                    else:
+                        # fallback: use row order as cfg_row for positions if 'Position #' absent
+                        for order_i, (_, rr) in enumerate(mmcfg.iterrows()):
+                            local_pos_to_cfg[order_i + 1] = order_i + 1
+                except Exception:
+                    local_pos_to_cfg = locals().get('pos_to_cfg_row', {}) if 'pos_to_cfg_row' in locals() else {}
+
+                for i, (pos_k, row_idx) in enumerate(pos_row_map.items()):
+                    if i % 100 == 0:
+                        print(f"DBG: writing vignette values progress: {i}/{total} for sheet '{sname}'")
+                        sys.stdout.flush()
+                    pos_int = int(pos_k)
+                    # prefer already-computed vig_map value
+                    val = None
+                    try:
+                        if pos_int in vig_map:
+                            val = float(vig_map[pos_int])
+                    except Exception:
+                        val = None
+                    # if missing, attempt to compute from per-(cfg_row,energy) tables
+                    if val is None:
+                        try:
+                            cfg_row = None
+                            if 'pos_to_cfg_row' in locals() and pos_int in pos_to_cfg_row:
+                                cfg_row = pos_to_cfg_row.get(pos_int)
+                            elif pos_int in local_pos_to_cfg:
+                                cfg_row = local_pos_to_cfg.get(pos_int)
+                            if sname.endswith('rotazi'):
+                                # choose azimuthal series
+                                if cfg_row is not None and 'ys_by_pos_azi' in locals() and ys_by_pos_azi:
+                                    series = _find_series(ys_by_pos_azi, cfg_row, sheet_energy, locals().get('aeff_col_name'))
+                                    if series is not None:
+                                        xs_u, ys_u = series
+                                        val = float(np.interp(abs(float(rot_azi_map.get(pos_int, 0.0))), xs_u, ys_u))
+                                    else:
+                                        val = float(np.interp(abs(float(rot_azi_map.get(pos_int, 0.0))), locals().get('xs_azi', np.array([0.])), locals().get('ys_azi', np.array([1.]))))
+                                else:
+                                        val = float(np.interp(abs(float(rot_azi_map.get(pos_int, 0.0))), locals().get('xs_azi', np.array([0.])), locals().get('ys_azi', np.array([1.]))))
+                            else:
+                                # rotrad
+                                if cfg_row is not None and 'ys_by_pos_rad' in locals() and ys_by_pos_rad:
+                                    series = _find_series(ys_by_pos_rad, cfg_row, sheet_energy, locals().get('aeff_col_name'))
+                                    if series is not None:
+                                        xs_u, ys_u = series
+                                        val = float(np.interp(abs(float(rot_rad_map.get(pos_int, 0.0))), xs_u, ys_u))
+                                    else:
+                                        val = float(np.interp(abs(float(rot_rad_map.get(pos_int, 0.0))), locals().get('xs_rad', np.array([0.])), locals().get('ys_rad', np.array([1.]))))
+                                else:
+                                    val = float(np.interp(abs(float(rot_rad_map.get(pos_int, 0.0))), locals().get('xs_rad', np.array([0.])), locals().get('ys_rad', np.array([1.]))))
+                        except Exception:
+                            val = 1.0
+                    try:
+                        ws.cell(row=row_idx, column=2, value=float(val))
+                        written += 1
+                    except Exception:
+                        continue
+
+                print(f"DBG: wrote {written} values into sheet '{sname}'")
+
+                # Do not write to cell C1 here; GUI is responsible for any
+                # selected-energy markers (e.g. cell C2). Leave C1/C2 untouched.
+
+            # A_eff sheet: update columns B and C only
+            if 'A_eff' in wb.sheetnames and ('aeff_adjusted' in df.columns or 'aeff_base' in df.columns):
+                ws_a = wb['A_eff']
+                max_r_a = ws_a.max_row or 0
+
+                mm_series = pd.to_numeric(df.get('MM #', pd.Series([], dtype=float)), errors='coerce')
+                base_series = pd.to_numeric(df.get('aeff_base', pd.Series([], dtype=float)), errors='coerce')
+                adj_series = pd.to_numeric(df.get('aeff_adjusted', pd.Series([], dtype=float)), errors='coerce')
+
+                mm_to_base = {}
+                mm_to_adj = {}
+                for mmv, bv, av in zip(mm_series.tolist(), base_series.tolist(), adj_series.tolist()):
+                    try:
+                        key = int(mmv) if mmv is not None and not (isinstance(mmv, float) and np.isnan(mmv)) else None
+                    except Exception:
+                        key = None
+                    if key is None:
+                        continue
+                    try:
+                        if bv is not None and not (isinstance(bv, float) and np.isnan(bv)):
+                            mm_to_base[key] = float(bv)
+                    except Exception:
+                        pass
+                    try:
+                        if av is not None and not (isinstance(av, float) and np.isnan(av)):
+                            mm_to_adj[key] = float(av)
+                    except Exception:
+                        pass
+
+                written_a = 0
+                for r in range(1, max_r_a + 1):
+                    cell = ws_a.cell(row=r, column=1).value
+                    if cell is None:
+                        continue
+                    try:
+                        mmv = int(cell) if isinstance(cell, (int, float)) or (isinstance(cell, str) and str(cell).strip().isdigit()) else None
+                        if isinstance(cell, str) and str(cell).strip().isdigit():
+                            mmv = int(str(cell).strip())
+                    except Exception:
+                        mmv = None
+                    if mmv is None:
+                        continue
+                    wrote = False
+                    if mmv in mm_to_base:
+                        try:
+                            ws_a.cell(row=r, column=2, value=float(mm_to_base[mmv]))
+                            wrote = True
+                        except Exception:
+                            pass
+                    if mmv in mm_to_adj:
+                        try:
+                            ws_a.cell(row=r, column=3, value=float(mm_to_adj[mmv]))
+                            wrote = True
+                        except Exception:
+                            pass
+                    if wrote:
+                        written_a += 1
+
+                if written_a > 0:
+                    # Save atomically to avoid corruption
+                    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+                    tmpf.close()
+                    wb.save(tmpf.name)
+                    os.replace(tmpf.name, path)
+                    print(f"DBG: wrote {written_a} rows into 'A_eff' columns B/C")
+                    sys.stdout.flush()
+
+            try:
+                wb.close()
+            except Exception:
+                pass
+            print('DBG: openpyxl in-place vignette write completed')
+            sys.stdout.flush()
+        except Exception:
+            # If anything goes wrong, do not raise — vignetting writes are non-fatal.
+            print('DBG: in-place vignette writer failed; skipping writes')
+            sys.stdout.flush()
+        # Debug summary: print selected vignette source mapping for first positions
+        try:
+            debug_env = os.environ.get('VIG_DEBUG', None)
+            if debug_env:
+                sample = sorted(list(mm_to_pos.values()))[:16]
+                print('VIGNETTE DEBUG: per-position sources (pos: rad_source, azi_source)')
+                for pos in sample:
+                    rsrc = vig_source_rad.get(pos, 'none') if 'vig_source_rad' in locals() else 'none'
+                    asrc = vig_source_azi.get(pos, 'none') if 'vig_source_azi' in locals() else 'none'
+                    print(f' pos {pos}: {rsrc}, {asrc}')
         except Exception:
             pass
     except Exception:
@@ -1928,44 +2463,55 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         pref[1:] = np.cumsum(seg)
 
         best = None
-        i = 0
-        for j in range(1, prof.size):
-            # Increase i while we still meet target
-            while i < j and (pref[j] - pref[i]) >= target:
-                width = float(axis_vals[j] - axis_vals[i])
-                if (best is None) or (width < best):
-                    best = width
-                i += 1
+        # Two-pointer sliding window: for each left index i, advance right index j
+        # until the integral pref[j] - pref[i] >= target, then record width.
+        n = prof.size
+        j = 1
+        for i in range(0, n - 1):
+            if j < i + 1:
+                j = i + 1
+            # advance j until interval [i,j] reaches target or j==n-1
+            while j < n and (pref[j] - pref[i]) < target:
+                j += 1
+            if j >= n:
+                break
+            width = float(axis_vals[j] - axis_vals[i])
+            if best is None or width < best:
+                best = width
+        return best
         return best
 
     def _compute_hew_xy_arcsec_from_grid_marginals(x_axis: np.ndarray, y_axis: np.ndarray, Zg: np.ndarray) -> tuple[float | None, float | None]:
-        """Compute HEW_x and HEW_y (arcsec) from the full summed 2D PSF Zg.
+        """Compute HEW_x and HEW_y (arcsec) from a gridded PSF `Zg` sampled on axes `x_axis`, `y_axis`.
 
-        Uses *marginals* of the aggregated PSF:
-        - Px(x) = \int Z(x,y) dy
-        - Py(y) = \int Z(x,y) dx
-
-        Then computes the minimal-width interval containing 50% energy for each marginal.
+        The function integrates the 2D PSF to obtain 1D marginals and then finds
+        the minimal-width interval containing 50% of the energy for each axis.
+        Returns (hew_x_arcsec, hew_y_arcsec) where values may be None on failure.
         """
-        if Zg.size == 0:
+        try:
+            if getattr(Zg, 'size', 0) == 0:
+                return (None, None)
+            if not np.isfinite(np.asarray(Zg, dtype=float)).any():
+                return (None, None)
+
+            x_axis = np.asarray(x_axis, dtype=float)
+            y_axis = np.asarray(y_axis, dtype=float)
+            Zg = np.asarray(Zg, dtype=float)
+
+            # Marginals (integrate the full 2D PSF along the other axis)
+            prof_x = np.trapezoid(Zg, y_axis, axis=0)
+            prof_y = np.trapezoid(Zg, x_axis, axis=1)
+
+            hew_x_m = _min_interval_width(x_axis, prof_x, frac=0.5)
+            hew_y_m = _min_interval_width(y_axis, prof_y, frac=0.5)
+
+            # Convert meters back to arcsec using project convention
+            m_to_arcsec = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)
+            hew_x_arcsec = (hew_x_m * m_to_arcsec) if hew_x_m is not None else None
+            hew_y_arcsec = (hew_y_m * m_to_arcsec) if hew_y_m is not None else None
+            return hew_x_arcsec, hew_y_arcsec
+        except Exception:
             return (None, None)
-        if not np.isfinite(Zg).any():
-            return (None, None)
-
-        x_axis = np.asarray(x_axis, dtype=float)
-        y_axis = np.asarray(y_axis, dtype=float)
-        Zg = np.asarray(Zg, dtype=float)
-
-        # Marginals (integrate the full 2D PSF along the other axis)
-        prof_x = np.trapezoid(Zg, y_axis, axis=0)
-        prof_y = np.trapezoid(Zg, x_axis, axis=1)
-
-        hew_x_m = _min_interval_width(x_axis, prof_x, frac=0.5)
-        hew_y_m = _min_interval_width(y_axis, prof_y, frac=0.5)
-
-        hew_x_arcsec = (hew_x_m * m_to_arcsec) if hew_x_m is not None else None
-        hew_y_arcsec = (hew_y_m * m_to_arcsec) if hew_y_m is not None else None
-        return hew_x_arcsec, hew_y_arcsec
 
     # HEW_x / HEW_y annotations for encircled-energy legend entries
     # Base curves share the same underlying PSF, so their HEW_x/HEW_y should be the same.
@@ -1997,6 +2543,25 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             'hew_opt_arcsec': (2 * opt_radius_50 * m_to_arcsec) if opt_radius_50 is not None else None,
             'eef90_opt_arcsec': (2 * opt_radius_90 * m_to_arcsec) if opt_radius_90 is not None else None,
         }
+    else:
+        # Also expose the exact same metrics when producing plots so both
+        # interactive and metrics-only runs produce identical outputs.
+        try:
+            metrics_out = {
+                'hew_origin_arcsec': hew_origin_arcsec,
+                'hew_best_arcsec': hew_best_arcsec,
+                'eef90_origin_arcsec': eef90_origin_arcsec,
+                'eef90_best_arcsec': eef90_arcsec,
+                'hew_x_arcsec': hew_base_x_arcsec,
+                'hew_y_arcsec': hew_base_y_arcsec,
+                'hew_opt_x_arcsec': hew_opt_x_arcsec,
+                'hew_opt_y_arcsec': hew_opt_y_arcsec,
+                'hew_opt_arcsec': (2 * opt_radius_50 * m_to_arcsec) if opt_radius_50 is not None else None,
+                'eef90_opt_arcsec': (2 * opt_radius_90 * m_to_arcsec) if opt_radius_90 is not None else None,
+            }
+            print(json.dumps(metrics_out, indent=2))
+        except Exception:
+            pass
     if radius_90 is not None:
         # Add a dashed circle for 90% encircled energy in red
         label_90 = f'EEF 90% centered on best focus ({eef90_arcsec:.4f}" diameter)' if eef90_arcsec is not None else 'EEF 90% centered on best focus'
@@ -2472,9 +3037,41 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     if output:
         plt.savefig(output, dpi=150)  # Save the combined plot
         print(f"Saved combined plot to {output}")
-
     if not output:
-        plt.show()  # Display the combined plot
+        # No explicit output requested. To avoid blocking in interactive
+        # backends (which calls plt.show() and waits for user), save a
+        # non-interactive copy of the combined plot to a file alongside the
+        # input workbook. This prevents the CLI invocation from appearing to
+        # "hang" while still producing a useful artifact. If saving fails
+        # for any reason, fall back to showing the interactive window.
+        # Prefer explicit interactive display when requested. Use a safe lookup
+        # for CLI args exposed on __main__.args to avoid NameError when this
+        # module is imported or called programmatically.
+        try:
+            _main_mod = sys.modules.get('__main__')
+            _main_args = getattr(_main_mod, 'args', None) if _main_mod is not None else None
+            _show_flag = getattr(_main_args, 'show', False) if _main_args is not None else False
+        except Exception:
+            _show_flag = False
+        if _show_flag:
+            try:
+                plt.show()
+            except Exception:
+                try:
+                    base, _ = os.path.splitext(args.file)
+                    auto_out = f"{base}_plot.png"
+                    plt.savefig(auto_out, dpi=150)
+                    print(f"Interactive display failed; saved plot to {auto_out} instead.")
+                except Exception:
+                    pass
+        else:
+            # Default: show the interactive plot and keep it open. If this
+            # fails (e.g. running in a headless environment), do NOT auto-save
+            # a PNG; instead instruct the user to run with --output to save.
+            try:
+                plt.show()
+            except Exception:
+                print("Interactive display failed — no GUI available. To save the plot use --output <file.png> or run in a GUI session.")
 
 
 def compute_hew_eef_metrics(file: str = 'Distributions/Test_Distribution.xlsx', sheet: str = 'MM_PSF', normalize: bool = True, fast: bool = True, df_optimized: pd.DataFrame = None) -> dict:
@@ -2489,6 +3086,10 @@ def compute_hew_eef_metrics(file: str = 'Distributions/Test_Distribution.xlsx', 
 if __name__ == '__main__':
     # Close all existing figures to ensure clean start
     plt.close('all')
+    try:
+        print('main.py: starting with argv=', sys.argv)
+    except Exception:
+        pass
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Plot sum of rotated Gaussians from Excel.')
@@ -2497,6 +3098,7 @@ if __name__ == '__main__':
     parser.add_argument('--normalize', dest='normalize', action='store_true', default=True, help='Normalize each Gaussian to integrate to 1 (default on)')
     parser.add_argument('--no-normalize', dest='normalize', action='store_false', help='Disable normalization')
     parser.add_argument('-o','--output', help='Optional output image file path (PNG)')
+    parser.add_argument('--show', action='store_true', help='Show interactive plot window (overrides auto-save)')
     parser.add_argument(
         '--mode',
         type=str,

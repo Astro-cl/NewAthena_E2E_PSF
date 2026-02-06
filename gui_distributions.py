@@ -107,6 +107,11 @@ def apply_macos_input_fixes(root: tk.Tk) -> None:
         return
 
     def _ensure_focus() -> None:
+        # Ensure these are always defined for later summary logic
+        successes = []
+        failures = []
+        failure_reasons = []
+
         try:
             # Make sure the window is the active/focused window.
             # On macOS the first click can be consumed just to activate the app.
@@ -297,7 +302,10 @@ class ExtendedGUI:
         self.aeff_fixed_var = tk.StringVar(value='')
         self.aeff_selected_preset_var = tk.StringVar(value='')
         self.aeff_pending_export = False
-        self.aeff_apply_vig_var = tk.BooleanVar(value=False)
+        # Vignetting is applied automatically based on selected A_eff preset
+        # or selected energy when using a fixed A_eff.
+        # Free-mode vignetting energy selector (user-entered or chosen)
+        self.aeff_free_energy_var = tk.StringVar(value='')
         # When True, do not show modal 'Applied preset' dialogs (useful during UI setup)
         self.suppress_standard_apply_modals = False
         self.export_mode_var = tk.StringVar(value='current')
@@ -1686,32 +1694,29 @@ class ExtendedGUI:
         self.aeff_expr_label = ttk.Label(self.aeff_std_row, text='', font=('Arial', 9), foreground='gray')
         self.aeff_expr_label.grid(row=1, column=1, sticky='w', padx=5, pady=(2, 0))
 
-        # Fixed controls
+        # Fixed-value controls (shown when user selects Fixed mode)
         self.aeff_fixed_row = ttk.Frame(container)
         self.aeff_fixed_row.grid(row=2, column=0, columnspan=3, sticky='w', padx=5, pady=5)
-        ttk.Label(self.aeff_fixed_row, text='Fixed A_eff:', font=('Arial', 10)).grid(row=0, column=0, sticky='w', padx=0)
+        ttk.Label(self.aeff_fixed_row, text='Fixed A_eff:', font=('Arial', 10)).grid(row=0, column=0, sticky='w')
         self.aeff_fixed_entry = ttk.Entry(self.aeff_fixed_row, textvariable=self.aeff_fixed_var, width=20)
         self.aeff_fixed_entry.grid(row=0, column=1, sticky='w', padx=5)
 
-        btn_row = ttk.Frame(container)
-        btn_row.grid(row=3, column=0, columnspan=3, sticky='w', padx=5, pady=10)
-        ttk.Button(btn_row, text='Apply to Selected MMs', command=self.apply_aeff_to_selected).pack(side='left', padx=0)
-        self.aeff_status_label = ttk.Label(btn_row, text='', foreground='blue', font=('Arial', 10))
-        self.aeff_status_label.pack(side='left', padx=10)
-        try:
-            self.tab_status_labels['A_eff'] = self.aeff_status_label
-        except Exception:
-            pass
+        # Free-mode vignetting energy selector
+        self.aeff_free_row = ttk.Frame(container)
+        self.aeff_free_row.grid(row=3, column=0, columnspan=3, sticky='w', padx=5, pady=5)
+        ttk.Label(self.aeff_free_row, text='Vignetting energy (keV):', font=('Arial', 10)).grid(row=0, column=0, sticky='w')
+        self.aeff_free_energy_combo = ttk.Combobox(self.aeff_free_row, textvariable=self.aeff_free_energy_var, values=[], width=8, state='readonly')
+        self.aeff_free_energy_combo.grid(row=0, column=1, sticky='w', padx=5)
 
-        # Vignetting application checkbox (visible only for 'standard' mode)
-        self.aeff_vig_row = ttk.Frame(container)
-        self.aeff_vig_row.grid(row=4, column=0, columnspan=3, sticky='w', padx=5, pady=2)
-        self.aeff_vig_check = ttk.Checkbutton(
-            self.aeff_vig_row,
-            text='Apply vignetting factors when exporting',
-            variable=self.aeff_apply_vig_var,
-        )
-        self.aeff_vig_check.pack(side='left')
+        # Informational note: vignetting factors are applied automatically
+        note_row = ttk.Frame(container)
+        note_row.grid(row=4, column=0, columnspan=3, sticky='w', padx=5, pady=5)
+        ttk.Label(note_row, text='Vignetting factors are applied automatically from A_eff selection', font=('Arial', 9), foreground='gray').pack(side='left')
+
+        # Apply button for A_eff actions
+        self.aeff_apply_row = ttk.Frame(container)
+        self.aeff_apply_row.grid(row=5, column=0, columnspan=3, sticky='w', padx=5, pady=10)
+        ttk.Button(self.aeff_apply_row, text='Apply to Selected MMs', command=self.apply_aeff_to_selected).pack()
 
         # Populate preset list if already loaded
         self.refresh_aeff_preset_controls()
@@ -1739,6 +1744,63 @@ class ExtendedGUI:
             self.on_aeff_standard_selected()
         except Exception:
             pass
+        # Populate free-energy combobox with numeric energies extracted from standard presets
+        try:
+            energies_list = []
+            # First try to read distinct numeric energy tokens from the vignetting sheets (column J)
+            try:
+                if self.excel_path:
+                    import pandas as _pd
+                    try:
+                        xls = _pd.ExcelFile(self.excel_path, engine='openpyxl')
+                        sheets_to_check = [s for s in ['Vignetting rotazi', 'Vignetting rotrad'] if s in xls.sheet_names]
+                        energy_set = set()
+                        for s in sheets_to_check:
+                            try:
+                                vdf = _pd.read_excel(self.excel_path, sheet_name=s, engine='openpyxl', header=None)
+                                if vdf is None or vdf.empty:
+                                    continue
+                                if vdf.shape[1] > 9:
+                                    col = vdf.iloc[:, 9].dropna()
+                                    for v in col.tolist():
+                                        try:
+                                            fv = float(v)
+                                            energy_set.add(fv)
+                                        except Exception:
+                                            continue
+                            except Exception:
+                                continue
+                        if energy_set:
+                            energies_list = sorted(list(energy_set))
+                            # format: drop .0 for integer energies
+                            def _fmt(f):
+                                try:
+                                    if abs(f - int(f)) < 1e-9:
+                                        return str(int(f))
+                                except Exception:
+                                    pass
+                                return str(float(f))
+                            self.aeff_free_energy_combo['values'] = [_fmt(e) for e in energies_list]
+                        else:
+                            raise RuntimeError('no energies in vignetting sheets')
+                    finally:
+                        try:
+                            del xls
+                        except Exception:
+                            pass
+            except Exception:
+                # Fallback: parse preset names for numeric tokens
+                energies = []
+                for name in presets:
+                    m = re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", str(name), flags=re.IGNORECASE)
+                    if m:
+                        energies.append(m.group(1))
+                # remove duplicates while preserving order
+                seen = set()
+                uniq = [e for e in energies if not (e in seen or seen.add(e))]
+                self.aeff_free_energy_combo['values'] = uniq
+        except Exception:
+            pass
 
     def toggle_aeff_mode(self):
         mode = self.aeff_mode_var.get()
@@ -1749,8 +1811,13 @@ class ExtendedGUI:
                 self.aeff_fixed_entry.state(['!disabled'])
             except Exception:
                 pass
+            # In fixed mode show the vignetting controls and the free-energy selector
             try:
-                self.aeff_vig_row.grid_remove()
+                self.aeff_vig_row.grid()
+            except Exception:
+                pass
+            try:
+                self.aeff_free_row.grid()
             except Exception:
                 pass
         else:
@@ -1762,6 +1829,10 @@ class ExtendedGUI:
                 pass
             try:
                 self.aeff_vig_row.grid()
+            except Exception:
+                pass
+            try:
+                self.aeff_free_row.grid_remove()
             except Exception:
                 pass
 
@@ -1974,6 +2045,11 @@ class ExtendedGUI:
 
         mode = self.aeff_mode_var.get()
         updated = 0
+        # Ensure result collectors are always defined so later summary
+        # logic can reference them regardless of mode (fixed vs standard).
+        successes = []
+        failures = []
+        failure_reasons = []
 
         try:
             if mode == 'fixed':
@@ -3835,20 +3911,16 @@ class ExtendedGUI:
                 path = self.custom_psf_path_var.get().strip()
                 if not stem or not path:
                     messagebox.showwarning('Missing PSF file', 'Please choose a PSF matrix Excel file first.')
-                    return
+            
 
-                mm_list = sorted(self.selected_mm_numbers)
-                data_df = pd.DataFrame({
-                    'MM #': mm_list,
-                    'm_rad [arcsec]': ['-'] * num_mm,
-                    'm_azi [arcsec]': ['-'] * num_mm,
-                    'sigma_rad [arcsec]': ['-'] * num_mm,
-                    'sigma_azi [arcsec]': ['-'] * num_mm,
-                    'distribution': [stem] * num_mm,
-                    'alpha_rad': ['-'] * num_mm,
-                    'alpha_azi': ['-'] * num_mm,
-                })
 
+            if __name__ == '__main__':
+                root = tk.Tk()
+                apply_macos_input_fixes(root)
+                app = ExtendedGUI(root)
+                root.mainloop()
+                
+                
                 self.data_dfs[data_type_key] = data_df
                 messagebox.showinfo('Success', f"Custom PSF '{stem}' set for {num_mm} selected MMs!")
                 self.update_preview()
@@ -4157,14 +4229,18 @@ class ExtendedGUI:
                 self.export_path_var.set(target_path)
         
         try:
+            import time as _time
+            print(f"export_to_excel: start export at {_time.time()}")
             # Load existing workbook to preserve formatting and formulas
             from openpyxl import load_workbook
             from openpyxl.utils.dataframe import dataframe_to_rows
             
             # Load existing workbook or create new one
             if self.excel_path:
+                print(f"export_to_excel: loading workbook {self.excel_path} at {_time.time()}")
                 # Always load existing workbook to preserve formatting, even when saving to new file
                 wb = load_workbook(self.excel_path)
+                print(f"export_to_excel: loaded workbook, sheets={wb.sheetnames[:6]} at {_time.time()}")
             else:
                 # Create new workbook only if no file was loaded
                 from openpyxl import Workbook
@@ -4416,91 +4492,515 @@ class ExtendedGUI:
                     except Exception:
                         continue
 
-                for mm in self.selected_mm_numbers:
-                    mm_i = int(mm)
-                    if mm_i not in self.aeff_weights:
-                        raise ValueError(f'Missing A_eff value for MM #{mm_i}. Apply a preset or fixed value first.')
-                    if mm_i not in mm_to_row:
-                        # Append missing MM row
-                        r = ws.max_row + 1
-                        ws.cell(row=r, column=1, value=mm_i)
-                        mm_to_row[mm_i] = r
-                    ws.cell(row=mm_to_row[mm_i], column=2, value=float(self.aeff_weights[mm_i]))
+                mode = self.aeff_mode_var.get()
+                if mode == 'fixed':
+                    # When fixed mode is used, set entire column B to the fixed value
+                    raw = self.aeff_fixed_var.get().strip()
+                    if not raw:
+                        raise ValueError('Please enter a fixed A_eff value before exporting')
+                    fixed_val = float(raw)
+                    # Ensure there is at least one MM row; if none, add selected MMs
+                    if ws.max_row < 2 and self.selected_mm_numbers:
+                        for mm in self.selected_mm_numbers:
+                            r = ws.max_row + 1
+                            ws.cell(row=r, column=1, value=int(mm))
+                    # Overwrite A_eff values for all rows (from row 2..max_row)
+                    for r in range(2, ws.max_row + 1):
+                        ws.cell(row=r, column=2, value=float(fixed_val))
+                    # Also update in-memory weights map for completeness
+                    for mm in list(mm_to_row.keys()):
+                        try:
+                            self.aeff_weights[int(mm)] = float(fixed_val)
+                        except Exception:
+                            continue
+                else:
+                    # Standard preset: update only selected MMs as before
+                    for mm in self.selected_mm_numbers:
+                        mm_i = int(mm)
+                        if mm_i not in self.aeff_weights:
+                            raise ValueError(f'Missing A_eff value for MM #{mm_i}. Apply a preset or fixed value first.')
+                        if mm_i not in mm_to_row:
+                            # Append missing MM row
+                            r = ws.max_row + 1
+                            ws.cell(row=r, column=1, value=mm_i)
+                            mm_to_row[mm_i] = r
+                        ws.cell(row=mm_to_row[mm_i], column=2, value=float(self.aeff_weights[mm_i]))
 
-            # If user requested, apply vignetting factors: copy selected-energy column
-            # from the vignetting sheets into column B of those sheets.
+            # Ensure A_eff sheet C2 stores the selected/preset energy when exporting.
             try:
-                if self.aeff_apply_vig_var.get() and self.aeff_mode_var.get() == 'standard':
-                    preset = str(self.aeff_selected_preset_var.get()).strip()
-                    if not preset:
-                        raise ValueError('No A_eff standard preset selected for vignetting copy')
-
-                    from openpyxl.utils import column_index_from_string
-
-                    def _normalize(s):
-                        return ''.join(str(s).lower().split()).replace('@', '') if s is not None else ''
-
-                    for vig_sheet in ('Vignetting rotazi', 'Vignetting rotrad'):
-                        if vig_sheet not in wb.sheetnames:
-                            continue
-                        wsv = wb[vig_sheet]
-                        # Ensure there is at least two columns; if not, create header for B
-                        if wsv.max_column < 2:
+                sel_energy_for_aeff = None
+                if self.aeff_mode_var.get() == 'fixed':
+                    # take numeric value from free-energy dropdown when fixed
+                    free_e = str(self.aeff_free_energy_var.get()).strip()
+                    if free_e:
+                        m = re.search(r"(\d+(?:\.\d*)?)", free_e)
+                        if m:
                             try:
-                                wsv.cell(row=1, column=2, value='factor')
+                                sel_energy_for_aeff = float(m.group(1))
                             except Exception:
-                                pass
-
-                        # Attempt 1: if preset is a column letter like 'K', use it
-                        src_col_idx = None
-                        if re.fullmatch(r'[A-Za-z]{1,3}', preset):
+                                sel_energy_for_aeff = None
+                else:
+                    preset_name = str(self.aeff_selected_preset_var.get()).strip()
+                    if preset_name:
+                        m = re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", preset_name, flags=re.IGNORECASE)
+                        if m:
                             try:
-                                src_col_idx = column_index_from_string(preset.upper())
+                                sel_energy_for_aeff = float(m.group(1))
                             except Exception:
-                                src_col_idx = None
+                                sel_energy_for_aeff = None
+                # Do NOT write selected energy into the A_eff sheet C2.
+                # The vignetting sheets' C2 values are updated below instead.
+            except Exception:
+                pass
 
-                        # Attempt 2: search header row for a header containing the preset string
-                        if src_col_idx is None:
-                            hdr = [ (cell.value or '') for cell in list(wsv[1]) ]
-                            norm_p = _normalize(preset)
-                            for ci, hv in enumerate(hdr, start=1):
-                                if hv is None:
-                                    continue
-                                if norm_p and norm_p in _normalize(hv):
-                                    src_col_idx = ci
-                                    break
-
-                        if src_col_idx is None:
-                            # nothing matched; skip this sheet
-                            continue
-
-                        # Copy values from src_col_idx -> column 2 (B) for all data rows
-                        for r in range(2, wsv.max_row + 1):
+            # Update vignetting sheet selected-energy cell C2 based on A_eff choice.
+            try:
+                sel_energy = None
+                # fixed mode: read selected energy from free-energy combobox
+                if self.aeff_mode_var.get() == 'fixed':
+                    fe = str(self.aeff_free_energy_var.get()).strip()
+                    if fe:
+                        m = re.search(r"(\d+(?:\.\d*)?)", fe)
+                        if m:
                             try:
-                                v = wsv.cell(row=r, column=src_col_idx).value
-                                wsv.cell(row=r, column=2, value=v)
+                                sel_energy = float(m.group(1))
                             except Exception:
-                                continue
-                    # Inform user of applied vignetting copy
-                    # (non-fatal if some sheets were missing)
-            except Exception as e:
-                # Make this non-fatal but inform the user
+                                sel_energy = None
+                else:
+                    # standard mode: try to parse energy from preset name
+                    preset_name = str(self.aeff_selected_preset_var.get()).strip()
+                    if preset_name:
+                        m = re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", preset_name, flags=re.IGNORECASE)
+                        if m:
+                            try:
+                                sel_energy = float(m.group(1))
+                            except Exception:
+                                sel_energy = None
+
+                # Fallback: if still None, try to read from existing vignetting C2
+                if sel_energy is None:
+                    try:
+                        if 'Vignetting rotazi' in wb.sheetnames:
+                            vws = wb['Vignetting rotazi']
+                            vval = vws.cell(row=2, column=3).value
+                            if vval is not None:
+                                sel_energy = float(vval)
+                    except Exception:
+                        sel_energy = None
+                if sel_energy is None:
+                    try:
+                        if 'Vignetting rotrad' in wb.sheetnames:
+                            vws = wb['Vignetting rotrad']
+                            vval = vws.cell(row=2, column=3).value
+                            if vval is not None:
+                                sel_energy = float(vval)
+                    except Exception:
+                        sel_energy = None
+
+                # Write selected energy into C2 of both vignetting sheets if present
+                if sel_energy is not None:
+                    try:
+                        if 'Vignetting rotazi' in wb.sheetnames:
+                            vws = wb['Vignetting rotazi']
+                            vws.cell(row=2, column=3, value=float(sel_energy))
+                    except Exception:
+                        pass
+                    try:
+                        if 'Vignetting rotrad' in wb.sheetnames:
+                            vws = wb['Vignetting rotrad']
+                            vws.cell(row=2, column=3, value=float(sel_energy))
+                    except Exception:
+                        pass
+            except Exception:
+                # Non-fatal: do not block export on vignetting metadata update
+                pass
+            
+            # Save workbook in a background thread to avoid blocking the GUI
+            import threading as _threading
+            import os as _os
+            import tempfile as _tempfile
+            from pathlib import Path as _Path
+            import time as _time
+
+            try:
+                progress_win = tk.Toplevel(self.root)
+                progress_win.title('Saving...')
+                ttk.Label(progress_win, text='Saving file, please wait...').pack(padx=20, pady=20)
+                progress_win.transient(self.root)
                 try:
-                    messagebox.showwarning('Vignetting copy', f'Could not apply vignetting copy: {e}')
+                    progress_win.grab_set()
                 except Exception:
                     pass
-            
-            # Save workbook
-            wb.save(target_path)
+                progress_win.update()
+            except Exception:
+                progress_win = None
 
-            # Clear pending flag after successful save
-            self.aeff_pending_export = False
-            
-            # Count total entries exported
-            total_entries = sum(len(df) for df in self.data_dfs.values() if df is not None)
-            messagebox.showinfo('Success', f'File saved to:\n{target_path}\nwith data for {len(self.selected_mm_numbers)} MMs across multiple sheets!')
+            save_result = {'ok': False, 'error': None}
+
+            def _save_worker():
+                try:
+                    dirp = _Path(target_path).parent if target_path else None
+                    if dirp is None:
+                        wb.save(target_path)
+                    else:
+                        tf = _tempfile.NamedTemporaryFile(prefix='.tmp_export_', suffix='.xlsx', dir=str(dirp), delete=False)
+                        tf.close()
+                        tmpname = tf.name
+                        wb.save(tmpname)
+                        try:
+                            _os.replace(tmpname, target_path)
+                        except Exception:
+                            wb.save(target_path)
+                    save_result['ok'] = True
+                except Exception as _e:
+                    save_result['error'] = str(_e)
+                finally:
+                    def _finish():
+                        try:
+                            if progress_win is not None:
+                                try:
+                                    progress_win.grab_release()
+                                except Exception:
+                                    pass
+                                try:
+                                    progress_win.destroy()
+                                except Exception:
+                                    pass
+                            if save_result['ok']:
+                                self.aeff_pending_export = False
+                                try:
+                                    messagebox.showinfo('Success', f'File saved to:\n{target_path}\nwith data for {len(self.selected_mm_numbers)} MMs across multiple sheets!')
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    messagebox.showerror('Error', save_result['error'])
+                                except Exception:
+                                    pass
+                        finally:
+                            return
+                    try:
+                        self.root.after(50, _finish)
+                    except Exception:
+                        _finish()
+
+            t = _threading.Thread(target=_save_worker, daemon=True)
+            t.start()
+            # Return now; UI will be updated when save completes in background
+            return
         except Exception as e:
             messagebox.showerror('Error', str(e))
+
+
+def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
+    """Apply per-position vignette factors to `target_path` workbook.
+
+    Writes vignette factors into column B of the vignetting sheets and writes
+    adjusted A_eff into column C of the A_eff sheet. Returns a summary dict.
+    """
+    import pandas as _pd
+    import numpy as _np
+    import re as _re
+    from openpyxl import load_workbook
+    from pathlib import Path as _Path
+    import tempfile as _tempfile
+
+    wb = load_workbook(target_path)
+
+    tf = _tempfile.NamedTemporaryFile(prefix='gui_vig_', suffix='.xlsx', delete=False)
+    tf.close()
+    tmp_read_path = tf.name
+    try:
+        wb.save(tmp_read_path)
+    except Exception:
+        tmp_read_path = target_path
+
+    mm_to_pos = {}
+    pos_to_cfg_row = {}
+    mm_config_map = {}
+    try:
+        mmc_df = _pd.read_excel(tmp_read_path, sheet_name='MM configuration', engine='openpyxl')
+        if 'MM #' in mmc_df.columns:
+            for order_i, (_, row) in enumerate(mmc_df.iterrows()):
+                mm_num = row.get('MM #')
+                if _pd.isna(mm_num):
+                    continue
+                mm_num_i = int(mm_num)
+                if 'Position #' in mmc_df.columns:
+                    pos_val = row.get('Position #')
+                    if not _pd.isna(pos_val):
+                        try:
+                            mm_to_pos[mm_num_i] = int(float(pos_val))
+                        except Exception:
+                            pass
+                    if mm_num_i not in mm_to_pos:
+                        mm_to_pos[mm_num_i] = int(order_i) + 1
+                else:
+                    mm_to_pos[mm_num_i] = int(order_i) + 1
+                cfg_row_number = int(order_i) + 1
+                pos_for_row = mm_to_pos.get(mm_num_i, cfg_row_number)
+                pos_to_cfg_row[pos_for_row] = cfg_row_number
+                mm_config_map[mm_num_i] = {
+                    'x_MM': row.get('x_MM [m]', 0),
+                    'y_MM': row.get('y_MM [m]', 0),
+                    'z_MM': row.get('z_MM [m]', 0),
+                    'r_MM': row.get('r_MM [m]', 0),
+                }
+    except Exception:
+        pass
+
+    if verbose:
+        print('apply_vignetting_to_workbook: mm_to_pos=', len(mm_to_pos), 'pos_to_cfg_row=', len(pos_to_cfg_row))
+
+    def _read_pos_map(sheet_name, rot_keys):
+        out = {}
+        try:
+            dfp = _pd.read_excel(tmp_read_path, sheet_name=sheet_name, engine='openpyxl')
+            if 'Position #' in dfp.columns:
+                for _, r in dfp.iterrows():
+                    pos = r.get('Position #')
+                    if _pd.isna(pos):
+                        continue
+                    pos_i = int(pos)
+                    out[pos_i] = {k: r.get(k, 0.0) for k in rot_keys}
+            elif 'MM #' in dfp.columns and mm_to_pos:
+                for _, r in dfp.iterrows():
+                    mmn = r.get('MM #')
+                    if _pd.isna(mmn):
+                        continue
+                    pos = mm_to_pos.get(int(mmn))
+                    if pos is None:
+                        continue
+                    out[pos] = {k: r.get(k, 0.0) for k in rot_keys}
+        except Exception:
+            pass
+        return out
+
+    alignment_by_pos = _read_pos_map('Alignment', ['d_align_rotrad', 'd_align_rotazi'])
+    gravity_by_pos = _read_pos_map('Gravity offload', ['d_grav_rotx', 'd_grav_roty', 'd_grav_rotrad', 'd_grav_rotazi'])
+    thermal_by_pos = _read_pos_map('Thermal', ['d_therm_rotx', 'd_therm_roty', 'd_therm_rotrad', 'd_therm_rotazi'])
+
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(_Path(__file__).resolve().parents[0]))
+        import main as _main
+        _, _, rot_rad_map, rot_azi_map = _main.compute_total_rot_polar(mm_to_pos, mm_config_map, alignment_by_pos, gravity_by_pos, thermal_by_pos)
+    except Exception:
+        rot_rad_map = {}
+        rot_azi_map = {}
+
+    if verbose:
+        print('apply_vignetting_to_workbook: rot maps sizes -> rot_rad:', len(rot_rad_map), 'rot_azi:', len(rot_azi_map))
+
+    def _parse_vig(sheet_name):
+        ys_by_pos = {}
+        try:
+            vdf = _pd.read_excel(tmp_read_path, sheet_name=sheet_name, engine='openpyxl', header=None)
+            if vdf is None or vdf.empty or vdf.shape[1] < 2:
+                return ys_by_pos
+            if vdf.shape[1] >= 11:
+                col_H = vdf.iloc[:, 7]
+                if col_H.notna().any():
+                    for _, r in vdf.iterrows():
+                        try:
+                            cfg_row = r.iloc[7]
+                            if _pd.isna(cfg_row):
+                                continue
+                            cfg_row = int(float(cfg_row))
+                        except Exception:
+                            continue
+                        energy_marker = r.iloc[9] if vdf.shape[1] > 9 else None
+                        try:
+                            # column I holds rot delta in arcmin; convert to arcsec
+                            xval = float(r.iloc[8]) * 60.0 if not _pd.isna(r.iloc[8]) else None
+                        except Exception:
+                            xval = None
+                        try:
+                            yval = float(r.iloc[10]) if vdf.shape[1] > 10 and not _pd.isna(r.iloc[10]) else None
+                        except Exception:
+                            yval = None
+                        if xval is None or yval is None:
+                            continue
+                        key_str = (cfg_row, str(energy_marker).strip())
+                        key_num = None
+                        try:
+                            key_num = (cfg_row, float(energy_marker))
+                        except Exception:
+                            key_num = None
+                        if key_str not in ys_by_pos:
+                            ys_by_pos[key_str] = {'xs': [], 'ys': []}
+                        ys_by_pos[key_str]['xs'].append(xval)
+                        ys_by_pos[key_str]['ys'].append(yval)
+                        if key_num is not None:
+                            if key_num not in ys_by_pos:
+                                ys_by_pos[key_num] = {'xs': [], 'ys': []}
+                            ys_by_pos[key_num]['xs'].append(xval)
+                            ys_by_pos[key_num]['ys'].append(yval)
+                    for k, v in list(ys_by_pos.items()):
+                        order = _np.argsort(v['xs'])
+                        xs_sorted = _np.array(v['xs'], dtype=float)[order]
+                        ys_sorted = _np.array(v['ys'], dtype=float)[order]
+                        ys_by_pos[k] = (xs_sorted, ys_sorted)
+        except Exception:
+            pass
+        return ys_by_pos
+
+    ys_by_pos_azi = _parse_vig('Vignetting rotazi')
+    ys_by_pos_rad = _parse_vig('Vignetting rotrad')
+
+    if verbose:
+        print('apply_vignetting_to_workbook: parsed vignetting -> azi keys:', len(ys_by_pos_azi), 'rad keys:', len(ys_by_pos_rad))
+
+    sel_energy = None
+    if preset:
+        m = _re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", str(preset), flags=_re.IGNORECASE)
+        if m:
+            try:
+                sel_energy = float(m.group(1))
+            except Exception:
+                sel_energy = None
+    # If no preset energy was supplied, attempt to read energy from vignetting
+    # sheet cell C2 (row=2,col=3). Prefer 'Vignetting rotazi' then 'Vignetting rotrad'.
+    if sel_energy is None:
+        try:
+            if 'Vignetting rotazi' in wb.sheetnames:
+                vws = wb['Vignetting rotazi']
+                vval = vws.cell(row=2, column=3).value
+                if vval is not None:
+                    sel_energy = float(vval)
+        except Exception:
+            sel_energy = None
+    if sel_energy is None:
+        try:
+            if 'Vignetting rotrad' in wb.sheetnames:
+                vws = wb['Vignetting rotrad']
+                vval = vws.cell(row=2, column=3).value
+                if vval is not None:
+                    sel_energy = float(vval)
+        except Exception:
+            sel_energy = None
+
+    vig_vals_azi = {}
+    vig_vals_rad = {}
+    for mm, pos in mm_to_pos.items():
+        cfg_row = pos_to_cfg_row.get(pos)
+        f_azi = 1.0
+        try:
+            used = False
+            if cfg_row is not None and sel_energy is not None and (cfg_row, float(sel_energy)) in ys_by_pos_azi:
+                xs, ys = ys_by_pos_azi[(cfg_row, float(sel_energy))]
+                f_azi = float(_np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs, ys))
+                used = True
+            if not used and cfg_row is not None and (cfg_row, str(preset).strip()) in ys_by_pos_azi:
+                xs, ys = ys_by_pos_azi[(cfg_row, str(preset).strip())]
+                f_azi = float(_np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs, ys))
+                used = True
+            if not used and cfg_row is not None:
+                matches = [k for k in ys_by_pos_azi.keys() if k[0] == cfg_row]
+                if matches:
+                    xs, ys = ys_by_pos_azi[matches[0]]
+                    f_azi = float(_np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs, ys))
+        except Exception:
+            f_azi = 1.0
+
+        f_rad = 1.0
+        try:
+            used = False
+            if cfg_row is not None and sel_energy is not None and (cfg_row, float(sel_energy)) in ys_by_pos_rad:
+                xs, ys = ys_by_pos_rad[(cfg_row, float(sel_energy))]
+                f_rad = float(_np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs, ys))
+                used = True
+            if not used and cfg_row is not None and (cfg_row, str(preset).strip()) in ys_by_pos_rad:
+                xs, ys = ys_by_pos_rad[(cfg_row, str(preset).strip())]
+                f_rad = float(_np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs, ys))
+                used = True
+            if not used and cfg_row is not None:
+                matches = [k for k in ys_by_pos_rad.keys() if k[0] == cfg_row]
+                if matches:
+                    xs, ys = ys_by_pos_rad[matches[0]]
+                    f_rad = float(_np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs, ys))
+        except Exception:
+            f_rad = 1.0
+
+        vig_vals_azi[pos] = float(f_azi)
+        vig_vals_rad[pos] = float(f_rad)
+
+    if verbose:
+        print('apply_vignetting_to_workbook: computed vig_vals counts -> azi:', len(vig_vals_azi), 'rad:', len(vig_vals_rad))
+
+    def _write_vig_sheet_in_wb(wb_obj, sheet_name, vig_map):
+        if sheet_name not in wb_obj.sheetnames:
+            return 0
+        ws = wb_obj[sheet_name]
+        pos_to_row = {}
+        try:
+            max_col = min(40, ws.max_column or 40)
+        except Exception:
+            max_col = 40
+        # Use fast row iteration to avoid accessing ws._cells repeatedly
+        for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=max_col, values_only=True), start=1):
+            for cell in row:
+                try:
+                    if cell is None:
+                        continue
+                    if isinstance(cell, (int, float)) and float(cell).is_integer():
+                        v = int(cell)
+                    else:
+                        s = str(cell).strip()
+                        if s.isdigit():
+                            v = int(s)
+                        else:
+                            continue
+                    if v not in pos_to_row:
+                        pos_to_row[v] = row_idx
+                except Exception:
+                    continue
+        count = 0
+        for pos_k, val in (vig_map or {}).items():
+            if pos_k in pos_to_row:
+                r = pos_to_row[pos_k]
+                ws.cell(row=r, column=2, value=float(val))
+                count += 1
+        return count
+
+    c1 = _write_vig_sheet_in_wb(wb, 'Vignetting rotazi', vig_vals_azi)
+    c2 = _write_vig_sheet_in_wb(wb, 'Vignetting rotrad', vig_vals_rad)
+
+    c3 = 0
+    if 'A_eff' in wb.sheetnames:
+        ws_a = wb['A_eff']
+        mm_to_row = {}
+        for r in range(2, ws_a.max_row+1):
+            try:
+                mm = ws_a.cell(row=r, column=1).value
+                if mm is None:
+                    continue
+                mm_to_row[int(float(mm))] = r
+            except Exception:
+                continue
+        for mm, pos in mm_to_pos.items():
+            r = mm_to_row.get(mm)
+            if r is None:
+                continue
+            base = ws_a.cell(row=r, column=2).value
+            try:
+                base_f = float(base)
+            except Exception:
+                base_f = 1.0
+            f_azi = vig_vals_azi.get(pos, 1.0)
+            f_rad = vig_vals_rad.get(pos, 1.0)
+            adj = base_f * float(f_azi) * float(f_rad)
+            ws_a.cell(row=r, column=3, value=float(adj))
+            c3 += 1
+
+    try:
+        if verbose:
+            print('apply_vignetting_to_workbook: saving workbook to', target_path, 'counts:', c1, c2, c3)
+        wb.save(target_path)
+    except Exception:
+        pass
+
+    return {'rotazi_written': c1, 'rotrad_written': c2, 'aeff_adjusted_written': c3}
 
 
 if __name__ == '__main__':
