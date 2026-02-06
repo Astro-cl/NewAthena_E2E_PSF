@@ -136,7 +136,8 @@ def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
         try:
             a_float = float(aval)
         except Exception:
-            continue
+            # Found a MM entry but its A_eff value is invalid -> raise
+            raise ValueError(f"Invalid A_eff value for MM #{mm_int}: {aval!r}")
         mapping[mm_int] = a_float
     return mapping
 
@@ -1264,19 +1265,28 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # azimuthal
                     try:
                         applied_val = None
-                        if cfg is not None and 'ys_by_pos_azi' in locals() and ys_by_pos_azi:
-                            series = _find_series(ys_by_pos_azi, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
-                            if series is not None:
-                                xsu, ysu = series
-                                applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xsu, ysu))
-                        if applied_val is None:
-                            # fallback to global
-                            if 'xs_azi' in locals() and xs_azi is not None and ys_azi is not None:
-                                applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_azi))
-                            else:
-                                applied_val = 1.0
-                        vig_vals_azi[pos] = float(applied_val)
-                        vig_source_azi[pos] = ('per_row' if 'ys_by_pos_azi' in locals() and any(k[0] == cfg for k in ys_by_pos_azi.keys()) else 'global')
+                        # Prefer per-position arrays when available (azi_mode == 'per_pos')
+                        if cfg is not None and 'azi_mode' in locals() and azi_mode == 'per_pos' and 'ys_by_pos_azi' in locals() and isinstance(ys_by_pos_azi, dict) and pos in ys_by_pos_azi:
+                            try:
+                                applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_by_pos_azi[pos]))
+                                vig_vals_azi[pos] = float(applied_val)
+                                vig_source_azi[pos] = 'per_pos'
+                            except Exception:
+                                applied_val = None
+                        else:
+                            if cfg is not None and 'ys_by_pos_azi' in locals() and ys_by_pos_azi:
+                                series = _find_series(ys_by_pos_azi, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                                if series is not None:
+                                    xsu, ysu = series
+                                    applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xsu, ysu))
+                            if applied_val is None:
+                                # fallback to global
+                                if 'xs_azi' in locals() and xs_azi is not None and ys_azi is not None:
+                                    applied_val = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_azi))
+                                else:
+                                    applied_val = 1.0
+                            vig_vals_azi[pos] = float(applied_val)
+                            vig_source_azi[pos] = ('per_row' if 'ys_by_pos_azi' in locals() and any((isinstance(k, tuple) and k[0] == cfg) for k in ys_by_pos_azi.keys()) else 'global')
                     except Exception:
                         vig_vals_azi[pos] = 1.0
                         vig_source_azi[pos] = 'none'
@@ -1284,18 +1294,27 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # radial
                     try:
                         applied_val = None
-                        if cfg is not None and 'ys_by_pos_rad' in locals() and ys_by_pos_rad:
-                            series = _find_series(ys_by_pos_rad, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
-                            if series is not None:
-                                xsr, ysr = series
-                                applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xsr, ysr))
-                        if applied_val is None:
-                            if 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
-                                applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_rad))
-                            else:
-                                applied_val = 1.0
-                        vig_vals_rad[pos] = float(applied_val)
-                        vig_source_rad[pos] = ('per_row' if 'ys_by_pos_rad' in locals() and any(k[0] == cfg for k in ys_by_pos_rad.keys()) else 'global')
+                        # Prefer per-position arrays when available (rad_mode == 'per_pos')
+                        if cfg is not None and 'rad_mode' in locals() and rad_mode == 'per_pos' and 'ys_by_pos_rad' in locals() and isinstance(ys_by_pos_rad, dict) and pos in ys_by_pos_rad:
+                            try:
+                                applied_val = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_by_pos_rad[pos]))
+                                vig_vals_rad[pos] = float(applied_val)
+                                vig_source_rad[pos] = 'per_pos'
+                            except Exception:
+                                applied_val = None
+                        else:
+                            if cfg is not None and 'ys_by_pos_rad' in locals() and ys_by_pos_rad:
+                                series = _find_series(ys_by_pos_rad, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                                if series is not None:
+                                    xsr, ysr = series
+                                    applied_val = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xsr, ysr))
+                            if applied_val is None:
+                                if 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
+                                    applied_val = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_rad))
+                                else:
+                                    applied_val = 1.0
+                            vig_vals_rad[pos] = float(applied_val)
+                            vig_source_rad[pos] = ('per_row' if 'ys_by_pos_rad' in locals() and any((isinstance(k, tuple) and k[0] == cfg) for k in ys_by_pos_rad.keys()) else 'global')
                     except Exception:
                         vig_vals_rad[pos] = 1.0
                         vig_source_rad[pos] = 'none'
@@ -1307,7 +1326,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             # the original A_eff column B in the workbook.
             if 'aeff_base' in df.columns:
                 base = df['aeff_base'].astype(float).replace({0.0: np.nan})
-                # Build per-position combined factor lookup (default 1.0)
+                # Build per-position combined factor lookup (default 1.0).
+                # Recompute factors here using the same interpolation logic
+                # that produced the per-position vignette maps to avoid
+                # relying on intermediate `vig_vals_*` that may be empty
+                # for some sheet layouts.
                 combined = []
                 for mm_idx, row2 in df.iterrows():
                     mmnum = int(row2['MM #']) if not pd.isna(row2['MM #']) else None
@@ -1315,10 +1338,44 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     f_azi = 1.0
                     f_rad = 1.0
                     if pos is not None:
-                        if 'vig_vals_azi' in locals() and pos in vig_vals_azi:
-                            f_azi = float(vig_vals_azi.get(pos, 1.0))
-                        if 'vig_vals_rad' in locals() and pos in vig_vals_rad:
-                            f_rad = float(vig_vals_rad.get(pos, 1.0))
+                        # Azimuthal factor
+                        try:
+                            used_local = False
+                            if 'azi_mode' in locals() and azi_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
+                                cfg_row = pos_to_cfg_row.get(pos)
+                                if cfg_row is not None and 'ys_by_pos_azi' in locals() and ys_by_pos_azi:
+                                    series = _find_series(ys_by_pos_azi, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                                    if series is not None:
+                                        xsu, ysu = series
+                                        f_azi = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xsu, ysu))
+                                        used_local = True
+                            if not used_local and 'azi_mode' in locals() and azi_mode == 'per_pos' and pos in ys_by_pos_azi:
+                                f_azi = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_by_pos_azi[pos]))
+                                used_local = True
+                            if not used_local and 'xs_azi' in locals() and xs_azi is not None and ys_azi is not None:
+                                f_azi = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_azi))
+                        except Exception:
+                            f_azi = 1.0
+
+                        # Radial factor
+                        try:
+                            used_local = False
+                            if 'rad_mode' in locals() and rad_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
+                                cfg_row = pos_to_cfg_row.get(pos)
+                                if cfg_row is not None and 'ys_by_pos_rad' in locals() and ys_by_pos_rad:
+                                    series = _find_series(ys_by_pos_rad, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                                    if series is not None:
+                                        xsr, ysr = series
+                                        f_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xsr, ysr))
+                                        used_local = True
+                            if not used_local and 'rad_mode' in locals() and rad_mode == 'per_pos' and pos in ys_by_pos_rad:
+                                f_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_by_pos_rad[pos]))
+                                used_local = True
+                            if not used_local and 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
+                                f_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_rad))
+                        except Exception:
+                            f_rad = 1.0
+
                     combined.append(f_azi * f_rad)
                 # Record source info per-MM for debugging
                 src_rad = []
@@ -1419,19 +1476,32 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
                 # Build mapping row->position from column A (explicit mapping expected)
                 pos_row_map = {}
-                for r in range(1, max_r + 1):
-                    try:
-                        v = ws.cell(row=r, column=1).value
-                        if v is None:
+                # If the first column looks like a delta table (e.g. header 'delta' or 'delta_arcsec')
+                # then do not attempt to interpret integer-like values in column A as Position #.
+                try:
+                    header_cell = ws.cell(row=1, column=1).value
+                    header_is_delta = False
+                    if isinstance(header_cell, str):
+                        import re as _re
+                        if _re.search(r"\bdelta\b|delta_arc|arcsec", header_cell, flags=_re.IGNORECASE):
+                            header_is_delta = True
+                except Exception:
+                    header_is_delta = False
+
+                if not header_is_delta:
+                    for r in range(1, max_r + 1):
+                        try:
+                            v = ws.cell(row=r, column=1).value
+                            if v is None:
+                                continue
+                            if isinstance(v, (int,)) or (isinstance(v, float) and float(v).is_integer()):
+                                pos_row_map[int(v)] = r
+                            else:
+                                s = str(v).strip()
+                                if s.isdigit():
+                                    pos_row_map[int(s)] = r
+                        except Exception:
                             continue
-                        if isinstance(v, (int,)) or (isinstance(v, float) and float(v).is_integer()):
-                            pos_row_map[int(v)] = r
-                        else:
-                            s = str(v).strip()
-                            if s.isdigit():
-                                pos_row_map[int(s)] = r
-                    except Exception:
-                        continue
 
                 written = 0
                 total = len(pos_row_map)
@@ -1900,9 +1970,11 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Use a numpy array to avoid repeatedly accessing the DataFrame.
     # Prefer adjusted A_eff weights when available
     if 'aeff_adjusted' in df.columns:
-        weight_arr_for_center = df['aeff_adjusted'].to_numpy(dtype=float, copy=False)
+        # Treat NaN adjusted A_eff as zero weight (do not propagate NaN into normalization)
+        weight_arr_for_center = pd.to_numeric(df['aeff_adjusted'], errors='coerce').fillna(0.0).to_numpy(dtype=float, copy=False)
     elif 'weight' in df.columns:
-        weight_arr_for_center = df['weight'].to_numpy(dtype=float, copy=False)
+        # Ensure any non-finite weights are treated as zero
+        weight_arr_for_center = pd.to_numeric(df['weight'], errors='coerce').fillna(0.0).to_numpy(dtype=float, copy=False)
     else:
         weight_arr_for_center = np.ones(len(df), dtype=float) if len(df) > 0 else np.array([], dtype=float)
     total_weight = float(np.nansum(weight_arr_for_center)) if weight_arr_for_center.size else 0.0
@@ -1917,13 +1989,19 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         weight_arr = weight_arr_for_center / total_weight
         center_x = (df['mux'].to_numpy(dtype=float, copy=False) * weight_arr).sum()
         center_y = (df['muy'].to_numpy(dtype=float, copy=False) * weight_arr).sum()
+    # Ensure centers are finite numbers
+    if not np.isfinite(center_x):
+        center_x = 0.0
+    if not np.isfinite(center_y):
+        center_y = 0.0
     
     # --- Fast grid summation helpers (threaded) ---
     mux_arr = df['mux'].to_numpy(dtype=float, copy=False)
     muy_arr = df['muy'].to_numpy(dtype=float, copy=False)
     sigx_arr = df['sigmax'].to_numpy(dtype=float, copy=False)
     sigy_arr = df['sigmay'].to_numpy(dtype=float, copy=False)
-    theta_arr = df['theta_degrees'].to_numpy(dtype=float, copy=False)
+    # Ensure theta is numeric and replace NaN with 0.0 to avoid NaN trig results
+    theta_arr = pd.to_numeric(df.get('theta_degrees', pd.Series([0.0] * len(df))), errors='coerce').fillna(0.0).to_numpy(dtype=float, copy=False)
     # Weight array already computed above as `weight_arr` (normalized). Ensure it's available.
     try:
         # if weight_arr defined above, keep it; otherwise derive normalized from df
@@ -1978,7 +2056,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         for i in idxs:
             dlow = dist_arr[i]
             if dlow in ['pseudo-voigt', 'voigt']:
-                Zc += pseudo_voigt_2d_rotated(
+                add = pseudo_voigt_2d_rotated(
                     Xg, Yg,
                     muazi=mux_arr[i], murad=muy_arr[i],
                     sigmaazi=sigx_arr[i], sigmarad=sigy_arr[i],
@@ -1989,8 +2067,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     normalize=normalize_flag,
                     degrees=True,
                 )
+                Zc += add
             elif dlow == 'gaussian':
-                Zc += gaussian_2d_rotated(
+                add = gaussian_2d_rotated(
                     Xg, Yg,
                     mux=mux_arr[i], muy=muy_arr[i],
                     sigmax=sigx_arr[i], sigmay=sigy_arr[i],
@@ -1999,6 +2078,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     normalize=normalize_flag,
                     degrees=True,
                 )
+                Zc += add
             else:
                 # File-based custom PSF: distribution cell holds the file stem (without extension)
                 name = str(dist_raw_arr[i]).strip()
@@ -2257,6 +2337,29 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     radius_50_00 = _radius_for_fraction(frac_00, r_profile_00, target=0.5)
     # 90% at origin for reference
     radius_90_00 = _radius_for_fraction(frac_00, r_profile_00, target=0.9)
+    # Fallback: if radial integration failed (NaN/None), approximate using
+    # an effective sigma from the weighted mixture (use normalized weights).
+    try:
+        if not (isinstance(radius_50_00, float) and np.isfinite(radius_50_00)):
+            # use sigmax/sigmay arrays (in meters) and normalized weight_arr
+            try:
+                sigx_arr = df['sigmax'].to_numpy(dtype=float, copy=False)
+                sigy_arr = df['sigmay'].to_numpy(dtype=float, copy=False)
+                # weight_arr should be normalized (sum==1) from earlier
+                if 'weight_arr' in locals() and weight_arr is not None and np.isfinite(weight_arr).all() and weight_arr.size == sigx_arr.size:
+                    w = weight_arr
+                else:
+                    wtmp = df.get('weight', pd.Series([1.0]*len(df))).to_numpy(dtype=float, copy=False)
+                    wsum = float(np.nansum(wtmp)) if wtmp.size else 0.0
+                    w = (wtmp / wsum) if (wsum and np.isfinite(wsum) and wsum > 0.0) else np.ones(len(df), dtype=float) / max(1, len(df))
+                sigma2_eff = float(np.sum(w * (sigx_arr**2 + sigy_arr**2) * 0.5))
+                if sigma2_eff > 0 and np.isfinite(sigma2_eff):
+                    sigma_eff = float(np.sqrt(sigma2_eff))
+                    radius_50_00 = sigma_eff * np.sqrt(2.0 * np.log(2.0))
+            except Exception:
+                pass
+    except Exception:
+        pass
     
     # Compute optimized configuration metrics if provided
     opt_center_x, opt_center_y, opt_radius_50, opt_radius_90 = None, None, None, None
@@ -2507,8 +2610,27 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     y_range = ylim_max - ylim_min
     margin_x = margin_factor * x_range
     margin_y = margin_factor * y_range
-    plt.xlim((xlim_min - margin_x)*1e6, (xlim_max + margin_x)*1e6)
-    plt.ylim((ylim_min - margin_y)*1e6, (ylim_max + margin_y)*1e6)
+    # Guard against NaN/Inf axis limits (can happen if inputs contain NaNs).
+    if not np.isfinite(xlim_min) or not np.isfinite(xlim_max):
+        xlim_min = center_x - 1.0
+        xlim_max = center_x + 1.0
+    if not np.isfinite(ylim_min) or not np.isfinite(ylim_max):
+        ylim_min = center_y - 1.0
+        ylim_max = center_y + 1.0
+    margin_x = margin_factor * (xlim_max - xlim_min)
+    margin_y = margin_factor * (ylim_max - ylim_min)
+    left_x = (xlim_min - margin_x) * 1e6
+    right_x = (xlim_max + margin_x) * 1e6
+    bottom_y = (ylim_min - margin_y) * 1e6
+    top_y = (ylim_max + margin_y) * 1e6
+    if not (np.isfinite(left_x) and np.isfinite(right_x)):
+        left_x = (center_x - 1.0) * 1e6
+        right_x = (center_x + 1.0) * 1e6
+    if not (np.isfinite(bottom_y) and np.isfinite(top_y)):
+        bottom_y = (center_y - 1.0) * 1e6
+        top_y = (center_y + 1.0) * 1e6
+    plt.xlim(left_x, right_x)
+    plt.ylim(bottom_y, top_y)
     # Precompute arcsec conversions for legend/value annotations
     m_to_arcsec = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)
 
@@ -2613,10 +2735,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         # Reuse the same plotting grid for the overlay dataset.
         Z_opt = _sum_on_grid_opt(X, Y, normalize)
         hew_opt_x_arcsec, hew_opt_y_arcsec = _compute_hew_xy_arcsec_from_grid_marginals(x, y, Z_opt)
-    hew_best_arcsec = 2 * radius_50 * m_to_arcsec if radius_50 is not None else None
-    hew_origin_arcsec = 2 * radius_50_00 * m_to_arcsec if radius_50_00 is not None else None
-    eef90_arcsec = 2 * radius_90 * m_to_arcsec if radius_90 is not None else None
-    eef90_origin_arcsec = 2 * radius_90_00 * m_to_arcsec if radius_90_00 is not None else None
+    hew_best_arcsec = 2 * radius_50 * m_to_arcsec if (radius_50 is not None and np.isfinite(radius_50)) else None
+    hew_origin_arcsec = 2 * radius_50_00 * m_to_arcsec if (radius_50_00 is not None and np.isfinite(radius_50_00)) else None
+    eef90_arcsec = 2 * radius_90 * m_to_arcsec if (radius_90 is not None and np.isfinite(radius_90)) else None
+    eef90_origin_arcsec = 2 * radius_90_00 * m_to_arcsec if (radius_90_00 is not None and np.isfinite(radius_90_00)) else None
 
     # If caller only requests metrics, return them now without any plotting side-effects.
     if return_metrics_only:
@@ -2633,6 +2755,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             'eef90_opt_arcsec': (2 * opt_radius_90 * m_to_arcsec) if opt_radius_90 is not None else None,
         }
     else:
+        # Fallback: if origin HEW couldn't be computed from radial integration,
+        # use the grid-marginal HEW as a best-effort surrogate.
+        if hew_origin_arcsec is None and hew_base_x_arcsec is not None:
+            hew_origin_arcsec = hew_base_x_arcsec
         # Also expose the exact same metrics when producing plots so both
         # interactive and metrics-only runs produce identical outputs.
         try:
