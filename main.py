@@ -1020,16 +1020,16 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # Apply per-row interpolation multiplicatively to the already-initialized weight
         # (instrumentation: print progress to help find stalls)
         try:
-            print('DBG: starting apply vignetting to rows (will report progress every 100 rows)')
+            pass
             sys.stdout.flush()
         except Exception:
             pass
         try:
             if os.environ.get('VIG_DEBUG'):
                 try:
-                    print('DBG: azi_mode=', locals().get('azi_mode'), 'rad_mode=', locals().get('rad_mode'), 'sel_energy=', locals().get('sel_energy'))
-                    print('DBG: sample ys_by_pos_azi keys:', list(locals().get('ys_by_pos_azi', {}).keys())[:5])
-                    print('DBG: sample ys_by_pos_rad keys:', list(locals().get('ys_by_pos_rad', {}).keys())[:5])
+                    pass
+                    pass
+                    pass
                     sys.stdout.flush()
                 except Exception:
                     pass
@@ -1093,7 +1093,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             for idx, row in df.iterrows():
                 if idx % 100 == 0:
                     try:
-                        print(f'DBG: vignetting apply at row {idx}')
+                        pass
                         sys.stdout.flush()
                     except Exception:
                         pass
@@ -1142,17 +1142,17 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                     except Exception:
                                         sel_repr = None
                                     rot_val = float(rot_rad_map.get(p, 0.0)) if rot_rad_map.get(p) is not None else 0.0
-                                    print(f"DBG: RAD idx={idx} pos={p} cfg_row={locals().get('cfg_row')} sel_key={sel_repr} rot_rad={rot_val} factor={factor}")
+                                    pass
                                     if sel_repr is not None and sel_repr in ys_by_pos_rad:
                                         xs_print, ys_print = ys_by_pos_rad[sel_repr]
-                                        print('DBG: RAD xs[:5]=', xs_print[:5], 'ys[:5]=', ys_print[:5])
+                                        pass
                                         try:
-                                            print('DBG: RAD interp call ->', rot_val, xs_print.tolist(), ys_print.tolist())
+                                            pass
                                             interp_res = np.interp(abs(rot_val), xs_print, ys_print)
-                                            print('DBG: RAD interp result=', interp_res)
-                                            print('DBG: RAD exact matches indices for rot:', np.where(xs_print == rot_val)[0].tolist())
+                                            pass
+                                            pass
                                         except Exception as _e:
-                                            print('DBG: RAD extra debug failed', _e)
+                                            pass
                                     sys.stdout.flush()
                                 except Exception:
                                     pass
@@ -1209,17 +1209,17 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                     except Exception:
                                         sel_repr = None
                                     rot_val = float(rot_azi_map.get(p, 0.0)) if rot_azi_map.get(p) is not None else 0.0
-                                    print(f"DBG: AZI idx={idx} pos={p} cfg_row={locals().get('cfg_row')} sel_key={sel_repr} rot_azi={rot_val} factor={factor}")
+                                    pass
                                     if sel_repr is not None and sel_repr in ys_by_pos_azi:
                                         xs_print, ys_print = ys_by_pos_azi[sel_repr]
-                                        print('DBG: AZI xs[:5]=', xs_print[:5], 'ys[:5]=', ys_print[:5])
+                                        pass
                                         try:
-                                            print('DBG: AZI interp call ->', rot_val, xs_print.tolist(), ys_print.tolist())
+                                            pass
                                             interp_res = np.interp(abs(rot_val), xs_print, ys_print)
-                                            print('DBG: AZI interp result=', interp_res)
-                                            print('DBG: AZI exact matches indices for rot:', np.where(xs_print == rot_val)[0].tolist())
+                                            pass
+                                            pass
                                         except Exception as _e:
-                                            print('DBG: AZI extra debug failed', _e)
+                                            pass
                                     sys.stdout.flush()
                                 except Exception:
                                     pass
@@ -1244,7 +1244,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # interpolation from the vignetting tables.
         try:
             if os.environ.get('VIG_DEBUG'):
-                print('DBG: performing post-pass recompute of vig_vals from per-row tables')
+                pass
                 sys.stdout.flush()
         except Exception:
             pass
@@ -1404,7 +1404,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # and saves atomically to avoid corrupting the original workbook.
         try:
             from openpyxl import load_workbook
-            print('DBG: using openpyxl in-place vignette writer')
+            pass
             sys.stdout.flush()
             wb = load_workbook(path)
 
@@ -1417,7 +1417,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     if os.environ.get('VIG_DEBUG'):
                         sample_items = list((vig_vals_azi if sname.endswith('rotazi') else vig_vals_rad).items())[:10]
-                        print(f"DBG: sample vig_map for {sname}: {sample_items}")
+                        pass
                         sys.stdout.flush()
                 except Exception:
                     pass
@@ -1426,25 +1426,25 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     if os.environ.get('VIG_DEBUG'):
                         p0 = 1
-                        print('DBG: rot_rad_map[1]=', rot_rad_map.get(1))
-                        print('DBG: rot_azi_map[1]=', rot_azi_map.get(1))
+                        pass
+                        pass
                         if 'pos_to_cfg_row' in locals():
                             cfg = pos_to_cfg_row.get(p0)
-                            print('DBG: pos_to_cfg_row[1]=', cfg)
+                            pass
                             if 'ys_by_pos_azi' in locals():
                                 matches = [k for k in ys_by_pos_azi.keys() if k[0] == cfg]
-                                print('DBG: azi matches for cfg:', matches[:5])
+                                pass
                                 if matches:
                                     k = matches[0]
                                     xsu, ysu = ys_by_pos_azi[k]
-                                    print('DBG: sample azi xs[:5]=', xsu[:5], 'ys[:5]=', ysu[:5])
+                                    pass
                             if 'ys_by_pos_rad' in locals():
                                 matchesr = [k for k in ys_by_pos_rad.keys() if k[0] == cfg]
-                                print('DBG: rad matches for cfg:', matchesr[:5])
+                                pass
                                 if matchesr:
                                     kr = matchesr[0]
                                     xsr, ysr = ys_by_pos_rad[kr]
-                                    print('DBG: sample rad xs[:5]=', xsr[:5], 'ys[:5]=', ysr[:5])
+                                    pass
                         sys.stdout.flush()
                 except Exception:
                     pass
@@ -1535,7 +1535,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
                 for i, (pos_k, row_idx) in enumerate(pos_row_map.items()):
                     if i % 100 == 0:
-                        print(f"DBG: writing vignette values progress: {i}/{total} for sheet '{sname}'")
+                        pass
                         sys.stdout.flush()
                     pos_int = int(pos_k)
                     # prefer already-computed vig_map value
@@ -1583,7 +1583,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     except Exception:
                         continue
 
-                print(f"DBG: wrote {written} values into sheet '{sname}'")
+                pass
 
                 # Do not write to cell C1 here; GUI is responsible for any
                 # selected-energy markers (e.g. cell C2). Leave C1/C2 untouched.
@@ -1652,29 +1652,25 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     tmpf.close()
                     wb.save(tmpf.name)
                     os.replace(tmpf.name, path)
-                    print(f"DBG: wrote {written_a} rows into 'A_eff' columns B/C")
+                    pass
                     sys.stdout.flush()
 
             try:
                 wb.close()
             except Exception:
                 pass
-            print('DBG: openpyxl in-place vignette write completed')
+            pass
             sys.stdout.flush()
         except Exception:
             # If anything goes wrong, do not raise — vignetting writes are non-fatal.
-            print('DBG: in-place vignette writer failed; skipping writes')
+            pass
             sys.stdout.flush()
         # Debug summary: print selected vignette source mapping for first positions
         try:
             debug_env = os.environ.get('VIG_DEBUG', None)
             if debug_env:
                 sample = sorted(list(mm_to_pos.values()))[:16]
-                print('VIGNETTE DEBUG: per-position sources (pos: rad_source, azi_source)')
-                for pos in sample:
-                    rsrc = vig_source_rad.get(pos, 'none') if 'vig_source_rad' in locals() else 'none'
-                    asrc = vig_source_azi.get(pos, 'none') if 'vig_source_azi' in locals() else 'none'
-                    print(f' pos {pos}: {rsrc}, {asrc}')
+                pass
         except Exception:
             pass
     except Exception:
@@ -2187,11 +2183,6 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             n_r = min(int(n_r * 1.15) + 1, 5000)
             n_theta = min(int(n_theta * 1.0), 2048)
         if debug:
-            try:
-                frac = cumulative / total_energy if total_energy > 0 else cumulative
-                import numpy as _np
-                print(f"[plot_sum.debug] radial_profile: cx={cx:.6e}, cy={cy:.6e}, r_max={r_max:.6e}, max_sigma={max_sigma:.6e}, max_center_dist={max_center_dist:.6e}, n_r={n_r}, n_theta={n_theta}, total_energy={total_energy:.6e}, frac0={float(frac[0]) if frac.size>0 else None}, frac_end={float(frac[-1]) if frac.size>0 else None}, frac_nans={int(_np.isnan(frac).sum())}")
-            except Exception:
                 pass
         return r, cumulative, total_energy
 
@@ -2446,11 +2437,6 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             cumulative = np.cumsum(radial_energy * dr)
             total_energy = cumulative[-1] if cumulative.size else 1.0
             if debug:
-                try:
-                    frac = cumulative / total_energy if total_energy > 0 else cumulative
-                    import numpy as _np
-                    print(f"[plot_sum.debug] radial_profile_opt: cx={cx:.6e}, cy={cy:.6e}, r_max={r_max:.6e}, max_sigma={max_sigma:.6e}, max_center_dist={max_center_dist:.6e}, n_r={n_r}, n_theta={n_theta}, total_energy={total_energy:.6e}, frac0={float(frac[0]) if frac.size>0 else None}, frac_end={float(frac[-1]) if frac.size>0 else None}, frac_nans={int(_np.isnan(frac).sum())}")
-                except Exception:
                     pass
             return r, cumulative, total_energy
         
