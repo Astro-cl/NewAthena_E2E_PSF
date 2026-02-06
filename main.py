@@ -99,7 +99,7 @@ def parse_multisheet_csv(path_or_buffer):
             out[name] = df
 
     return out
-def load_aeff_weight_map(path: str) -> dict:
+def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
     Reads the `A_eff` sheet (headerless) and returns a dict mapping integer
@@ -108,7 +108,12 @@ def load_aeff_weight_map(path: str) -> dict:
     """
     mapping = {}
     try:
-        raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+        kwargs = {"engine": "openpyxl", "header": None}
+        if sheet is not None:
+            kwargs["sheet_name"] = sheet
+        else:
+            kwargs["sheet_name"] = 'A_eff'
+        raw = pd.read_excel(path, **kwargs)
     except Exception:
         return mapping
 
