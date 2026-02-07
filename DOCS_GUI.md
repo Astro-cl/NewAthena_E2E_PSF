@@ -80,3 +80,15 @@ See Also
 - [DOCS_SUMMARY.md](DOCS_SUMMARY.md) — Core module reference
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guidelines
 
+
+## Release v5 (2026-02-07)
+
+- GUI export: standard A_eff presets are evaluated per-MM and written as
+  numeric values into column B of the `A_eff` sheet when exporting from
+  the GUI. The GUI export clears column C to avoid writing adjusted A_eff.
+- Percent-variable presets (e.g. "Variable 10% 1 keV") are synthesized
+  into explicit gaussian expressions when loaded so sampling is deterministic
+  and per-index.
+- Preset energy tokens like `1 keV` are parsed and written into `C2` of
+  vignetting sheets at export time.
+
