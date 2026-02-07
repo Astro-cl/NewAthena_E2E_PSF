@@ -66,3 +66,14 @@ Contact
 -------
 If you want this note expanded into a formal CHANGELOG entry, release note,
 or PR description, tell me which format you prefer and I will prepare it.
+
+## Release v5 (2026-02-07)
+
+- GUI A_eff export: GUI-selected standard presets are evaluated per-MM and
+  written numerically into column B of `A_eff`; GUI export clears column C.
+- Percent-variable presets are synthesized to explicit gaussian forms
+  (e.g. "Variable 10% 1 keV" → `gaussian(L,10%*L)`) to ensure correct
+  deterministic per-index sampling.
+- Preset energy tokens like `1 keV` are parsed and written into `C2` of
+  vignetting sheets at export time.
+
