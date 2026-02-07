@@ -184,6 +184,44 @@ See `DOCS_GUI.md` for usage examples, screenshots and troubleshooting notes.
 
 See `DOCS_SUMMARY.md` for a short map of key files and recommended next steps.
 
+## Release v5 (2026-02-07)
+
+- GUI A_eff export semantics changed: when exporting from the GUI, a
+   selected *standard* A_eff preset is now evaluated per-MM and the resulting
+   numeric A_eff values are written into column B of the `A_eff` sheet. The
+   GUI export path explicitly clears column C so adjusted/vignetted A_eff
+   values are not written by the interactive export. The CLI/main program
+   (`main.py`) preserves the previous behavior and continues to populate
+   column C with adjusted A_eff when run non-interactively.
+- Percent-variable presets are synthesized into explicit gaussian forms when
+   loaded from the workbook (e.g. a preset named "Variable 10% 1 keV" with
+   a Values cell of `L` becomes internally `gaussian(L,10%*L)`) so the
+   evaluator can sample correctly.
+- Preset-energy parsing improved: when a preset name contains an energy
+   token such as `1 keV`, the GUI now parses that numeric energy and writes
+   it into cell `C2` of the vignetting sheets at export time. The export
+   routine prefers an explicit free-energy selection (combobox) but falls
+   back to the `keV` token in the preset name if present.
+- The preset evaluator (`_evaluate_aeff_preset_for_mm`) is used at export
+   time so per-MM draws are consistent with the Apply action; a numeric
+   fallback uses the `A_eff_base` value and the parsed percent when the
+   direct evaluation fails.
+- Removed noisy debug prints and replaced them with Python `logging` calls
+   across the GUI module so runtime logs are quieter in normal operation.
+- Misc: small repository cleanup (removed stale preview workbooks under
+   `Distributions/` and created a zipped backup). The branch `cleanup/v5`
+   containing these updates was merged into `main` on 2026-02-07.
+
+Verification & notes:
+
+- The GUI export saves workbooks in a background thread; automated
+   headless tests may need to wait for the background save to complete or
+   run the export synchronously for deterministic testing.
+- To verify: open the GUI, apply a `Variable X% Y keV` preset to a few
+   selected MMs and use Export → Save as new file; confirm `A_eff` column B
+   contains numeric values (not the textual `gaussian(...)` expression) and
+   the vignetting sheets' `C2` cell contains the parsed energy.
+
 ## Docs Index
 
 For detailed documentation, see:
