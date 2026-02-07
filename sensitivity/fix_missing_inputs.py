@@ -174,7 +174,7 @@ def main():
     
     # Also check for CSV files that need to be converted to proper input format
     csv_files = list(INPUT_DIR.glob('*_sampling_detailed_*.csv'))
-    print(f"\nNote: {len(csv_files)} debug CSV sampling files exist")
+    print(f"\nNote: {len(csv_files)} CSV sampling files exist")
     
     if fixed_count == 0 and len(missing_files) > 0:
         print("\nNo files were fixed. The missing files may be CSV references in results.")

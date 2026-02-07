@@ -186,7 +186,7 @@ if __name__ == '__main__':
         print('usage: fix_place_set_sigmas.py <placed-workbook-path> [baseline-path]')
         raise SystemExit(1)
     target = Path(sys.argv[1])
-    baseline = Path(sys.argv[2]) if len(sys.argv) > 2 else (Path(__file__).resolve().parents[1] / 'Distributions' / 'Test_Distribution.xlsx')
+    baseline = Path(sys.argv[2]) if len(sys.argv) > 2 else (Path(__file__).resolve().parents[1] / 'Distributions' / 'TestDistribution.xlsx')
     if not target.exists():
         print('Target not found:', target)
         raise SystemExit(1)

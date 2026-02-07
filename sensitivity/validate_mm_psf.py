@@ -3,7 +3,7 @@ import re
 import pandas as pd
 
 inp = Path('sensitivity/input')
-baseline = Path('Distributions/Test_Distribution.xlsx')
+baseline = Path('Distributions/TestDistribution.xlsx')
 
 csvs = sorted(inp.glob('*_MM_PSF_sampling_detailed_*.csv'))
 if not csvs:
@@ -32,7 +32,7 @@ for csv in csvs:
             import pandas as pd
 
             inp = Path('sensitivity/input')
-            baseline = Path('Distributions/Test_Distribution.xlsx')
+            baseline = Path('Distributions/TestDistribution.xlsx')
 
             csvs = sorted(inp.glob('*_MM_PSF_sampling_detailed_*.csv'))
             if not csvs:

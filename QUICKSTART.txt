@@ -89,7 +89,7 @@ Pitfalls:
 
 RUNNING ANALYSIS
 ----------------
-python3 main.py -f Distributions/Test_Distribution.xlsx
+python3 main.py -f Distributions/TestDistribution.xlsx
 
 Input workbook requirements (for main.py):
   - Must include sheet: MM configuration
@@ -99,22 +99,22 @@ Input workbook requirements (for main.py):
     If A_eff is missing (or weights are non-numeric), the analyzer will fail.
 
 Optional runtime modes:
-  python3 main.py -f Distributions/Test_Distribution.xlsx --mode coarse
-  python3 main.py -f Distributions/Test_Distribution.xlsx --mode fine
-  python3 main.py -f Distributions/Test_Distribution.xlsx --mode extra-fine
+  python3 main.py -f Distributions/TestDistribution.xlsx --mode coarse
+  python3 main.py -f Distributions/TestDistribution.xlsx --mode fine
+  python3 main.py -f Distributions/TestDistribution.xlsx --mode extra-fine
 
 Placement (writes *_placed.xlsx and overlays it):
-  python3 main.py -f Distributions/Test_Distribution.xlsx --placement cross
-  python3 main.py -f Distributions/Test_Distribution.xlsx --placement x_axis
-  python3 main.py -f Distributions/Test_Distribution.xlsx --placement elliptical
+  python3 main.py -f Distributions/TestDistribution.xlsx --placement cross
+  python3 main.py -f Distributions/TestDistribution.xlsx --placement x_axis
+  python3 main.py -f Distributions/TestDistribution.xlsx --placement elliptical
 
 Optimization (writes *_optimised.xlsx):
-  python3 main.py -f Distributions/Test_Distribution.xlsx --optimize
+  python3 main.py -f Distributions/TestDistribution.xlsx --optimize
   (Alias accepted: --optimise)
   If you don't pass --placement, optimization seeds from: elliptical
 
 Save without opening a window:
-  python3 main.py -f Distributions/Test_Distribution.xlsx -o /tmp/out.png
+  python3 main.py -f Distributions/TestDistribution.xlsx -o /tmp/out.png
 
   (Equivalent long flag: --output /tmp/out.png)
 

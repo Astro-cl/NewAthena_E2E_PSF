@@ -451,7 +451,7 @@ class ExtendedGUI:
                 except Exception:
                     pass
             except Exception as e:
-                print(f"Note: Could not load standard distributions: {e}")
+                logging.debug("Could not load standard distributions: %s", e)
                 self.standard_distributions = {}
 
             # Load standard Alignment presets table if available
@@ -463,7 +463,7 @@ class ExtendedGUI:
                 except Exception:
                     pass
             except Exception as e:
-                print(f"Note: Could not load standard alignment presets: {e}")
+                logging.debug("Could not load standard alignment presets: %s", e)
                 self.alignment_standard_presets = {}
             # Load standard Thermal presets table if available
             try:
@@ -474,7 +474,7 @@ class ExtendedGUI:
                 except Exception:
                     pass
             except Exception as e:
-                print(f"Note: Could not load standard thermal presets: {e}")
+                logging.debug("Could not load standard thermal presets: %s", e)
                 self.thermal_standard_presets = {}
 
             # Load standard Gravity offload presets table if available
@@ -486,7 +486,7 @@ class ExtendedGUI:
                 except Exception:
                     pass
             except Exception as e:
-                print(f"Note: Could not load standard gravity presets: {e}")
+                logging.debug("Could not load standard gravity presets: %s", e)
                 self.gravity_standard_presets = {}
             
             # Load A_eff weights + standard preset table (headerless)
@@ -524,7 +524,7 @@ class ExtendedGUI:
                     pass
 
             except Exception as e:
-                print(f"Note: Could not load A_eff sheet: {e}")
+                logging.debug("Could not load A_eff sheet: %s", e)
                 self.aeff_raw_df = None
                 self.aeff_weights = {}
                 self.aeff_standard_presets = {}
@@ -634,9 +634,9 @@ class ExtendedGUI:
                 self.standard_distributions[key_name] = dist_def
                 row_idx += 1
             
-            print(f"Loaded {len(self.standard_distributions)} standard distributions: {list(self.standard_distributions.keys())}")
+            logging.debug("Loaded %d standard distributions: %s", len(self.standard_distributions), list(self.standard_distributions.keys()))
         except Exception as e:
-            print(f"Error loading standard distributions: {e}")
+            logging.exception("Error loading standard distributions: %s", e)
             self.standard_distributions = {}
         # If none loaded from workbook, populate with fallback list provided by user
         if not self.standard_distributions:
@@ -650,7 +650,7 @@ class ExtendedGUI:
             for name in fallback:
                 # minimal placeholder definition
                 self.standard_distributions[name] = {'name': name, 'type': 'gaussian', 'sigma_rad': None, 'sigma_azi': None, 'alpha_rad': None, 'alpha_azi': None}
-            print(f"Populated fallback standard distributions: {fallback}")
+            logging.debug("Populated fallback standard distributions: %s", fallback)
 
     def refresh_standard_distribution_controls(self) -> None:
         """Refresh standard preset dropdowns after (re)loading an Excel file.
@@ -931,12 +931,9 @@ class ExtendedGUI:
 
             if self.alignment_standard_presets:
                 self.align_mode_var.set('standard')
-                print(
-                    f"Loaded {len(self.alignment_standard_presets)} standard alignment presets: "
-                    f"{list(self.alignment_standard_presets.keys())}"
-                )
+                logging.debug("Loaded %d standard alignment presets: %s", len(self.alignment_standard_presets), list(self.alignment_standard_presets.keys()))
         except Exception as e:
-            print(f"Error loading standard alignment presets: {e}")
+            logging.exception("Error loading standard alignment presets: %s", e)
             self.alignment_standard_presets = {}
     
     def load_standard_thermal_presets(self, df: pd.DataFrame) -> None:
@@ -1049,9 +1046,9 @@ class ExtendedGUI:
 
             if self.thermal_standard_presets:
                 self.thermal_mode_var.set('standard')
-                print(f"Loaded {len(self.thermal_standard_presets)} standard thermal presets: {list(self.thermal_standard_presets.keys())}")
+                logging.debug("Loaded %d standard thermal presets: %s", len(self.thermal_standard_presets), list(self.thermal_standard_presets.keys()))
         except Exception as e:
-            print(f"Error loading standard thermal presets: {e}")
+            logging.exception("Error loading standard thermal presets: %s", e)
             self.thermal_standard_presets = {}
 
     def load_standard_gravity_presets(self, df: pd.DataFrame) -> None:
@@ -1147,9 +1144,9 @@ class ExtendedGUI:
 
             if self.gravity_standard_presets:
                 self.gravity_mode_var.set('standard')
-                print(f"Loaded {len(self.gravity_standard_presets)} standard gravity presets: {list(self.gravity_standard_presets.keys())}")
+                logging.debug("Loaded %d standard gravity presets: %s", len(self.gravity_standard_presets), list(self.gravity_standard_presets.keys()))
         except Exception as e:
-            print(f"Error loading standard gravity presets: {e}")
+            logging.exception("Error loading standard gravity presets: %s", e)
             self.gravity_standard_presets = {}
 
     def load_standard_aeff_presets(self, df: pd.DataFrame) -> None:
@@ -1202,17 +1199,38 @@ class ExtendedGUI:
                 if pd.isna(expr) or str(expr).strip() == '':
                     row_idx += 1
                     continue
-                self.aeff_standard_presets[str(name).strip()] = str(expr).strip()
+                # Synthesize gaussian expressions for "Variable" presets that
+                # name a percent but have a simple base column in the Values
+                # cell (e.g. preset name "Variable 10% 1 keV" with Values "L").
+                # Turn that into an additive gaussian around the column base
+                # with sigma = pct * base, e.g. "gaussian(L,10%L)" so the
+                # evaluator later interprets percent-relative sigma.
+                preset_name = str(name).strip()
+                preset_expr = str(expr).strip()
+                try:
+                    lname = preset_name.lower()
+                    if (('variable' in lname or '%' in preset_name) and re.fullmatch(r"[A-Za-z]+", preset_expr.strip())):
+                        m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", preset_name)
+                        if m_pct:
+                            pct = m_pct.group(1)
+                            # produce gaussian(base, pct%base)
+                            synthesized = f"gaussian({preset_expr},{pct}%{preset_expr})"
+                            self.aeff_standard_presets[preset_name] = synthesized
+                        else:
+                            # no explicit percent found — store original expr
+                            self.aeff_standard_presets[preset_name] = preset_expr
+                    else:
+                        self.aeff_standard_presets[preset_name] = preset_expr
+                except Exception:
+                    # Fallback: store raw string
+                    self.aeff_standard_presets[str(name).strip()] = str(expr).strip()
                 row_idx += 1
 
             if self.aeff_standard_presets:
                 self.aeff_mode_var.set('standard')
-                print(
-                    f"Loaded {len(self.aeff_standard_presets)} standard A_eff presets: "
-                    f"{list(self.aeff_standard_presets.keys())}"
-                )
+                logging.debug("Loaded %d standard A_eff presets: %s", len(self.aeff_standard_presets), list(self.aeff_standard_presets.keys()))
         except Exception as e:
-            print(f"Error loading standard A_eff presets: {e}")
+            logging.exception("Error loading standard A_eff presets: %s", e)
             self.aeff_standard_presets = {}
     
     def apply_data_type_selection(self):
@@ -1845,6 +1863,42 @@ class ExtendedGUI:
         name = self.aeff_selected_preset_var.get().strip()
         expr = self.aeff_standard_presets.get(name, '')
         self.aeff_expr_label.configure(text=f'Values: {expr}')
+        # Parse numeric energy from preset name (e.g. 'Variable 10% 1 keV')
+        # and set the free-energy var so export will write this into vignetting
+        # sheets' C2. This makes the selected-energy explicit when a preset
+        # includes the energy token.
+        try:
+            # Prefer an explicit numeric token immediately followed by 'keV'.
+            m = re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)", name, flags=re.IGNORECASE)
+            if not m:
+                # Fallback: take the last numeric token in the name (handles "Variable 10% 1 keV")
+                all_nums = re.findall(r"(\d+(?:\.\d*)?)", name)
+                if all_nums:
+                    sval = all_nums[-1]
+                else:
+                    sval = None
+            else:
+                sval = m.group(1)
+                try:
+                    fval = float(sval)
+                    # Format as integer when appropriate
+                    if abs(fval - int(fval)) < 1e-9:
+                        display = str(int(fval))
+                    else:
+                        display = str(fval)
+                except Exception:
+                    display = sval
+                try:
+                    self.aeff_free_energy_var.set(display)
+                except Exception:
+                    pass
+                # Store parsed numeric energy for downstream logic if needed
+                try:
+                    self._aeff_selected_energy = float(sval)
+                except Exception:
+                    self._aeff_selected_energy = None
+        except Exception:
+            pass
 
     def _safe_eval_expr_with_vars(self, expr: str, variables: dict[str, float]) -> float:
         """Safely evaluate a simple arithmetic expression with optional single-letter variables.
@@ -3826,7 +3880,7 @@ class ExtendedGUI:
 
                     sigma_val = abs(use_pct * mean_val) if use_pct is not None else 0.0
 
-                    print(f"ENFORCE: setting {ui_param} -> gamma(mean={mean_val}, sigma={sigma_val}) for preset '{std_name}'")
+                    logging.debug("ENFORCE: setting %s -> gamma(mean=%s, sigma=%s) for preset '%s'", ui_param, mean_val, sigma_val, std_name)
                     try:
                         dist_box.set('gamma')
                     except Exception:
@@ -3846,7 +3900,7 @@ class ExtendedGUI:
                 except Exception:
                     pass
         except Exception as e:
-            print(f"ENFORCE ERROR: {e}")
+            logging.exception("ENFORCE ERROR: %s", e)
     
     def toggle_eta_entry(self, data_type_key):
         """Show/hide alpha controls based on distribution type."""
@@ -3914,17 +3968,8 @@ class ExtendedGUI:
             
 
 
-            if __name__ == '__main__':
-                root = tk.Tk()
-                apply_macos_input_fixes(root)
-                app = ExtendedGUI(root)
-                root.mainloop()
-                
-                
-                self.data_dfs[data_type_key] = data_df
-                messagebox.showinfo('Success', f"Custom PSF '{stem}' set for {num_mm} selected MMs!")
-                self.update_preview()
-                return
+            # (removed accidental debug path that re-launched the GUI when
+            # this module was executed as __main__; keep normal in-app flow)
 
             params = {}
             col_specs: dict[str, str] = {}
@@ -4078,7 +4123,7 @@ class ExtendedGUI:
                         data_df['alpha_azi'] = np.clip(data_df['alpha_azi'], 0.0, 1.0)
             
             # Debug: Print column names to verify they have units
-            print(f"Generated {config['tab_label']} data with columns: {data_df.columns.tolist()}")
+            logging.debug("Generated %s data with columns: %s", config['tab_label'], data_df.columns.tolist())
             
             # Add key column.
             # MM_PSF is keyed by MM #. Alignment/Gravity/Thermal are keyed by Position #.
@@ -4230,17 +4275,17 @@ class ExtendedGUI:
         
         try:
             import time as _time
-            print(f"export_to_excel: start export at {_time.time()}")
+            logging.debug("export_to_excel: start export at %s", _time.time())
             # Load existing workbook to preserve formatting and formulas
             from openpyxl import load_workbook
             from openpyxl.utils.dataframe import dataframe_to_rows
             
             # Load existing workbook or create new one
             if self.excel_path:
-                print(f"export_to_excel: loading workbook {self.excel_path} at {_time.time()}")
+                logging.debug("export_to_excel: loading workbook %s at %s", self.excel_path, _time.time())
                 # Always load existing workbook to preserve formatting, even when saving to new file
                 wb = load_workbook(self.excel_path)
-                print(f"export_to_excel: loaded workbook, sheets={wb.sheetnames[:6]} at {_time.time()}")
+                logging.debug("export_to_excel: loaded workbook, sheets=%s at %s", wb.sheetnames[:6], _time.time())
             else:
                 # Create new workbook only if no file was loaded
                 from openpyxl import Workbook
@@ -4472,8 +4517,13 @@ class ExtendedGUI:
                         ws.cell(row=next_row, column=col_idx, value=value)
                     next_row += 1
 
-            # Update A_eff sheet column B for selected MMs (if modified via A_eff tab)
-            if self.aeff_pending_export:
+            # Update A_eff sheet column B for selected MMs (if modified via A_eff tab
+            # or if there are in-memory A_eff weights available). Previously the
+            # GUI only updated the sheet when `aeff_pending_export` was True; in
+            # some flows the pending flag can be cleared or missed which left the
+            # A_eff column unwritten. Treat any in-memory weights as intent to
+            # export so GUI exports reliably populate column B.
+            if self.aeff_pending_export or (hasattr(self, 'aeff_weights') and bool(self.aeff_weights)):
                 if 'A_eff' in wb.sheetnames:
                     ws = wb['A_eff']
                 else:
@@ -4507,6 +4557,12 @@ class ExtendedGUI:
                     # Overwrite A_eff values for all rows (from row 2..max_row)
                     for r in range(2, ws.max_row + 1):
                         ws.cell(row=r, column=2, value=float(fixed_val))
+                    # Ensure GUI export does not populate column C — clear any values
+                    for r in range(2, ws.max_row + 1):
+                        try:
+                            ws.cell(row=r, column=3, value=None)
+                        except Exception:
+                            pass
                     # Also update in-memory weights map for completeness
                     for mm in list(mm_to_row.keys()):
                         try:
@@ -4514,17 +4570,85 @@ class ExtendedGUI:
                         except Exception:
                             continue
                 else:
-                    # Standard preset: update only selected MMs as before
+                    # Standard preset: write the preset expression into column B for
+                    # the selected MMs so GUI exports record the chosen A_eff
+                    # definition (e.g. "gaussian(L,10%*L)") rather than numeric
+                    # per-MM values. This keeps CLI/main behavior (which writes
+                    # adjusted numeric A_eff into column C) unchanged.
+                    preset_name = str(self.aeff_selected_preset_var.get()).strip()
+                    expr_text = None
+                    if preset_name:
+                        expr_text = self.aeff_standard_presets.get(preset_name)
+                    # Fallback to the displayed preset name if no Values expression
+                    if not expr_text:
+                        expr_text = preset_name or ''
+
+                    # Evaluate the preset per-MM (numeric) and write numeric A_eff
                     for mm in self.selected_mm_numbers:
                         mm_i = int(mm)
-                        if mm_i not in self.aeff_weights:
-                            raise ValueError(f'Missing A_eff value for MM #{mm_i}. Apply a preset or fixed value first.')
                         if mm_i not in mm_to_row:
                             # Append missing MM row
                             r = ws.max_row + 1
                             ws.cell(row=r, column=1, value=mm_i)
                             mm_to_row[mm_i] = r
-                        ws.cell(row=mm_to_row[mm_i], column=2, value=float(self.aeff_weights[mm_i]))
+                        try:
+                            # Use the same evaluator used by the Apply action so
+                            # randomness and sampling are consistent.
+                            val = float(self._evaluate_aeff_preset_for_mm(mm_i, expr_text))
+                        except Exception:
+                            # If evaluation fails, fall back to any numeric weight
+                            # already present or leave blank.
+                            val = None
+                            if mm_i in self.aeff_weights:
+                                try:
+                                    val = float(self.aeff_weights[mm_i])
+                                except Exception:
+                                    val = None
+                        # If evaluator returned NaN or None, attempt a percent-based
+                        # fallback: parse percent from preset name and use the
+                        # canonical A_eff_base (column B) as the mean if present.
+                        try:
+                            import math
+                            if val is None or (isinstance(val, float) and math.isnan(val)):
+                                # try parse percent from preset_name
+                                pct = None
+                                try:
+                                    m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", preset_name)
+                                    if m_pct:
+                                        pct = float(m_pct.group(1)) / 100.0
+                                except Exception:
+                                    pct = None
+                                # try to read A_eff_base from aeff_raw_df col index 1
+                                base_val = None
+                                try:
+                                    row_idx = self._get_aeff_row_for_mm(mm_i)
+                                    if row_idx is not None and self.aeff_raw_df is not None and self.aeff_raw_df.shape[1] > 1:
+                                        bv = self.aeff_raw_df.iloc[row_idx, 1]
+                                        base_val = float(bv) if bv is not None and not pd.isna(bv) else None
+                                except Exception:
+                                    base_val = None
+                                if base_val is not None and pct is not None:
+                                    import numpy as _np
+                                    sigma = abs(float(base_val) * float(pct))
+                                    val = float(base_val + _np.random.normal(loc=0.0, scale=sigma))
+                                elif base_val is not None and val is None:
+                                    val = float(base_val)
+                        except Exception:
+                            pass
+                        if val is not None:
+                            ws.cell(row=mm_to_row[mm_i], column=2, value=float(val))
+                            # Keep in-memory weights in sync
+                            try:
+                                self.aeff_weights[int(mm_i)] = float(val)
+                            except Exception:
+                                pass
+
+                    # Clear column C for all rows so GUI export never writes adjusted A_eff
+                    for r in range(2, ws.max_row + 1):
+                        try:
+                            ws.cell(row=r, column=3, value=None)
+                        except Exception:
+                            pass
 
             # Ensure A_eff sheet C2 stores the selected/preset energy when exporting.
             try:
@@ -4567,15 +4691,32 @@ class ExtendedGUI:
                             except Exception:
                                 sel_energy = None
                 else:
-                    # standard mode: try to parse energy from preset name
-                    preset_name = str(self.aeff_selected_preset_var.get()).strip()
-                    if preset_name:
-                        m = re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", preset_name, flags=re.IGNORECASE)
+                    # standard mode: prefer explicit free-energy control if set,
+                    # otherwise parse the preset name preferring a number followed
+                    # by 'keV' and falling back to the last numeric token.
+                    fe = str(self.aeff_free_energy_var.get()).strip()
+                    if fe:
+                        m = re.search(r"(\d+(?:\.\d*)?)", fe)
                         if m:
                             try:
                                 sel_energy = float(m.group(1))
                             except Exception:
                                 sel_energy = None
+                    if sel_energy is None:
+                        preset_name = str(self.aeff_selected_preset_var.get()).strip()
+                        if preset_name:
+                            # prefer numeric token immediately followed by 'keV'
+                            m = re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)", preset_name, flags=re.IGNORECASE)
+                            if not m:
+                                all_nums = re.findall(r"(\d+(?:\.\d*)?)", preset_name)
+                                sval = all_nums[-1] if all_nums else None
+                            else:
+                                sval = m.group(1)
+                            if sval is not None:
+                                try:
+                                    sel_energy = float(sval)
+                                except Exception:
+                                    sel_energy = None
 
                 # Fallback: if still None, try to read from existing vignetting C2
                 if sel_energy is None:
@@ -4750,7 +4891,7 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
         pass
 
     if verbose:
-        print('apply_vignetting_to_workbook: mm_to_pos=', len(mm_to_pos), 'pos_to_cfg_row=', len(pos_to_cfg_row))
+        logging.debug('apply_vignetting_to_workbook: mm_to_pos=%d pos_to_cfg_row=%d', len(mm_to_pos), len(pos_to_cfg_row))
 
     def _read_pos_map(sheet_name, rot_keys):
         out = {}
@@ -4790,7 +4931,7 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
         rot_azi_map = {}
 
     if verbose:
-        print('apply_vignetting_to_workbook: rot maps sizes -> rot_rad:', len(rot_rad_map), 'rot_azi:', len(rot_azi_map))
+        logging.debug('apply_vignetting_to_workbook: rot maps sizes -> rot_rad=%d rot_azi=%d', len(rot_rad_map), len(rot_azi_map))
 
     def _parse_vig(sheet_name):
         ys_by_pos = {}
@@ -4849,7 +4990,7 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
     ys_by_pos_rad = _parse_vig('Vignetting rotrad')
 
     if verbose:
-        print('apply_vignetting_to_workbook: parsed vignetting -> azi keys:', len(ys_by_pos_azi), 'rad keys:', len(ys_by_pos_rad))
+        logging.debug('apply_vignetting_to_workbook: parsed vignetting -> azi keys=%d rad keys=%d', len(ys_by_pos_azi), len(ys_by_pos_rad))
 
     sel_energy = None
     if preset:
@@ -4926,7 +5067,7 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
         vig_vals_rad[pos] = float(f_rad)
 
     if verbose:
-        print('apply_vignetting_to_workbook: computed vig_vals counts -> azi:', len(vig_vals_azi), 'rad:', len(vig_vals_rad))
+        logging.debug('apply_vignetting_to_workbook: computed vig_vals counts -> azi=%d rad=%d', len(vig_vals_azi), len(vig_vals_rad))
 
     def _write_vig_sheet_in_wb(wb_obj, sheet_name, vig_map):
         if sheet_name not in wb_obj.sheetnames:
@@ -4990,12 +5131,16 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
             f_azi = vig_vals_azi.get(pos, 1.0)
             f_rad = vig_vals_rad.get(pos, 1.0)
             adj = base_f * float(f_azi) * float(f_rad)
-            ws_a.cell(row=r, column=3, value=float(adj))
+            # Write the (possibly vignetted) A_eff into the canonical A_eff
+            # column (column B) so exported A_eff values appear in column B
+            # as expected by downstream tools/users. Previously this wrote
+            # adjusted values into column C which caused confusion.
+            ws_a.cell(row=r, column=2, value=float(adj))
             c3 += 1
 
     try:
         if verbose:
-            print('apply_vignetting_to_workbook: saving workbook to', target_path, 'counts:', c1, c2, c3)
+            logging.debug('apply_vignetting_to_workbook: saving workbook to %s counts: %d %d %d', target_path, c1, c2, c3)
         wb.save(target_path)
     except Exception:
         pass

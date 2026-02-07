@@ -215,7 +215,7 @@ NewAthenaE2EPSF_v3/
 ├── distributions_rotated.py       # Core distribution functions
 ├── optimize_mm_rows.py            # MM optimizer + placement + Excel writer
 ├── Distributions/                 # Excel spreadsheet location
-│   ├── Test_Distribution.xlsx    # Example file
+│   ├── TestDistribution.xlsx    # Example file
 │   └── your_data.xlsx             # Your files go here
 ├── Figures/                       # Exported plots location
 │   ├── E2E_PSF_*.png
@@ -292,7 +292,7 @@ python3 main.py [OPTIONS]
 ```
 
 **Options:**
-- `-f, --file FILE`: Path to Excel file (default: `Distributions/Test_Distribution.xlsx`)
+- `-f, --file FILE`: Path to Excel file (default: `Distributions/TestDistribution.xlsx`)
 - `--normalize`: Normalize PSF to unit integral
 - `--no-normalize`: Disable normalization
 - `--output FILE`: Save combined plot to file (in `Figures/` folder)
@@ -465,7 +465,7 @@ python3 main.py -f Distributions/input.xlsx --mode coarse --optimize
 - Output: `Distributions/my_data_optimised.xlsx`
 - Plots: `Figures/E2E_PSF_*_optimised_*.png`
 
-**Note:** Files like `*_optimised.xlsx` and `*_placed.xlsx` are generated outputs and are not shipped with this project. The `Distributions/` folder in the repo only includes `Test_Distribution.xlsx` by default.
+**Note:** Files like `*_optimised.xlsx` and `*_placed.xlsx` are generated outputs and are not shipped with this project. The `Distributions/` folder in the repo only includes `TestDistribution.xlsx` by default.
 
 **Performance**:
 - Typical runtime: 15-30 seconds for ~150 MMs
@@ -698,7 +698,7 @@ The GUI provides an intuitive interface for generating PSF configurations with s
 2. **Load Excel file:**
    - Click **"Load Excel File"** button at top
    - Navigate to `Distributions/` folder
-   - Select an existing file (e.g., `Test_Distribution.xlsx`)
+   - Select an existing file (e.g., `TestDistribution.xlsx`)
    - File path displays in header: "Current: Distributions/your_file.xlsx"
    - MM Configuration tab automatically populates with data
 
@@ -974,7 +974,7 @@ Preview and save all generated data.
 │    ◉ Update current file    ○ Create new file                  │
 │                                                                  │
 │  Output Path:                                                   │
-│    [Distributions/Test_Distribution.xlsx    ] [Browse...]       │
+│    [Distributions/TestDistribution.xlsx    ] [Browse...]       │
 │                                                                  │
 │  Data Preview:                                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -1155,7 +1155,7 @@ Load different Excel files without restarting GUI - each Load clears previous co
 
 2. **Load MM Configuration**:
    - Click "Load Excel File"
-   - Select `Distributions/Test_Distribution.xlsx` (or your file)
+   - Select `Distributions/TestDistribution.xlsx` (or your file)
    - MM configuration automatically loads
 
 3. **Select MMs** (MM Configuration tab):

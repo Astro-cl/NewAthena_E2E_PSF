@@ -52,7 +52,7 @@ Example Workflow
    ```bash
    python3 gui_distributions.py
    ```
-   Click `Load Excel File` → `Distributions/Test_Distribution.xlsx`
+   Click `Load Excel File` → `Distributions/TestDistribution.xlsx`
 
 2. Apply A_eff preset:
    - `MM Configuration`: Select MMs or use `Select All`
