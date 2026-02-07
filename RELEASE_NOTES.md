@@ -1,74 +1,64 @@
-Release notes — 2026-01-25
-=================================
+# Release Notes
 
-Summary
--------
-
-Fixes an issue where workbooks generated from "Variable ..." `MM_PSF` standard
-presets sometimes retained the template numeric values instead of sampling
-per-MM instances from the preset-specified distributions. The sampling logic
-now forces per-index deterministic sampling for any preset that contains
-"Variable" or a percent token, and parses percent/alpha tokens before the
-sampling-decision is evaluated.
-
-Change details
---------------
-
-- File changed: `sensitivity/sensitivity_run.py`
-- Key changes:
-  - Moved detection of "force-gamma" (Variable/percent) presets and parsing
-    of percent/alpha tokens to execute prior to the sampling-decision check.
-  - Construct explicit gamma definitions from parsed percent/alpha tokens
-    and the standard preset baseline parameters before sampling.
-  - Ensures sampled values overwrite the left-side per-MM numeric columns
-    while preserving the right-hand template tail (gamma(...) placeholders).
-  - Keeps deterministic seeding: base seed derived from hash(filename + preset),
-    per-index seed = base + index.
-
-Why this matters
------------------
-
-Before this change, some generated inputs (notably presets like
-"50% Variable Pseudo-Voigt ...") occasionally wrote the template numeric
-value across all 600 micro-mirror (MM) rows instead of producing 600
-deterministic random draws from the target distribution. That behavior could
-produce misleading inputs and incorrect downstream sensitivity results. The
-reorder guarantees Variable presets drive sampling as intended.
-
-Verification
-------------
-
-- Ran a full generate-only sweep with `--persist` and `--generate-only` to
-  regenerate inputs. All produced workbooks for Variable presets now contain
-  numeric, varied per-MM `sigma_rad`/`sigma_azi` columns.
-- Ran `sensitivity/validate_mm_psf.py` to aggregate per-workbook sampling
- diagnostics; `sensitivity/input/validation_report.csv` was produced.
-
-Impact & compatibility
-----------------------
-
-This is a backwards-compatible behavioral fix that affects only generation of
-new input workbooks. Existing generated workbooks (created before this change)
-are unchanged. Re-running a generation for the same baseline and combo will
-produce identical per-index samples (deterministic seeding) to any other run
-using the same filename/preset and index numbering.
-
-Next steps
-----------
-
-- Optionally tag a release and/or create a GitHub release for this fix.
-- Optionally run an integration sweep on the compute cluster to reconfirm
-  end-to-end sensitivities.
-
-Commit: b69a765 (already pushed)
-
-Contact
--------
-If you want this note expanded into a formal CHANGELOG entry, release note,
-or PR description, tell me which format you prefer and I will prepare it.
+This file contains a concise history of notable changes across releases.
 
 ## Release v5 (2026-02-07)
 
+- GUI A_eff export semantics changed: when exporting from the GUI, a
+  selected standard A_eff preset is evaluated per-MM and the resulting
+  numeric A_eff values are written into column B of the `A_eff` sheet.
+  The GUI export clears column C to avoid writing adjusted/vignetted A_eff
+  values from the interactive export. The CLI (`main.py`) preserves the
+  previous behavior and continues to populate column C when run
+  non-interactively.
+- Percent-variable presets are synthesized into explicit gaussian forms
+  when loaded from the workbook (e.g. a preset named "Variable 10% 1 keV"
+  with a Values cell of `L` becomes internally `gaussian(L,10%*L)`) so the
+  evaluator can sample correctly.
+- Preset-energy parsing improved: when a preset name contains an energy
+  token such as `1 keV`, the GUI now parses that numeric energy and writes
+  it into cell `C2` of the vignetting sheets at export time. The export
+  routine prefers an explicit free-energy selection but falls back to the
+  `keV` token if present.
+- The preset evaluator (`_evaluate_aeff_preset_for_mm`) is used at export
+  time so per-MM draws are consistent with the Apply action; a numeric
+  fallback uses the `A_eff_base` value and the parsed percent when the
+  direct evaluation fails.
+- Replaced noisy debug prints with Python `logging` calls across the GUI
+  module.
+- Misc: repository cleanup (removed stale previews) and branch `cleanup/v5`
+  merged into `main`.
+
+## Release v4 (2026-02-03)
+
+- Fixed dz→dm projection and ensured per‑MM dz outputs are correct when
+  running `--log-dz` (proper polar/cartesian projection and use of
+  alignment/gravity/thermal rotations).
+- Re-ordered vignetting application to run after A_eff initialization and
+  added bookkeeping fields `aeff_base`, `aeff_adjusted`, and
+  `aeff_vig_factor` so plots and aggregations use the adjusted effective
+  area.
+- Improved vignetting parsing to support both two-column (delta→factor)
+  sheets and per-position columns.
+- GUI: added `Apply vignetting factors when exporting` checkbox in the
+  `A_eff` tab; when enabled, the selected preset column from the
+  vignetting sheets is copied into column B during export.
+
+## Release v3 (2026-01-28)
+
+- Repository cleanup and removal of legacy temporary tooling.
+- Deterministic per-MM sampling for presets and parity between CSV/Excel
+  exports.
+- Added unit tests and pytest configuration for CI.
+- Renamed `sensivitiy` → `sensitivity` and updated references.
+
+## Release v2 (2025-12-15)
+
+- Initial public release with core PSF generation, placement strategies,
+  Excel I/O, GUI and CLI analysis utilities.
+
+
+*For a detailed changelog or PR-level history, see the Git commit log.*
 - GUI A_eff export: GUI-selected standard presets are evaluated per-MM and
   written numerically into column B of `A_eff`; GUI export clears column C.
 - Percent-variable presets are synthesized to explicit gaussian forms
