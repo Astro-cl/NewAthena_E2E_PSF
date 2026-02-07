@@ -1631,6 +1631,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     if mmv is None:
                         continue
                     wrote = False
+                    # Write canonical A_eff into column B. When available,
+                    # also write the adjusted/vignetted A_eff into column C.
+                    # Note: GUI export intentionally avoids writing column C;
+                    # this codepath (main.py) is responsible for populating C.
                     if mmv in mm_to_base:
                         try:
                             ws_a.cell(row=r, column=2, value=float(mm_to_base[mmv]))
