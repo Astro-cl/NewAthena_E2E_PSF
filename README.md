@@ -72,13 +72,76 @@ The repository includes a small sensitivity-run template and driver under the `s
 
 
 
-## Release v3 (2026-01-28)
+## Release History
 
-- Repository cleanup: removed legacy in-memory pickle flows and temporary debug tools.
-- Added deterministic per-MM sampling for presets and CSV/Excel parity in generation.
+### Release v2 (2025-12-15)
+
+- Initial public release of the NewAthenaE2EPSF toolkit with core PSF
+   generation, placement strategies and Excel I/O. Included Gaussian and
+   Pseudo-Voigt support, basic GUI, and command-line analysis utilities.
+
+### Release v3 (2026-01-28)
+
+- Repository cleanup: removed legacy in-memory pickle flows and temporary
+   debug tools.
+- Deterministic per-MM sampling for presets and CSV/Excel parity in
+   generation; added unit tests and pytest configuration to streamline CI.
 - Renamed `sensivitiy` → `sensitivity` and updated Quickstart and tests.
-- Added basic unit tests and a pytest configuration to streamline CI.
 
+### Release v4 (2026-02-03)
+
+- Fixed dz→dm projection and ensured per‑MM dz outputs are correct when
+   running `--log-dz` (proper polar/cartesian projection and use of
+   alignment/gravity/thermal rotations).
+- Re-ordered vignetting application to run after A_eff initialization and
+   added explicit bookkeeping: `aeff_base`, `aeff_adjusted`, and
+   `aeff_vig_factor` so plots and aggregations use the adjusted effective
+   area.
+- Improved vignetting parsing to support both two-column (delta→factor)
+   sheets and per-position columns; MM300 now receives the combined
+   vignette factor when multiple factors apply.
+- GUI: added `Apply vignetting factors when exporting` checkbox in the
+   `A_eff` tab; when enabled, the selected preset column from the
+   vignetting sheets is copied into column B during export (matches by
+   explicit column letter or header substring).
+
+### Release v5 (2026-02-07)
+
+- GUI A_eff export semantics changed: when exporting from the GUI, a
+   selected *standard* A_eff preset is evaluated per-MM and the resulting
+   numeric A_eff values are written into column B of the `A_eff` sheet.
+   The GUI export path explicitly clears column C so adjusted/vignetted
+   A_eff values are not written by the interactive export. The CLI
+   (`main.py`) preserves the previous behavior and continues to populate
+   column C with adjusted A_eff when run non-interactively.
+- Percent-variable presets are synthesized into explicit gaussian forms
+   when loaded from the workbook (e.g. a preset named "Variable 10% 1 keV"
+   with a Values cell of `L` becomes internally `gaussian(L,10%*L)`) so the
+   evaluator can sample correctly.
+- Preset-energy parsing improved: when a preset name contains an energy
+   token such as `1 keV`, the GUI now parses that numeric energy and writes
+   it into cell `C2` of the vignetting sheets at export time. The export
+   routine prefers an explicit free-energy selection (combobox) but falls
+   back to the `keV` token in the preset name if present.
+- The preset evaluator (`_evaluate_aeff_preset_for_mm`) is used at export
+   time so per-MM draws are consistent with the Apply action; a numeric
+   fallback uses the `A_eff_base` value and the parsed percent when the
+   direct evaluation fails.
+- Removed noisy debug prints and replaced them with Python `logging` calls
+   across the GUI module so runtime logs are quieter in normal operation.
+- Misc: small repository cleanup (removed stale preview workbooks under
+   `Distributions/` and created a zipped backup). The branch `cleanup/v5`
+   containing these updates was merged into `main` on 2026-02-07.
+
+Verification & notes:
+
+- The GUI export saves workbooks in a background thread; automated
+   headless tests may need to wait for the background save to complete or
+   run the export synchronously for deterministic testing.
+- To verify: open the GUI, apply a `Variable X% Y keV` preset to a few
+   selected MMs and use Export → Save as new file; confirm `A_eff` column B
+   contains numeric values (not the textual `gaussian(...)` expression) and
+   the vignetting sheets' `C2` cell contains the parsed energy.
 
 ### Requirements
 - Python 3.8 or higher
@@ -132,6 +195,38 @@ The repository includes a small sensitivity-run template and driver under the `s
    - Click "Generate PSF Data"
 
 5. **Export Results**:
+   Short User Manual (GUI)
+   ----------------------
+
+   Follow these concise steps to use the GUI for typical generation and export tasks, including the latest v5 behaviors:
+
+   1. Launch and load
+      - Run `python3 gui_distributions.py` and click **Load Excel File** to open a workbook from `Distributions/`.
+
+   2. Select MMs
+      - In **MM Configuration** pick the mirror modules to modify (or `Select All`). Use filters to narrow selection.
+
+   3. Choose A_eff preset or fixed value
+      - In the **A_eff** tab select **Standard Distribution** to choose a preset from the workbook, or **Fixed Value** to enter a single numeric weight.
+      - If the preset name contains an energy token (e.g. `1 keV`) or you choose a free-energy from the combobox, that numeric energy will be written into cell `C2` of the vignetting sheets on export.
+
+   4. Apply & preview
+      - Click **Apply to Selected MMs** to evaluate the preset for the selected MMs and preview the numeric values in the table. For percent-variable presets (e.g. `Variable 10% 1 keV`) the GUI synthesizes them to explicit gaussian forms so the preview shows sampled numeric per-MM values.
+
+   5. Export with vignetting (optional)
+      - In **A_eff**, check **Apply vignetting factors when exporting** to enable copying vignette columns into the export.
+      - In **Preview / Export** choose **Save as new file**, then **Export to Excel**. The GUI export evaluates presets per-MM and writes numeric A_eff into column B of the `A_eff` sheet and clears column C. The vignetting sheets will have their `C2` cell set to the selected/parsed energy.
+
+   6. Verify output
+      - Open the saved workbook and confirm:
+        - `A_eff` sheet: column B contains numeric per-MM A_eff values (not textual expressions).
+        - Vignetting sheets: cell `C2` equals the parsed energy (if present).
+
+   Notes and tips
+    - The GUI save runs in a background thread; allow a short moment before opening the exported file or use the Preview to inspect results.
+    - CLI runs via `main.py` keep the legacy behavior (adjusted A_eff written to column C). Use `main.py` for automated pipelines.
+    - If deterministic, repeatable sampling is required for tests, use the same workbook filename and preset; the sampling is deterministic per-index and reproducible across runs given the same inputs.
+
    - Go to "Export" tab
    - Choose export mode (new file or update current)
    - Click "Export to Excel"
