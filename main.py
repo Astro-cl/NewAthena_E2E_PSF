@@ -439,8 +439,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     adj_col = pd.to_numeric(raw_a.iloc[:, 2], errors='coerce')
                     valid = mm_col.notna() & adj_col.notna()
                     if valid.any():
-                        for mmv, adjv in zip(mm_col[valid].astype(int).tolist(), adj_col[valid].astype(float).tolist()):
-                            aeff_map_adjusted[int(mmv)] = float(adjv)
+                        base_col = pd.to_numeric(raw_a.iloc[:, 1], errors='coerce')
+                        for mmv, bv, adjv in zip(mm_col[valid].astype(int).tolist(), base_col[valid].astype(float).tolist(), adj_col[valid].astype(float).tolist()):
+                            if bv == 0.0:
+                                aeff_map_adjusted[int(mmv)] = 0.0
+                            else:
+                                aeff_map_adjusted[int(mmv)] = float(adjv)
             except Exception:
                 aeff_map_adjusted = {}
 
@@ -1641,23 +1645,36 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             wrote = True
                         except Exception:
                             pass
-                    if mmv in mm_to_adj:
-                        try:
-                            ws_a.cell(row=r, column=3, value=float(mm_to_adj[mmv]))
-                            wrote = True
-                        except Exception:
-                            pass
+                    # Always write column C: zero if base is zero or missing, else adjusted value if present, else zero
+                    try:
+                        base_val = float(mm_to_base.get(mmv, 0.0))
+                        adj_val = float(mm_to_adj.get(mmv, 0.0))
+                        import sys
+                        print(f"DEBUG: MM={mmv} row={r} base_val={base_val} adj_val={adj_val}", file=sys.stderr)
+                        if base_val is None or (isinstance(base_val, float) and np.isnan(base_val)):
+                            ws_a.cell(row=r, column=3, value=0.0)
+                            print(f"DEBUG: Writing C={r} value=0.0 (base is None/NaN)", file=sys.stderr)
+                        elif base_val == 0.0:
+                            ws_a.cell(row=r, column=3, value=0.0)
+                            print(f"DEBUG: Writing C={r} value=0.0 (base is zero)", file=sys.stderr)
+                        else:
+                            ws_a.cell(row=r, column=3, value=adj_val)
+                            print(f"DEBUG: Writing C={r} value={adj_val} (base is nonzero)", file=sys.stderr)
+                        wrote = True
+                    except Exception:
+                        ws_a.cell(row=r, column=3, value=0.0)
+                        print(f"DEBUG: Writing C={r} value=0.0 (exception)", file=sys.stderr)
+                        wrote = True
                     if wrote:
                         written_a += 1
 
-                if written_a > 0:
-                    # Save atomically to avoid corruption
-                    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
-                    tmpf.close()
-                    wb.save(tmpf.name)
-                    os.replace(tmpf.name, path)
-                    pass
-                    sys.stdout.flush()
+                # Always save workbook after writing column C
+                tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+                tmpf.close()
+                wb.save(tmpf.name)
+                os.replace(tmpf.name, path)
+                pass
+                sys.stdout.flush()
 
             try:
                 wb.close()
@@ -2846,17 +2863,26 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     label_00 = 'Centered on (0,0)'
     if (hew_00_x_arcsec is not None) and (hew_00_y_arcsec is not None):
         label_00 = f'Centered on (0,0) (HEW_x={hew_00_x_arcsec:.4f}", HEW_y={hew_00_y_arcsec:.4f}")'
-    plt.plot(profile_pct, profile_diam, label=label_best, color='green')
-    plt.plot(profile_pct_00, profile_diam_00, label=label_00, color='blue')
+    # Limit plot to 95% percentile
+    def limit_percentile(pct, diam, max_pct=95):
+        pct = np.array(pct)
+        diam = np.array(diam)
+        mask = pct <= max_pct
+        return pct[mask], diam[mask]
+    profile_pct_95, profile_diam_95 = limit_percentile(profile_pct, profile_diam)
+    profile_pct_00_95, profile_diam_00_95 = limit_percentile(profile_pct_00, profile_diam_00)
+    plt.plot(profile_pct_95, profile_diam_95, label=label_best, color='green')
+    plt.plot(profile_pct_00_95, profile_diam_00_95, label=label_00, color='blue')
     
     # Add optimized curve if provided
     if df_optimized is not None and opt_frac_profile is not None:
         opt_profile_pct = opt_frac_profile * 100
         opt_profile_diam = 2 * opt_r_profile * m_to_arcsec
+        opt_profile_pct_95, opt_profile_diam_95 = limit_percentile(opt_profile_pct, opt_profile_diam)
         label_opt = 'Optimized best focus'
         if (hew_opt_x_arcsec is not None) and (hew_opt_y_arcsec is not None):
             label_opt = f'Optimized best focus (HEW_x={hew_opt_x_arcsec:.4f}", HEW_y={hew_opt_y_arcsec:.4f}")'
-        plt.plot(opt_profile_pct, opt_profile_diam, label=label_opt, linestyle=':', linewidth=2.5, color='magenta')
+        plt.plot(opt_profile_pct_95, opt_profile_diam_95, label=label_opt, linestyle=':', linewidth=2.5, color='magenta')
     
     ax2.set_xlabel('Percentage (%)')
     ax2.set_ylabel('Diameter [arcsec]')
@@ -2954,9 +2980,17 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         _os.makedirs(_os.path.dirname(out), exist_ok=True)
         # Prepare columns
         try:
-            pct_best = profile_pct if 'profile_pct' in locals() else (frac_profile * 100 if 'frac_profile' in locals() else [])
-            diam_best = profile_diam if 'profile_diam' in locals() else (2 * r_profile * m_to_arcsec if 'r_profile' in locals() else [])
-            pct_orig = profile_pct_00 if 'profile_pct_00' in locals() else (frac_00 * 100 if 'frac_00' in locals() else [])
+            def limit_percentile(pct, diam, max_pct=99.5):
+                pct = np.array(pct)
+                diam = np.array(diam)
+                mask = pct <= max_pct
+                return pct[mask], diam[mask]
+            pct_best_raw = profile_pct if 'profile_pct' in locals() else (frac_profile * 100 if 'frac_profile' in locals() else [])
+            diam_best_raw = profile_diam if 'profile_diam' in locals() else (2 * r_profile * m_to_arcsec if 'r_profile' in locals() else [])
+            pct_orig_raw = profile_pct_00 if 'profile_pct_00' in locals() else (frac_00 * 100 if 'frac_00' in locals() else [])
+            diam_orig_raw = profile_diam_00 if 'profile_diam_00' in locals() else (2 * r_profile_00 * m_to_arcsec if 'r_profile_00' in locals() else [])
+            pct_best, diam_best = limit_percentile(pct_best_raw, diam_best_raw)
+            pct_orig, diam_orig = limit_percentile(pct_orig_raw, diam_orig_raw)
         except Exception:
             pct_best, diam_best, pct_orig, diam_orig = [], [], [], []
 
@@ -2965,8 +2999,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         opt_diam = None
         if 'opt_frac_profile' in locals() and opt_frac_profile is not None:
             try:
-                opt_pct = opt_frac_profile * 100
-                opt_diam = 2 * opt_r_profile * m_to_arcsec
+                opt_pct_raw = opt_frac_profile * 100
+                opt_diam_raw = 2 * opt_r_profile * m_to_arcsec
+                opt_pct, opt_diam = limit_percentile(opt_pct_raw, opt_diam_raw)
             except Exception:
                 opt_pct, opt_diam = None, None
 
@@ -3566,6 +3601,7 @@ if __name__ == '__main__':
         print(json.dumps(metrics, indent=2))
         sys.exit(0)
 
+
     plot_sum(
         df,
         normalize=args.normalize,
@@ -3574,3 +3610,73 @@ if __name__ == '__main__':
         title_suffix=plot_title_suffix,
         df_optimized=df_optimized,
     )
+
+    # Always trigger export logic for A_eff sheet after plot_sum
+    try:
+        import openpyxl
+        import numpy as np
+        import tempfile, os, sys
+        wb = openpyxl.load_workbook(args.file)
+        df_a = df.copy()
+        if 'A_eff' in wb.sheetnames:
+            ws_a = wb['A_eff']
+            max_r_a = ws_a.max_row or 0
+            mm_series = pd.to_numeric(df_a.get('MM #', pd.Series([], dtype=float)), errors='coerce')
+            base_series = pd.to_numeric(df_a.get('aeff_base', pd.Series([], dtype=float)), errors='coerce')
+            adj_series = pd.to_numeric(df_a.get('aeff_adjusted', pd.Series([], dtype=float)), errors='coerce')
+            mm_to_base = {}
+            mm_to_adj = {}
+            for mmv, bv, av in zip(mm_series.tolist(), base_series.tolist(), adj_series.tolist()):
+                try:
+                    key = int(mmv) if mmv is not None and not (isinstance(mmv, float) and np.isnan(mmv)) else None
+                except Exception:
+                    key = None
+                if key is None:
+                    continue
+                try:
+                    if bv is not None and not (isinstance(bv, float) and np.isnan(bv)):
+                        mm_to_base[key] = float(bv)
+                except Exception:
+                    pass
+                try:
+                    if av is not None and not (isinstance(av, float) and np.isnan(av)):
+                        mm_to_adj[key] = float(av)
+                except Exception:
+                    pass
+            for r in range(1, max_r_a + 1):
+                cell = ws_a.cell(row=r, column=1).value
+                if cell is None:
+                    continue
+                try:
+                    mmv = int(cell) if isinstance(cell, (int, float)) or (isinstance(cell, str) and str(cell).strip().isdigit()) else None
+                    if isinstance(cell, str) and str(cell).strip().isdigit():
+                        mmv = int(str(cell).strip())
+                except Exception:
+                    mmv = None
+                if mmv is None:
+                    continue
+                # Write canonical A_eff into column B
+                if mmv in mm_to_base:
+                    try:
+                        ws_a.cell(row=r, column=2, value=float(mm_to_base[mmv]))
+                    except Exception:
+                        pass
+                # Always write column C: zero if base is zero or missing, else adjusted value if present, else zero
+                try:
+                    base_val = float(mm_to_base.get(mmv, 0.0))
+                    adj_val = float(mm_to_adj.get(mmv, 0.0))
+                    if base_val is None or (isinstance(base_val, float) and np.isnan(base_val)):
+                        ws_a.cell(row=r, column=3, value=0.0)
+                    elif base_val == 0.0:
+                        ws_a.cell(row=r, column=3, value=0.0)
+                    else:
+                        ws_a.cell(row=r, column=3, value=adj_val)
+                except Exception:
+                    ws_a.cell(row=r, column=3, value=0.0)
+            tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
+            tmpf.close()
+            wb.save(tmpf.name)
+            os.replace(tmpf.name, args.file)
+            sys.stdout.flush()
+    except Exception:
+        pass

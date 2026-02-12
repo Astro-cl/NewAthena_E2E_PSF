@@ -17,7 +17,9 @@ Notes:
     the selected energy column from the `Vignetting rotazi` / `Vignetting rotrad`
     sheets into column B of those sheets prior to saving the workbook.
 """
-
+import matplotlib
+matplotlib.use('TkAgg')  # Use Tkinter backend (works on most systems)
+# matplotlib.use('Agg')  # Use this for non-GUI/headless environments
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import numpy as np
