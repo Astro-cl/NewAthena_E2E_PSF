@@ -3058,6 +3058,7 @@ class ExtendedGUI:
         try:
             if src.resolve().parent != dest_dir.resolve():
                 # If the file is inside this repo, move it; otherwise copy it.
+                import shutil
                 try:
                     src.resolve().relative_to(repo_root.resolve())
                     shutil.move(str(src), str(dest))
@@ -3159,7 +3160,11 @@ class ExtendedGUI:
         
         # Set distribution type
         if 'dist_type' in self.distribution_widgets[data_type_key]:
-            self.distribution_widgets[data_type_key]['dist_type'].set(std_def['type'])
+            # For fixed pseudo-voigt, ensure type is set to 'pseudo-voigt' (not 'gaussian')
+            if std_def.get('type') == 'pseudo-voigt':
+                self.distribution_widgets[data_type_key]['dist_type'].set('pseudo-voigt')
+            else:
+                self.distribution_widgets[data_type_key]['dist_type'].set(std_def['type'])
             self.toggle_eta_entry(data_type_key)
 
         
@@ -3207,10 +3212,17 @@ class ExtendedGUI:
             # Disable main dist_type selector if present
             try:
                 if 'dist_type' in self.distribution_widgets[data_type_key]:
-                    try:
-                        self.distribution_widgets[data_type_key]['dist_type'].set('gaussian')
-                    except Exception:
-                        pass
+                    # For fixed pseudo-voigt, set to 'pseudo-voigt', else fallback
+                    if std_def.get('type') == 'pseudo-voigt':
+                        try:
+                            self.distribution_widgets[data_type_key]['dist_type'].set('pseudo-voigt')
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.distribution_widgets[data_type_key]['dist_type'].set('gaussian')
+                        except Exception:
+                            pass
                     self.distribution_widgets[data_type_key]['dist_type'].config(state='disabled')
             except Exception:
                 pass
@@ -4097,7 +4109,18 @@ class ExtendedGUI:
                 # Get position of last regular param
                 regular_params = config['params']
                 insert_pos = len(regular_params)
-                
+
+                # For fixed pseudo-voigt, ensure distribution column is set to 'pseudo-voigt'
+                # (not 'gaussian')
+                if dist_type == 'gaussian' and hasattr(self, 'standard_distributions'):
+                    # Try to detect if the selected preset is a fixed pseudo-voigt
+                    std_combo = self.distribution_widgets[data_type_key].get('std_dist_combo')
+                    if std_combo:
+                        std_name = std_combo.get()
+                        std_def = self.standard_distributions.get(std_name)
+                        if std_def and std_def.get('type') == 'pseudo-voigt':
+                            dist_type = 'pseudo-voigt'
+
                 # Insert distribution column at the correct position
                 data_df.insert(insert_pos, 'distribution', dist_type)
 
@@ -4116,7 +4139,7 @@ class ExtendedGUI:
                         data_df.insert(after_dist, 'alpha_azi', '-')
                     else:
                         data_df['alpha_azi'] = '-'
-                
+
                 # For pseudo-voigt, clamp alpha values to [0, 1] range
                 if dist_type == 'pseudo-voigt':
                     if 'alpha_rad' in data_df.columns:
