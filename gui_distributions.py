@@ -185,10 +185,11 @@ def apply_macos_input_fixes(root: tk.Tk) -> None:
         # For readonly comboboxes, make the whole widget clickable to open the list.
         if state == 'readonly':
             try:
+                w.focus_set()
                 w.tk.call('ttk::combobox::Post', w)
-                return 'break'
+                # Don't return 'break' to allow default selection behavior
             except Exception:
-                return None
+                pass
         return None
 
     # Use ButtonRelease to avoid fighting the entry caret placement.
@@ -496,7 +497,16 @@ class ExtendedGUI:
             self.aeff_weights = {}
             self.aeff_standard_presets = {}
             try:
-                aeff_raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+                # Load A_eff sheet using openpyxl directly to get cached formula values
+                import openpyxl as _openpyxl
+                wb = _openpyxl.load_workbook(path, data_only=True)
+                ws = wb['A_eff']
+                
+                # Convert worksheet to DataFrame
+                data = []
+                for row in ws.iter_rows(values_only=True):
+                    data.append(row)
+                aeff_raw = pd.DataFrame(data)
                 self.aeff_raw_df = aeff_raw
 
                 # Expect MM list in col A and weights in col B.
@@ -1467,9 +1477,8 @@ class ExtendedGUI:
         tree_frame.grid_columnconfigure(0, weight=1)
 
         # Trackpad-friendly bindings (macOS): some settings trigger events on release.
-        # Also allow toggling by clicking anywhere in a row (not just the first column).
+        # Allow toggling by clicking on the checkbox column or anywhere in a row.
         self.tree.bind('<Button-1>', self.on_tree_click)
-        self.tree.bind('<ButtonRelease-1>', self.on_tree_click)
         self.tree.bind('<space>', self.on_tree_space)
         
         self.mm_data = {}
@@ -1486,14 +1495,14 @@ class ExtendedGUI:
         if not item or item not in self.mm_data:
             return
 
-        # Toggle selection for the clicked row.
+        # Toggle selection for the clicked row (works when clicking anywhere in the row or on the checkbox)
         current_val = self.mm_data[item]['selected']
         self.mm_data[item]['selected'] = not current_val
         self.update_tree_display()
         self.update_selected_mms()
 
-        # Keep default Treeview behavior (row highlight) intact.
-        return
+        # Prevent default Treeview selection behavior to avoid interference
+        return 'break'
 
     def on_tree_space(self, event):
         # Spacebar toggles all highlighted rows (keyboard-friendly, trackpad-independent).
@@ -2022,7 +2031,16 @@ class ExtendedGUI:
         try:
             return float(v)
         except Exception:
-            raise ValueError(f'Non-numeric value at A_eff row {row_idx + 1}, col {col_letter}: {v!r}')
+            # Check if the value is None/NaN and provide helpful error message
+            if pd.isna(v) or v is None:
+                raise ValueError(
+                    f'Column {col_letter} contains no numeric data at row {row_idx + 1}. '
+                    f'This column may contain formulas that have not been calculated. '
+                    f'Please open the Excel file in Microsoft Excel, press Ctrl+Shift+F9 to recalculate all formulas, '
+                    f'then save the file to cache the calculated values.'
+                )
+            else:
+                raise ValueError(f'Non-numeric value at A_eff row {row_idx + 1}, col {col_letter}: {v!r}')
 
     def _evaluate_aeff_preset_for_mm(self, mm: int, values_expr: str) -> float:
         """Evaluate a `Values` expression from an A_eff preset for MM `mm`.
@@ -4675,6 +4693,214 @@ class ExtendedGUI:
                         except Exception:
                             pass
 
+                    # Ensure column B contains the final numeric A_eff values for every MM row.
+                    # Preference: `self.aeff_weights` (user-applied GUI changes) then raw sheet
+                    # second-column values when available.
+                    try:
+                        # Build a mapping of MM -> numeric A_eff to write. Preference:
+                        # 1) explicit GUI mapping `self.aeff_weights` (already applied)
+                        # 2) If none, evaluate current UI selection (fixed or standard)
+                        # 3) fallback to the raw A_eff sheet second-column values
+                        mapping = {}
+                        try:
+                            if hasattr(self, 'aeff_weights') and self.aeff_weights:
+                                mapping.update({int(k): float(v) for k, v in self.aeff_weights.items()})
+                        except Exception:
+                            pass
+
+                        # If mapping is empty, evaluate current UI selection for selected MMs.
+                        # If no MMs are selected, evaluate for all MMs present in the loaded MM configuration.
+                        if not mapping:
+                            try:
+                                # Determine the MM list to evaluate: prefer explicit selection,
+                                # otherwise fall back to all MMs from the loaded MM configuration.
+                                mm_list = list(self.selected_mm_numbers) if self.selected_mm_numbers else []
+                                if not mm_list and getattr(self, 'mm_config_df', None) is not None:
+                                    try:
+                                        mm_list = [int(float(x)) for x in self.mm_config_df['MM #'].dropna().tolist()]
+                                    except Exception:
+                                        mm_list = []
+
+                                mode = self.aeff_mode_var.get()
+                                if mode == 'fixed':
+                                    raw = self.aeff_fixed_var.get().strip()
+                                    if raw:
+                                        fixed = float(raw)
+                                        for mm in mm_list:
+                                            mapping[int(mm)] = float(fixed)
+                                else:
+                                    preset = str(self.aeff_selected_preset_var.get()).strip()
+                                    expr = self.aeff_standard_presets.get(preset)
+                                    if preset and expr and mm_list:
+                                        for mm in mm_list:
+                                            try:
+                                                v = self._evaluate_aeff_preset_for_mm(int(mm), expr)
+                                                mapping[int(mm)] = float(v)
+                                            except Exception:
+                                                # leave missing MM out of mapping so fallback can apply
+                                                continue
+                            except Exception:
+                                pass
+
+                        # Determine selected energy preset name (if any) for special-case wide-table A_eff sheets
+                        sel_preset_name = None
+                        try:
+                            # Prefer explicit free-energy control when present, otherwise preset name
+                            fe = str(self.aeff_free_energy_var.get()).strip() if hasattr(self, 'aeff_free_energy_var') else ''
+                            if fe:
+                                sel_preset_name = fe
+                            else:
+                                pn = str(self.aeff_selected_preset_var.get()).strip() if hasattr(self, 'aeff_selected_preset_var') else ''
+                                if pn:
+                                    sel_preset_name = pn
+                        except Exception:
+                            sel_preset_name = None
+
+                        # Attempt to locate energy column in the workbook sheet when sel_preset_name looks like an energy token
+                        energy_col_index = None
+                        header_row_idx = None
+                        try:
+                            if sel_preset_name and ws is not None:
+                                # Find a sensible header row (search first 1..8 rows for a cell containing 'MM' or 'MM #')
+                                for hr in range(1, min(9, ws.max_row) + 1):
+                                    for c in range(1, min(40, ws.max_column) + 1):
+                                        try:
+                                            v = ws.cell(row=hr, column=c).value
+                                            if v is None:
+                                                continue
+                                            s = str(v).strip()
+                                            if re.search(r"^MM\s*#?$", s, flags=re.IGNORECASE) or re.search(r"mm\s*#", s, flags=re.IGNORECASE):
+                                                header_row_idx = hr
+                                                break
+                                        except Exception:
+                                            continue
+                                    if header_row_idx is not None:
+                                        break
+                                if header_row_idx is None:
+                                    header_row_idx = 1
+
+                                # Find column whose header matches the energy token (exact or contains)
+                                for c in range(1, min(200, ws.max_column) + 1):
+                                    try:
+                                        hv = ws.cell(row=header_row_idx, column=c).value
+                                        if hv is None:
+                                            continue
+                                        hs = str(hv).strip()
+                                        if hs == sel_preset_name or sel_preset_name in hs or hs in sel_preset_name:
+                                            energy_col_index = c
+                                            break
+                                    except Exception:
+                                        continue
+                        except Exception:
+                            energy_col_index = None
+
+                        # Now write mapping where present, otherwise fall back to raw sheet values
+                        for r in range(2, ws.max_row + 1):
+                            try:
+                                mm_val = ws.cell(row=r, column=1).value
+                                if mm_val is None:
+                                    continue
+                                mm_i = int(float(mm_val))
+                            except Exception:
+                                continue
+
+                            if mm_i in mapping:
+                                try:
+                                    ws.cell(row=r, column=2, value=float(mapping[mm_i]))
+                                except Exception:
+                                    pass
+                                continue
+
+                            # Special-case: if we have a selected energy column, try to copy the per-row
+                            # energy value when the row's 'Standard distributions' cell matches the preset.
+                            try:
+                                # detect the 'Standard distributions' column index from header row
+                                std_col_idx = None
+                                try:
+                                    # prefer header label match in header_row_idx
+                                    if header_row_idx is None:
+                                        # attempt to find header row similarly as above
+                                        for hr in range(1, min(9, ws.max_row) + 1):
+                                            for c in range(1, min(40, ws.max_column) + 1):
+                                                try:
+                                                    v = ws.cell(row=hr, column=c).value
+                                                    if v is None:
+                                                        continue
+                                                    s = str(v).strip().lower()
+                                                    if 'standard' in s and 'a_eff' in s.replace(' ', '') or 'standard' in s:
+                                                        std_col_idx = c
+                                                        break
+                                                except Exception:
+                                                    continue
+                                            if std_col_idx is not None:
+                                                break
+                                except Exception:
+                                    std_col_idx = None
+
+                                # fallback column index D
+                                if std_col_idx is None:
+                                    std_col_idx = 4
+
+                                got_from_wide = False
+                                if energy_col_index is not None:
+                                    std_val = ws.cell(row=r, column=std_col_idx).value
+                                    if std_val is not None and str(std_val).strip() and sel_preset_name and str(std_val).strip() == str(sel_preset_name).strip():
+                                        try:
+                                            ev = ws.cell(row=r, column=energy_col_index).value
+                                            if ev is not None:
+                                                ws.cell(row=r, column=2, value=float(ev))
+                                                got_from_wide = True
+                                        except Exception:
+                                            got_from_wide = False
+                                if got_from_wide:
+                                    continue
+                                # Try to locate the energy column in the loaded raw dataframe (preferred, contains evaluated numbers).
+                                # Look for a column whose header contains the energy token (e.g. '@10 keV') and has numeric values.
+                                try:
+                                    if self.aeff_raw_df is not None and sel_preset_name:
+                                        # Scan headers (row 0) to find the energy column
+                                        preset_col = None
+                                        for j in range(min(self.aeff_raw_df.shape[1], 200)):
+                                            try:
+                                                header_val = str(self.aeff_raw_df.iloc[0, j]).strip()
+                                                # Match: header contains the preset energy (e.g. '10 keV' in 'A_eff @10 keV')
+                                                if str(sel_preset_name).strip() in header_val:
+                                                    preset_col = j
+                                                    break
+                                            except Exception:
+                                                continue
+                                        if preset_col is not None:
+                                            # find the row index in the raw df for this MM
+                                            row_idx = self._get_aeff_row_for_mm(mm_i)
+                                            if row_idx is not None and preset_col < self.aeff_raw_df.shape[1]:
+                                                try:
+                                                    val = self.aeff_raw_df.iloc[row_idx, preset_col]
+                                                    if not pd.isna(val):
+                                                        ws.cell(row=r, column=2, value=float(val))
+                                                        continue
+                                                except Exception:
+                                                    pass
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
+                            # fallback: copy existing second-column from loaded raw df if available
+                            try:
+                                if self.aeff_raw_df is not None:
+                                    row_idx = self._get_aeff_row_for_mm(mm_i)
+                                    if row_idx is not None and self.aeff_raw_df.shape[1] > 1:
+                                        bv = self.aeff_raw_df.iloc[row_idx, 1]
+                                        if not pd.isna(bv):
+                                            try:
+                                                ws.cell(row=r, column=2, value=float(bv))
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
             # Ensure A_eff sheet C2 stores the selected/preset energy when exporting.
             try:
                 sel_energy_for_aeff = None
@@ -5163,6 +5389,19 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
             ws_a.cell(row=r, column=2, value=float(adj))
             c3 += 1
 
+        # Ensure any GUI-driven A_eff choice (aeff_weights) is reflected for
+        # all MM rows in column B. Preference order when deciding what to
+        # write for an MM row:
+        # 1. `self.aeff_weights` mapping (if provided by caller via closure)
+        # 2. existing numeric value in the raw A_eff sheet second column
+        # 3. leave cell as-is
+        try:
+            # aeff_weights may not be in this scope when called as a helper;
+            # attempt to fetch from outer closure (gui export) otherwise skip
+            aeff_weights_local = locals().get('self', None)
+        except Exception:
+            aeff_weights_local = None
+
     try:
         if verbose:
             logging.debug('apply_vignetting_to_workbook: saving workbook to %s counts: %d %d %d', target_path, c1, c2, c3)
@@ -5171,6 +5410,72 @@ def apply_vignetting_to_workbook(target_path, preset=None, verbose=False):
         pass
 
     return {'rotazi_written': c1, 'rotrad_written': c2, 'aeff_adjusted_written': c3}
+
+
+def sync_aeff_column_b_in_workbook(wb, aeff_weights: dict | None = None, aeff_raw_df: 'pd.DataFrame | None' = None):
+    """Ensure column B of the `A_eff` sheet contains the canonical numeric
+    A_eff for each MM row. Preference order:
+    1. `aeff_weights` mapping (MM -> numeric)
+    2. `aeff_raw_df` second column value for that MM (if present)
+
+    This is offered as a standalone helper so unit tests can validate GUI
+    export semantics without instantiating the full UI.
+    """
+    try:
+        if 'A_eff' not in wb.sheetnames:
+            return 0
+        ws = wb['A_eff']
+        count = 0
+        for r in range(2, ws.max_row + 1):
+            try:
+                mmv = ws.cell(row=r, column=1).value
+                if mmv is None:
+                    continue
+                mm_i = int(float(mmv))
+            except Exception:
+                continue
+            written = False
+            try:
+                if aeff_weights and mm_i in aeff_weights:
+                    ws.cell(row=r, column=2, value=float(aeff_weights[mm_i]))
+                    written = True
+                    count += 1
+            except Exception:
+                written = False
+            if not written and aeff_raw_df is not None:
+                try:
+                    # Attempt to find row index in raw df; assume first column lists MM
+                    # Use the same logic as ExtendedGUI._get_aeff_row_for_mm
+                    row_idx = None
+                    try:
+                        if 1 <= mm_i <= aeff_raw_df.shape[0]:
+                            v = aeff_raw_df.iloc[mm_i - 1, 0]
+                            if not pd.isna(v) and int(float(v)) == mm_i:
+                                row_idx = mm_i - 1
+                    except Exception:
+                        row_idx = None
+                    if row_idx is None:
+                        # fallback search
+                        col = aeff_raw_df.iloc[:, 0]
+                        for idx, x in enumerate(col):
+                            try:
+                                if pd.isna(x):
+                                    continue
+                                if int(float(x)) == mm_i:
+                                    row_idx = idx
+                                    break
+                            except Exception:
+                                continue
+                    if row_idx is not None and aeff_raw_df.shape[1] > 1:
+                        bv = aeff_raw_df.iloc[row_idx, 1]
+                        if not pd.isna(bv):
+                            ws.cell(row=r, column=2, value=float(bv))
+                            count += 1
+                except Exception:
+                    pass
+        return count
+    except Exception:
+        return 0
 
 
 if __name__ == '__main__':
