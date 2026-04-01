@@ -133,6 +133,20 @@ The repository includes a small sensitivity-run template and driver under the `s
    `Distributions/` and created a zipped backup). The branch `cleanup/v5`
    containing these updates was merged into `main` on 2026-02-07.
 
+### Release v6 (2026-04-01)
+
+- GUI polish: improved combobox click behavior on macOS so clicking a
+   combobox opens the list and allows immediate mouse selection without
+   requiring Enter; MM Configuration checkboxes now toggle reliably when
+   clicked, improving single-MM selection.
+- Tooling: added `compute_aeff_values.py` — a helper script to compute
+   and cache A_eff lookup/formula results into numeric columns so workbooks
+   can be used without Excel formula evaluation. See `compute_aeff_values.py`
+   for usage.
+- Repo hygiene: removed large generated distribution/figure files from the
+   repository index and added `.gitignore` entries to avoid accidental
+   commits of generated artifacts.
+
 Verification & notes:
 
 - The GUI export saves workbooks in a background thread; automated

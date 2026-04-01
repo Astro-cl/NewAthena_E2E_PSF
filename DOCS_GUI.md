@@ -92,3 +92,28 @@ See Also
 - Preset energy tokens like `1 keV` are parsed and written into `C2` of
   vignetting sheets at export time.
 
+## v6 (2026-04-01) — GUI polish and tools
+
+- Combobox click behavior (macOS): combobox fields now open on click and
+   allow immediate mouse selection without requiring the Enter key. This
+   improves UX on macOS trackpads and touch-based pointer devices.
+
+- MM Configuration checkboxes: clicking the checkbox toggles only the
+   checkbox state and does not inadvertently change selection focus —
+   this makes selecting a single MM by clicking its checkbox more reliable.
+
+- A_eff caching script: the repository includes a helper script
+   `compute_aeff_values.py` which computes previously-formula-derived
+   lookup columns and writes numeric A_eff values into the `A_eff` sheet
+   so users can work with numeric presets even when Excel formulas aren't
+   evaluated by the environment. Usage:
+
+```bash
+python3 compute_aeff_values.py path/to/your_workbook.xlsx
+```
+
+   The script modifies the workbook in-place and is intended for
+   post-processing workbooks generated with VLOOKUP-based A_eff presets.
+
+See the `README.md` and `CHANGELOG.md` for release notes and details.
+
