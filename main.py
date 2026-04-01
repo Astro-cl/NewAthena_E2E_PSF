@@ -2846,6 +2846,146 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     radius_50 = _radius_for_fraction(frac_profile, r_profile, target=0.5)
     radius_90 = _radius_for_fraction(frac_profile, r_profile, target=0.9)
 
+    # --------------------------------------------------------
+    # Fit modified pseudo-Voigt to the azimuthal-average radial profile
+    # Improved: two-stage fit + robust least-squares to better capture wings
+    # --------------------------------------------------------
+    try:
+        from scipy.optimize import curve_fit
+        try:
+            from scipy.optimize import least_squares
+            have_least_squares = True
+        except Exception:
+            have_least_squares = False
+
+        # Recover radial energy per-bin from cumulative (radial_energy*dr = diff(cumulative))
+        dr = float(r_profile[1] - r_profile[0]) if r_profile.size > 1 else 1.0
+        radial_energy = np.diff(np.concatenate(([0.0], cumulative_profile))) / dr
+
+        # Convert to mean intensity per unit area of the annulus: I = radial_energy/(2*pi*r)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            I_profile = radial_energy / (2.0 * np.pi * r_profile)
+        # handle r==0 by replacing with nearest finite value
+        if not np.isfinite(I_profile[0]):
+            finite_idx = np.where(np.isfinite(I_profile))[0]
+            if finite_idx.size:
+                I_profile[0] = I_profile[finite_idx[0]]
+            else:
+                I_profile[0] = 0.0
+
+        # Work in arcsec for human-friendly parameters
+        try:
+            arcsec_to_m
+        except NameError:
+            arcsec_to_m = 12 * np.pi / 180 / 3600
+        r_arcsec = r_profile / arcsec_to_m
+
+        # Local model definitions
+        def pure_gaussian(r, A, Gamma, b):
+            return A * np.exp(-4*np.log(2)*(r/Gamma)**2) + b
+
+        def beta_pseudo_gaussian(r, A, Gamma, eta, beta, b):
+            G = np.exp(-4*np.log(2)*(r/Gamma)**2)
+            a = 2**(1.0/beta) - 1.0
+            C = 1.0 / (1.0 + a*(2.0*r/Gamma)**2)**beta
+            return A*((1.0-eta)*G + eta*C) + b
+
+        def core_weights(r, r0):
+            return np.exp(-(r/r0)**2)
+
+        # Prepare data mask (positive intensities)
+        mask = np.isfinite(I_profile) & (I_profile > 0)
+        r_fit = r_arcsec[mask]
+        I_fit = I_profile[mask]
+
+        if r_fit.size >= 7:
+            # STEP 1: core-only Gaussian fit for robust initial Gamma estimate
+            A0 = float(np.nanmax(I_fit))
+            try:
+                Gamma0 = float(r_fit[np.argmin(np.abs(I_fit - A0/2.0))])
+            except Exception:
+                Gamma0 = max(float(np.median(r_fit)), 1.0)
+            b0 = float(np.nanmin(I_fit))
+
+            rmax_core = 2.0 * max(Gamma0, 1e-6)
+            core_mask = r_fit <= rmax_core
+            try:
+                popt_g, _ = curve_fit(pure_gaussian, r_fit[core_mask], I_fit[core_mask], p0=[A0, Gamma0, b0])
+                A_g, Gamma_g, b_g = popt_g
+            except Exception:
+                A_g, Gamma_g, b_g = A0, Gamma0, b0
+
+            # STEP 2: robust pseudo-Voigt fit — allow Gamma to vary and use robust loss
+            # Construct a weighting that emphasizes wings (inverse of core weight)
+            w_core = core_weights(r_fit, max(Gamma_g, 1e-6))
+            weights_wings = 1.0 / (w_core + 0.05)
+
+            # initial guess and bounds
+            x0 = [float(A_g), float(Gamma_g), 0.2, 2.0, float(b_g)]
+            lb = [0.0, max(1e-3, float(Gamma_g)*0.2), 0.0, 1.0, -np.inf]
+            ub = [np.inf, float(Gamma_g)*8.0, 0.95, 8.0, np.inf]
+
+            if have_least_squares:
+                def fun_ls(x):
+                    A_x, G_x, eta_x, beta_x, b_x = x
+                    model = beta_pseudo_gaussian(r_fit, A_x, G_x, eta_x, beta_x, b_x)
+                    return (model - I_fit) * np.sqrt(weights_wings)
+
+                try:
+                    res = least_squares(fun_ls, x0, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=2000)
+                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = res.x.tolist()
+                except Exception:
+                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = x0
+            else:
+                # Fallback: curve_fit with sigma tuned to emphasize wings
+                try:
+                    sigma = 1.0 / np.maximum(weights_wings, 1e-12)
+                    popt, pcov = curve_fit(
+                        beta_pseudo_gaussian,
+                        r_fit, I_fit,
+                        p0=x0,
+                        bounds=(lb, ub),
+                        sigma=sigma,
+                        absolute_sigma=False,
+                        maxfev=2000,
+                    )
+                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = popt
+                except Exception:
+                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = x0
+
+            # Print fit summary
+            print("\n--- Aggregated E2E Modified pseudo-Gaussian fit ---")
+            print(f"Amplitude A = {A_fit:.6g}")
+            print(f"FWHM Γ      = {Gamma_fit:.6f} arcsec")
+            print(f"η (wings)   = {eta_fit:.6f}")
+            print(f"β (index)   = {beta_fit:.6f}")
+            print(f"Background  = {b_fit:.6e}")
+
+            # Save diagnostic plot
+            try:
+                os.makedirs('Figures', exist_ok=True)
+                rplot = np.linspace(0.0, float(r_arcsec.max()), 1000)
+                Ifit = beta_pseudo_gaussian(rplot, A_fit, Gamma_fit, eta_fit, beta_fit, b_fit)
+                plt.figure(figsize=(6,4))
+                plt.plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
+                plt.plot(rplot, Ifit, 'r-', lw=2, label='Fit')
+                plt.xlabel('Radius [arcsec]')
+                plt.ylabel('Mean intensity')
+                plt.legend()
+                plt.grid(True)
+                outfn = os.path.join('Figures', 'E2E_fit.png')
+                plt.tight_layout()
+                plt.savefig(outfn, dpi=150)
+                plt.close()
+                print(f"Saved fit diagnostic: {outfn}")
+            except Exception:
+                pass
+        else:
+            print("Not enough data points to perform radial fit.")
+    except Exception:
+        # SciPy not available or other error — skip fitting but don't fail
+        print("scipy.optimize not available — skipping aggregated radial fit.")
+
     # Also compute 50% from origin for reference
     r_profile_00, cumulative_00, total_00 = radial_profile(0.0, 0.0, n_r=n_r_final, n_theta=n_theta_final, r_margin_factor=final_r_margin)
     frac_00 = cumulative_00 / total_00 if total_00 > 0 else cumulative_00
