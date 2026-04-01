@@ -1,3 +1,6 @@
+# Ignore large generated distribution and figure files
+Distributions/*
+Figures/*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
