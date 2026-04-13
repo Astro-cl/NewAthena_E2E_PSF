@@ -245,7 +245,7 @@ Verification & notes:
    - Choose export mode (new file or update current)
    - Click "Export to Excel"
    - Files are saved in `Distributions/` folder
-   - Context menu (right-click) on plots: Export PSF / Encircled Energy / FITS / EEF CSV. EEF CSV files are written to `CustomPSFs/` as `E2E_EEF_YYYYMMDD_HHMMSS.csv`.
+   - Context menu (right-click) on plots: Export PSF / Encircled Energy / FITS / EEF CSV / Fit Parameters CSV. EEF CSV files are written to `CustomPSFs/` as `E2E_EEF_YYYYMMDD_HHMMSS.csv`.
 
 ### Using Command Line
 
@@ -282,6 +282,8 @@ If you pass `--output`, the combined figure is saved to that path and the script
    in the `A_eff` tab; when enabled, the selected preset column from the
    vignetting sheets is copied into column B during export (matches by
    explicit column letter or header substring).
+- Extended the interactive plot context menu to export fit parameters CSV,
+   and overlaid the aggregated pseudo-Voigt fit on the right-hand EEF plot.
 - Documentation: substantial docstring pass across `main.py`,
    `gui_distributions.py`, `distributions_rotated.py`, and
    `optimize_mm_rows.py`; added `DOCS_GUI.md` with examples and generated
@@ -458,6 +460,7 @@ GUI notes:
    - Export Encircled Energy Plot (PNG)
    - Export FITS (Primary HDU-only, big-endian IEEE64) — header includes `TOT_AEFF`, `INTG_Z`, `PIXAS*`, `PIXM*`, `CDELT*`, `AUTHOR`, `CONTACT`, `ORCID`, `INPUTFN`.
    - Export EEF CSV (writes `CustomPSFs/E2E_EEF_YYYYMMDD_HHMMSS.csv` with percentage/diameter columns for best/origin/optimized curves when present).
+   - Export Fit Parameters CSV (writes `CustomPSFs/E2E_fit_params_YYYYMMDD_HHMMSS.csv` with aggregated pseudo-Voigt fit parameters).
 
 Keyboard shortcuts in the interactive window:
 
@@ -465,6 +468,7 @@ Keyboard shortcuts in the interactive window:
 - `e` or `2`: Export Encircled Energy plot to PNG
 - `f` or `3`: Export aggregated E2E PSF to FITS
 - `c` or `4`: Export Encircled Energy Function data to CSV (`CustomPSFs/`)
+- `s` or `5`: Export fit parameters to CSV (`CustomPSFs/`)
 - `--optimize`: Enable row-wise MM# assignment optimization to minimize HEW (uses `--mode`).
    - Note: `--optimise` is accepted as an alias.
 - `--placement [{cross,x_axis,elliptical}]`: Apply a placement strategy.
@@ -809,6 +813,35 @@ where:
 - **Medium alpha (0.3 - 0.7)**: Moderate scattering effects
 - **High alpha (0.7 - 1.0)**: Significant scattering, degraded optics
 - **Asymmetric (alpha_rad ≠ alpha_azi)**: Directional scattering or optical aberrations
+
+### Aggregated Radial Fit: Modified Pseudo-Voigt
+
+The current end-to-end fit in `main.py` uses a modified pseudo-Voigt model applied to the azimuthal-average radial intensity profile of the aggregated PSF.
+The model is not a simple Gaussian; it combines a narrow Gaussian core with a broader wing-shaped term and normalizes the mixture so the amplitude `A` remains the overall intensity scale.
+
+The mathematical form is:
+
+```
+G(r; Γ_c) = exp(-4 ln 2 (r / Γ_c)^2)
+C(r; Γ_w) = [1 + a (2 r / Γ_w)^2]^{-β}
+where a = 2^(1/β) - 1
+mix = (1 - η) G(r; Γ_c) + η × scalar × C(r; Γ_w)
+norm = (1 - η) + η × scalar
+I(r) = A × mix / norm
+```
+
+Parameters:
+
+- `A`: overall intensity scale of the radial profile. This is the fitted amplitude of the mean radial intensity.
+- `Γ_c` (`Gamma_core`): core width in arcseconds. Controls the narrow Gaussian-like peak width.
+- `Γ_w` (`Gamma_wing`): wing width in arcseconds. Controls the broader wing/tail scale.
+- `η` (`eta`): mixing fraction between core and wing. `η = 0` gives pure Gaussian core, `η = 1` gives a wing-dominated shape.
+- `β` (`beta`): wing shape exponent. `β = 1` produces a Lorentzian-like tail, larger values produce faster-decaying wing tails.
+- `scalar`: additional scaling factor applied to the wing component before normalization. Values above 1 amplify the wing relative to the Gaussian core, values below 1 reduce the wing amplitude.
+
+Because the model normalizes by `(1 - η) + η scalar`, the fit preserves the overall amplitude while allowing the wing component to have its own relative strength.
+
+This aggregated fit is performed on the azimuthally-averaged radial intensity derived from the PSF, and the result is saved as `Figures/E2E_fit.png`.
 
 ## GUI User Manual
 

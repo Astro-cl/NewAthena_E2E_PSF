@@ -29,6 +29,7 @@ This document provides a quick reference to the core modules and their purposes.
 
 - Added module-level documentation to `main.py` and explanatory notes
 - Added `CONTRIBUTING.md` and `DOCS_SUMMARY.md` to guide contributors
+- Documented the new aggregated modified pseudo-Voigt fit and GUI EEF export behavior
 - Cleaned up duplicate documentation between DOCS_GUI.md and README.md
 
 ## Recommended Next Steps

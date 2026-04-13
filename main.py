@@ -2884,11 +2884,26 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         def pure_gaussian(r, A, Gamma, b):
             return A * np.exp(-4*np.log(2)*(r/Gamma)**2) + b
 
-        def beta_pseudo_gaussian(r, A, Gamma, eta, beta, b):
-            G = np.exp(-4*np.log(2)*(r/Gamma)**2)
+        # Modified pseudo-Voigt radial intensity model used for the aggregated fit.
+        # The model mixes a narrow Gaussian core with a broader Lorentzian-like wing.
+        # The wing amplitude is scaled separately and the final mixture is normalized
+        # so that A remains the overall intensity scale.
+        #
+        #   G(r; Γ_c) = exp(-4 ln 2 (r / Γ_c)^2)
+        #   a = 2^(1/β) - 1
+        #   C(r; Γ_w) = [1 + a (2 r / Γ_w)^2]^{-β}
+        #   mix = (1 - η) G + η scalar C
+        #   norm = (1 - η) + η scalar
+        #   I(r) = A * (mix / norm)
+        #
+        # where r is in arcseconds and A is the peak radial mean intensity.
+        def beta_pseudo_gaussian(r, A, Gamma_c, Gamma_w, eta, beta, scalar):
+            G = np.exp(-4*np.log(2)*(r/Gamma_c)**2)
             a = 2**(1.0/beta) - 1.0
-            C = 1.0 / (1.0 + a*(2.0*r/Gamma)**2)**beta
-            return A*((1.0-eta)*G + eta*C) + b
+            C = 1.0 / (1.0 + a*(2.0*r/Gamma_w)**2)**beta
+            mix = (1.0-eta)*G + eta*scalar*C
+            norm = (1.0-eta) + eta*scalar
+            return A * (mix / norm)
 
         def core_weights(r, r0):
             return np.exp(-(r/r0)**2)
@@ -2898,6 +2913,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         r_fit = r_arcsec[mask]
         I_fit = I_profile[mask]
 
+        fit_params_available = False
+        fit_profile_pct = None
+        fit_profile_diam = None
+
         if r_fit.size >= 7:
             # STEP 1: core-only Gaussian fit for robust initial Gamma estimate
             A0 = float(np.nanmax(I_fit))
@@ -2905,7 +2924,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 Gamma0 = float(r_fit[np.argmin(np.abs(I_fit - A0/2.0))])
             except Exception:
                 Gamma0 = max(float(np.median(r_fit)), 1.0)
-            b0 = float(np.nanmin(I_fit))
+            b0 = max(float(np.nanmin(I_fit)), 0.0)
 
             rmax_core = 2.0 * max(Gamma0, 1e-6)
             core_mask = r_fit <= rmax_core
@@ -2915,60 +2934,57 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             except Exception:
                 A_g, Gamma_g, b_g = A0, Gamma0, b0
 
-            # STEP 2: robust pseudo-Voigt fit — allow Gamma to vary and use robust loss
-            # Construct a weighting that emphasizes wings (inverse of core weight)
-            w_core = core_weights(r_fit, max(Gamma_g, 1e-6))
-            weights_wings = 1.0 / (w_core + 0.05)
+            # STEP 2: modified pseudo-Voigt fit with separate core and wing widths
+            A_fit = float(A_g)
+            Gamma_c_fit = float(Gamma_g)
+            Gamma_w_fit = max(3.0 * Gamma_c_fit, 4.0)
+            eta_fit = 0.08
+            beta_fit = 1.8
+            scalar_fit = 1.8
 
-            # initial guess and bounds
-            x0 = [float(A_g), float(Gamma_g), 0.2, 2.0, float(b_g)]
-            lb = [0.0, max(1e-3, float(Gamma_g)*0.2), 0.0, 1.0, -np.inf]
-            ub = [np.inf, float(Gamma_g)*8.0, 0.95, 8.0, np.inf]
+            A_lb = max(0.5 * A_fit, 1.0)
+            x0 = [A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit]
+            lb = [A_lb, max(1e-3, float(Gamma_c_fit)*0.2), max(1e-3, float(Gamma_c_fit)*1.2), 0.05, 1.0, 0.2]
+            ub = [np.inf, float(Gamma_c_fit)*3.0, float(Gamma_c_fit)*25.0, 0.5, 5.0, 12.0]
 
-            if have_least_squares:
-                def fun_ls(x):
-                    A_x, G_x, eta_x, beta_x, b_x = x
-                    model = beta_pseudo_gaussian(r_fit, A_x, G_x, eta_x, beta_x, b_x)
-                    return (model - I_fit) * np.sqrt(weights_wings)
+            # Use weighted least squares for peak and wing matching.
+            eps = 1e-12
+            floor = max(eps, np.nanpercentile(I_fit[I_fit>0], 1) if np.any(I_fit>0) else eps)
+            rscale = np.median(r_fit) if r_fit.size else 1.0
+            peak_cut = max(3.0, min(12.0, float(Gamma_c_fit)*1.5))
+            weights = 1.0 + 20.0 * np.exp(-(r_fit/peak_cut)**2) + 0.5 * (r_fit / max(rscale, 1e-6))
+            sigma = 1.0 / np.maximum(weights, 1e-8)
 
-                try:
-                    res = least_squares(fun_ls, x0, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=2000)
-                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = res.x.tolist()
-                except Exception:
-                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = x0
-            else:
-                # Fallback: curve_fit with sigma tuned to emphasize wings
-                try:
-                    sigma = 1.0 / np.maximum(weights_wings, 1e-12)
-                    popt, pcov = curve_fit(
-                        beta_pseudo_gaussian,
-                        r_fit, I_fit,
-                        p0=x0,
-                        bounds=(lb, ub),
-                        sigma=sigma,
-                        absolute_sigma=False,
-                        maxfev=2000,
-                    )
-                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = popt
-                except Exception:
-                    A_fit, Gamma_fit, eta_fit, beta_fit, b_fit = x0
+            def fit_func(r, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x):
+                return beta_pseudo_gaussian(r, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
 
-            # Print fit summary
-            print("\n--- Aggregated E2E Modified pseudo-Gaussian fit ---")
-            print(f"Amplitude A = {A_fit:.6g}")
-            print(f"FWHM Γ      = {Gamma_fit:.6f} arcsec")
-            print(f"η (wings)   = {eta_fit:.6f}")
-            print(f"β (index)   = {beta_fit:.6f}")
-            print(f"Background  = {b_fit:.6e}")
+            try:
+                popt, _ = curve_fit(fit_func, r_fit, I_fit, p0=x0, bounds=(lb, ub), sigma=sigma, maxfev=5000)
+                A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = popt
+            except Exception:
+                if have_least_squares:
+                    def resid_pvoigt(params):
+                        A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x = params
+                        model = beta_pseudo_gaussian(r_fit, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
+                        model = np.maximum(model, floor)
+                        return (model - I_fit) * np.sqrt(weights)
+                    try:
+                        res = least_squares(resid_pvoigt, x0, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=5000)
+                        A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = res.x.tolist()
+                    except Exception:
+                        A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = x0
+                else:
+                    A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = x0
 
-            # Save diagnostic plot
+            # Save aggregated fit diagnostic plot
+            fit_params_available = True
             try:
                 os.makedirs('Figures', exist_ok=True)
                 rplot = np.linspace(0.0, float(r_arcsec.max()), 1000)
-                Ifit = beta_pseudo_gaussian(rplot, A_fit, Gamma_fit, eta_fit, beta_fit, b_fit)
+                Ifit = beta_pseudo_gaussian(rplot, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
                 plt.figure(figsize=(6,4))
                 plt.plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
-                plt.plot(rplot, Ifit, 'r-', lw=2, label='Fit')
+                plt.plot(rplot, Ifit, 'r-', lw=2, label='Modified pseudo-Voigt')
                 plt.xlabel('Radius [arcsec]')
                 plt.ylabel('Mean intensity')
                 plt.legend()
@@ -2977,97 +2993,24 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 plt.tight_layout()
                 plt.savefig(outfn, dpi=150)
                 plt.close()
-                print(f"Saved fit diagnostic: {outfn}")
             except Exception:
                 pass
-            # ------------------------------------------------
-            # Composite core+wing fit (Gaussian core + pseudo-Voigt wing)
-            # Attempts to fit both core and tails more flexibly.
-            # Uses log-space residuals and robust least-squares.
-            # ------------------------------------------------
+
             try:
-                if have_least_squares:
-                    def composite_model(r, Ac, sigc, Aw, Gw, eta_w, beta_w, b0):
-                        # Core: Gaussian (FWHM sigc)
-                        core = Ac * np.exp(-4*np.log(2)*(r/sigc)**2)
-                        # Wing: pseudo-Voigt-like component (separate amplitude Aw)
-                        G = np.exp(-4*np.log(2)*(r/Gw)**2)
-                        a = 2**(1.0/beta_w) - 1.0
-                        C = 1.0 / (1.0 + a*(2.0*r/Gw)**2)**beta_w
-                        wing = Aw * ((1.0-eta_w)*G + eta_w*C)
-                        return core + wing + b0
-
-                    # build initial guesses from previous fit
-                    eps = 1e-12
-                    Ac0 = max(1e-12, 0.6 * A_fit)
-                    sigc0 = max(1e-3, max(0.2, 0.25 * float(Gamma_fit)))
-                    Aw0 = max(1e-12, 0.4 * A_fit)
-                    Gw0 = max(1e-3, max(float(Gamma_fit)*1.2, 2.0*sigc0))
-                    eta0 = float(max(0.0, min(0.9, eta_fit if 'eta_fit' in locals() else 0.2)))
-                    beta0 = float(max(1.0, min(8.0, beta_fit if 'beta_fit' in locals() else 2.0)))
-                    b0 = float(b_fit if 'b_fit' in locals() else 0.0)
-
-                    x0c = [Ac0, sigc0, Aw0, Gw0, eta0, beta0, b0]
-                    lb_c = [0.0, 1e-6, 0.0, 1e-6, 0.0, 1.0, -np.inf]
-                    ub_c = [np.inf, float(Gamma_fit)*2.0 if np.isfinite(Gamma_fit) else np.inf, np.inf, float(Gamma_fit)*20.0 if np.isfinite(Gamma_fit) else np.inf, 0.99, 8.0, np.inf]
-
-                    # Use log-space residuals to balance dynamic range between core and wings
-                    Iobs = I_fit
-                    # small floor to avoid log(0)
-                    floor = max(eps, np.nanpercentile(Iobs[Iobs>0], 1) if np.any(Iobs>0) else eps)
-
-                    # radial weighting to avoid overfitting tiny inner radii noise
-                    rscale = np.median(r_fit) if r_fit.size else 1.0
-
-                    def resid_comp(x):
-                        Ac, sigc, Aw, Gw, eta_w, beta_w, b = x
-                        model = composite_model(r_fit, Ac, sigc, Aw, Gw, eta_w, beta_w, b)
-                        # ensure positivity
-                        model = np.maximum(model, floor)
-                        # log residuals
-                        res = np.log(model) - np.log(Iobs + floor)
-                        # weight outer radii slightly more to capture tails (sqrt scale)
-                        w = 1.0 + (r_fit / max(rscale, 1e-6))
-                        return res * np.sqrt(w)
-
-                    try:
-                        resc = least_squares(resid_comp, x0c, bounds=(lb_c, ub_c), loss='soft_l1', f_scale=1e-3, max_nfev=3000)
-                        Ac_f, sigc_f, Aw_f, Gw_f, eta_f, beta_f, b_f = resc.x.tolist()
-                        # Print composite summary
-                        print("\n--- Composite core+wing fit ---")
-                        print(f"Core A = {Ac_f:.6g}, sigma_core = {sigc_f:.6f} arcsec")
-                        print(f"Wing A = {Aw_f:.6g}, Gw = {Gw_f:.6f} arcsec, eta = {eta_f:.4f}, beta = {beta_f:.4f}")
-                        print(f"Background = {b_f:.6e}")
-
-                        # Save composite diagnostic plot
-                        try:
-                            rplot = np.linspace(0.0, float(r_arcsec.max()), 1000)
-                            Ifit_c = composite_model(rplot, Ac_f, sigc_f, Aw_f, Gw_f, eta_f, beta_f, b_f)
-                            plt.figure(figsize=(6,4))
-                            plt.plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
-                            plt.plot(rplot, Ifit, 'r-', lw=2, label='Prev fit')
-                            plt.plot(rplot, Ifit_c, 'b--', lw=2, label='Composite fit')
-                            plt.xlabel('Radius [arcsec]')
-                            plt.ylabel('Mean intensity')
-                            plt.legend()
-                            plt.grid(True)
-                            outfn2 = os.path.join('Figures', 'E2E_fit_composite.png')
-                            plt.tight_layout()
-                            plt.savefig(outfn2, dpi=150)
-                            plt.close()
-                            print(f"Saved composite fit diagnostic: {outfn2}")
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        print(f"Composite fit failed: {e}")
-                else:
-                    # least_squares not available — skip composite attempt
-                    pass
+                dr_arcsec = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
+                I_fit_model = beta_pseudo_gaussian(r_arcsec, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+                radial_energy_fit = 2.0 * np.pi * r_arcsec * I_fit_model * dr_arcsec
+                total_fit_energy = np.sum(radial_energy_fit)
+                if total_fit_energy > 0:
+                    fit_cumulative = np.cumsum(radial_energy_fit)
+                    fit_profile_pct = 100.0 * fit_cumulative / total_fit_energy
+                    fit_profile_diam = 2.0 * r_arcsec
             except Exception:
-                # keep original behavior on any failure
-                pass
+                fit_profile_pct = None
+                fit_profile_diam = None
+
         else:
-            print("Not enough data points to perform radial fit.")
+            pass
     except Exception:
         # SciPy not available or other error — skip fitting but don't fail
         print("scipy.optimize not available — skipping aggregated radial fit.")
@@ -3638,6 +3581,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     profile_pct_00_95, profile_diam_00_95 = limit_percentile(profile_pct_00, profile_diam_00)
     plt.plot(profile_pct_95, profile_diam_95, label=label_best, color='green')
     plt.plot(profile_pct_00_95, profile_diam_00_95, label=label_00, color='blue')
+    if fit_profile_pct is not None and fit_profile_diam is not None:
+        fit_profile_pct_95, fit_profile_diam_95 = limit_percentile(fit_profile_pct, fit_profile_diam)
+        plt.plot(fit_profile_pct_95, fit_profile_diam_95, label='Pseudo-Voigt fit', color='red', linestyle='--', linewidth=1.8)
     
     # Add optimized curve if provided
     if df_optimized is not None and opt_frac_profile is not None:
@@ -3799,6 +3745,22 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         df_out.to_csv(out, index=False)
         print('Wrote EEF CSV to', out)
 
+    def export_fit_params_csv():
+        """Export the pseudo-Voigt fit parameters to CSV in CustomPSFs/"""
+        import time as _time, os as _os, pandas as _pd
+        if not fit_params_available:
+            print('No pseudo-Voigt fit parameters are available for export.')
+            return None
+        ts = _time.strftime('%Y%m%d_%H%M%S')
+        out = _os.path.join('CustomPSFs', f'E2E_fit_params_{ts}.csv')
+        _os.makedirs(_os.path.dirname(out), exist_ok=True)
+        df_out = _pd.DataFrame({
+            'parameter': ['A', 'Gamma_core', 'Gamma_wing', 'eta', 'beta', 'scalar'],
+            'value': [A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit],
+        })
+        df_out.to_csv(out, index=False)
+        print('Wrote fit parameters CSV to', out)
+
     def export_fits():
         """Export the aggregated E2E PSF grid `Z` to a minimal FITS file.
 
@@ -3916,13 +3878,14 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             hide_context_menu()
             return
         
-        menu_text = "┌─────────────────────────────┐\n"
-        menu_text += "│  1. Export PSF Plot         │\n"
-        menu_text += "│  2. Export EEF Plot         │\n"
-        menu_text += "│  3. Export FITS             │\n"
-        menu_text += "│  4. Export EEF CSV         │\n"
-        menu_text += "│  5. Cancel                  │\n"
-        menu_text += "└─────────────────────────────┘"
+        menu_text = "┌───────────────────────────────────┐\n"
+        menu_text += "│  1. Export PSF Plot               │\n"
+        menu_text += "│  2. Export EEF Plot               │\n"
+        menu_text += "│  3. Export FITS                   │\n"
+        menu_text += "│  4. Export EEF CSV                │\n"
+        menu_text += "│  5. Export Fit Parameters CSV     │\n"
+        menu_text += "│  6. Cancel                       │\n"
+        menu_text += "└───────────────────────────────────┘"
         
         menu_annotation = fig.text(x, y, menu_text,
                                    fontfamily='monospace',
@@ -3973,22 +3936,25 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     # Calculate relative position within menu (from bottom)
                     relative_y = (event.y - bbox.y0) / bbox.height
                     
-                    # Menu structure for 5 options (top-to-bottom):
-                    # Top border, Opt1, Opt2, Opt3, Opt4, Opt5, Bottom border
+                    # Menu structure for 6 options (top-to-bottom):
+                    # Top border, Opt1, Opt2, Opt3, Opt4, Opt5, Opt6, Bottom border
                     # Ranges chosen empirically to match text layout
-                    if 0.80 < relative_y <= 0.95:  # Option 1 (Export PSF)
+                    if 0.82 < relative_y <= 0.95:  # Option 1 (Export PSF)
                         hide_context_menu()
                         export_psf_plot()
-                    elif 0.62 < relative_y <= 0.80:  # Option 2 (Export EEF)
+                    elif 0.68 < relative_y <= 0.82:  # Option 2 (Export EEF)
                         hide_context_menu()
                         export_eef_plot()
-                    elif 0.44 < relative_y <= 0.62:  # Option 3 (Export FITS)
+                    elif 0.54 < relative_y <= 0.68:  # Option 3 (Export FITS)
                         hide_context_menu()
                         export_fits()
-                    elif 0.26 < relative_y <= 0.44:  # Option 4 (Export EEF CSV)
+                    elif 0.40 < relative_y <= 0.54:  # Option 4 (Export EEF CSV)
                         hide_context_menu()
                         export_eef_csv()
-                    elif 0.08 < relative_y <= 0.26:  # Option 5 (Cancel)
+                    elif 0.26 < relative_y <= 0.40:  # Option 5 (Export Fit Params CSV)
+                        hide_context_menu()
+                        export_fit_params_csv()
+                    elif 0.08 < relative_y <= 0.26:  # Option 6 (Cancel)
                         hide_context_menu()
                 else:
                     # Clicked outside menu, hide it
@@ -4011,7 +3977,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             elif event.key in ['4', 'c']:
                 hide_context_menu()
                 export_eef_csv()
-            elif event.key in ['5', 'escape']:
+            elif event.key in ['5', 's']:
+                hide_context_menu()
+                export_fit_params_csv()
+            elif event.key in ['6', 'escape']:
                 hide_context_menu()
         else:
             if event.key in ['p', '1']:
@@ -4020,6 +3989,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 export_eef_plot()
             elif event.key in ['f', '3']:
                 export_fits()
+            elif event.key in ['s', '5']:
+                export_fit_params_csv()
             elif event.key == 'h':
                 print("\nKeyboard shortcuts:")
                 print("  'p' or '1' - Export PSF plot")
