@@ -2850,6 +2850,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Fit modified pseudo-Voigt to the azimuthal-average radial profile
     # Improved: two-stage fit + robust least-squares to better capture wings
     # --------------------------------------------------------
+    fit_params_available = False
+    fit_profile_pct = None
+    fit_profile_diam = None
     try:
         from scipy.optimize import curve_fit
         try:
