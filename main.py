@@ -3038,63 +3038,26 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 fit_profile_diam = None
 
             # ========== PEARSON4 FITTING ==========
-            # Fit Pearson4 model using lmfit to also optimize intensity + EEF
+            # Fit Pearson4 model using lmfit
             pearson4_result = None
             pearson4_profile_pct = None
             pearson4_profile_diam = None
             try:
                 from lmfit.models import Pearson4Model
-                from lmfit import Parameters
                 
                 # Create Pearson4 model
                 pearson4_model = Pearson4Model()
                 
-                # Initial guess from pseudo-Voigt peak parameters
+                # Initial guess from data
                 params = pearson4_model.guess(I_fit, x=r_fit)
-                # Adjust initial values for better convergence
-                params['amplitude'].value = A_fit
-                params['center'].value = Gamma_c_fit * 0.5
-                params['sigma'].value = Gamma_c_fit
-                params['expon'].value = 1.5
-                params['skew'].value = 0.0
                 
-                # Define custom residual that combines intensity and EEF errors
-                dr_arcsec_p4 = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
-                radial_energy_data_p4 = 2.0 * np.pi * r_fit * I_fit * dr_arcsec_p4
-                cumulative_data_p4 = np.cumsum(radial_energy_data_p4)
-                total_data_p4 = cumulative_data_p4[-1] if cumulative_data_p4.size else 1.0
-                eef_data_p4 = cumulative_data_p4 / total_data_p4 if total_data_p4 > 0 else cumulative_data_p4
-                
-                def residual_p4(params):
-                    model = pearson4_model.eval(params=params, x=r_fit)
-                    model = np.maximum(model, floor)
-                    # Intensity residual (log scale)
-                    log_resid = np.log(model) - np.log(I_fit)
-                    res_int = log_resid * np.sqrt(weights)
-                    # EEF residual
-                    cumulative_model_p4 = np.cumsum(2.0 * np.pi * r_fit * model * dr_arcsec_p4)
-                    total_model_p4 = cumulative_model_p4[-1] if cumulative_model_p4.size else 1.0
-                    eef_model_p4 = cumulative_model_p4 / total_model_p4 if total_model_p4 > 0 else cumulative_model_p4
-                    res_eef = (eef_model_p4 - eef_data_p4) * eef_weight
-                    return np.concatenate([res_int, res_eef])
-                
-                # Fit with least_squares for combined optimization
-                if have_least_squares:
-                    try:
-                        from lmfit import Minimizer
-                        fitter = Minimizer(residual_p4, params, nan_policy='omit')
-                        pearson4_result = fitter.minimize(method='leastsq', max_nfev=10000)
-                    except Exception:
-                        # Fallback to lmfit's built-in fit
-                        try:
-                            pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
-                        except Exception:
-                            pearson4_result = None
-                else:
-                    try:
-                        pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
-                    except Exception:
-                        pearson4_result = None
+                # Fit with lmfit (simpler approach)
+                try:
+                    pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=5000)
+                    print(f"✓ Pearson4 fit succeeded with {pearson4_result.nfev} function evaluations")
+                except Exception as e_fit:
+                    print(f"⚠ Pearson4 fitting failed: {e_fit}")
+                    pearson4_result = None
                 
                 # Generate Pearson4 diagnostic plot and compute EEF profile
                 if pearson4_result is not None:
@@ -3131,28 +3094,38 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                         outfn_p4 = os.path.join('Figures', 'E2E_fit_pearson4.png')
                         plt.savefig(outfn_p4, dpi=150)
                         plt.close()
+                        print(f"✓ Pearson4 diagnostic plot saved")
                         
                         # Compute EEF profile for Pearson4
+                        dr_arcsec_p4 = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
                         I_fit_model_p4 = pearson4_model.eval(pearson4_result.params, x=r_arcsec)
-                        radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
+                        I_fit_model_p4 = np.maximum(I_fit_model_p4, 1e-20)  # Ensure positive values
+                        radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec_p4
                         total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
-                        if total_fit_energy_p4 > 0:
+                        
+                        if total_fit_energy_p4 > 0 and np.isfinite(total_fit_energy_p4):
                             fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
                             pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
                             pearson4_profile_diam = 2.0 * r_arcsec
+                            # Ensure arrays are finite and have reasonable values
+                            if np.all(np.isfinite(pearson4_profile_pct)) and np.all(np.isfinite(pearson4_profile_diam)):
+                                print(f"✓ Pearson4 EEF profile computed: {len(pearson4_profile_pct)} points, range 0-{pearson4_profile_pct[-1]:.1f}%")
+                            else:
+                                print("⚠ Pearson4 EEF profile has NaN/inf values")
+                                pearson4_profile_pct = None
+                                pearson4_profile_diam = None
+                        else:
+                            print(f"⚠ Pearson4 total energy invalid: {total_fit_energy_p4}")
                         
-                    except Exception as e:
-                        pearson4_result = None
+                    except Exception as e_plot:
+                        print(f"⚠ Pearson4 EEF computation failed: {e_plot}")
                         pearson4_profile_pct = None
                         pearson4_profile_diam = None
-            except ImportError:
-                pearson4_result = None
-                pearson4_profile_pct = None
-                pearson4_profile_diam = None
-            except Exception:
-                pearson4_result = None
-                pearson4_profile_pct = None
-                pearson4_profile_diam = None
+                            
+            except ImportError as e_imp:
+                print(f"⚠ lmfit import failed: {e_imp}")
+            except Exception as e_main:
+                print(f"⚠ Pearson4 fitting exception: {e_main}")
             
             # Export fit parameters to Excel
             try:
