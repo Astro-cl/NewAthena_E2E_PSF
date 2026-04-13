@@ -5,6 +5,7 @@ matplotlib
 scipy
 openpyxl
 numba
+lmfit
 
 # Note about tkinter (GUI dependency)
 # ----------------------------------

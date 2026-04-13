@@ -2853,6 +2853,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     fit_params_available = False
     fit_profile_pct = None
     fit_profile_diam = None
+    pearson4_profile_pct = None
+    pearson4_profile_diam = None
     try:
         from scipy.optimize import curve_fit
         try:
@@ -2961,22 +2963,41 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             def fit_func(r, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x):
                 return beta_pseudo_gaussian(r, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
 
-            try:
-                popt, _ = curve_fit(fit_func, r_fit, I_fit, p0=x0, bounds=(lb, ub), sigma=sigma, maxfev=5000)
-                A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = popt
-            except Exception:
-                if have_least_squares:
-                    def resid_pvoigt(params):
-                        A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x = params
-                        model = beta_pseudo_gaussian(r_fit, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
-                        model = np.maximum(model, floor)
-                        return (model - I_fit) * np.sqrt(weights)
+            # Prepare cumulative EEF reference for the current data
+            dr_arcsec = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
+            radial_energy_data = 2.0 * np.pi * r_fit * I_fit * dr_arcsec
+            cumulative_data = np.cumsum(radial_energy_data)
+            total_data = cumulative_data[-1] if cumulative_data.size else 1.0
+            eef_data = cumulative_data / total_data if total_data > 0 else cumulative_data
+            eef_weight = 20.0
+
+            def resid_pvoigt(params):
+                A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x = params
+                model = beta_pseudo_gaussian(r_fit, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
+                model = np.maximum(model, floor)
+                log_resid = np.log(model) - np.log(I_fit)
+                res_int = log_resid * np.sqrt(weights)
+                cumulative_model = np.cumsum(2.0 * np.pi * r_fit * model * dr_arcsec)
+                total_model = cumulative_model[-1] if cumulative_model.size else 1.0
+                eef_model = cumulative_model / total_model if total_model > 0 else cumulative_model
+                res_eef = (eef_model - eef_data) * eef_weight
+                return np.concatenate([res_int, res_eef])
+
+            if have_least_squares:
+                try:
+                    res = least_squares(resid_pvoigt, x0, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=10000)
+                    A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = res.x.tolist()
+                except Exception:
                     try:
-                        res = least_squares(resid_pvoigt, x0, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=5000)
-                        A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = res.x.tolist()
+                        popt, _ = curve_fit(fit_func, r_fit, I_fit, p0=x0, bounds=(lb, ub), sigma=sigma, maxfev=5000)
+                        A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = popt
                     except Exception:
                         A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = x0
-                else:
+            else:
+                try:
+                    popt, _ = curve_fit(fit_func, r_fit, I_fit, p0=x0, bounds=(lb, ub), sigma=sigma, maxfev=5000)
+                    A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = popt
+                except Exception:
                     A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = x0
 
             # Save aggregated fit diagnostic plot
@@ -2990,8 +3011,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 plt.plot(rplot, Ifit, 'r-', lw=2, label='Modified pseudo-Voigt')
                 plt.xlabel('Radius [arcsec]')
                 plt.ylabel('Mean intensity')
+                plt.yscale('log')
+                if np.any(I_profile > 0):
+                    lower = np.nanmin(I_profile[I_profile > 0])
+                    plt.ylim(bottom=max(lower * 0.1, 1e-12))
                 plt.legend()
-                plt.grid(True)
+                plt.grid(True, which='both', linestyle='--', alpha=0.4)
                 outfn = os.path.join('Figures', 'E2E_fit.png')
                 plt.tight_layout()
                 plt.savefig(outfn, dpi=150)
@@ -3011,6 +3036,172 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             except Exception:
                 fit_profile_pct = None
                 fit_profile_diam = None
+
+            # ========== PEARSON4 FITTING ==========
+            # Fit Pearson4 model using lmfit to also optimize intensity + EEF
+            pearson4_result = None
+            pearson4_profile_pct = None
+            pearson4_profile_diam = None
+            try:
+                from lmfit.models import Pearson4Model
+                from lmfit import Parameters
+                
+                # Create Pearson4 model
+                pearson4_model = Pearson4Model()
+                
+                # Initial guess from pseudo-Voigt peak parameters
+                params = pearson4_model.guess(I_fit, x=r_fit)
+                # Adjust initial values for better convergence
+                params['amplitude'].value = A_fit
+                params['center'].value = Gamma_c_fit * 0.5
+                params['sigma'].value = Gamma_c_fit
+                params['expon'].value = 1.5
+                params['skew'].value = 0.0
+                
+                # Define custom residual that combines intensity and EEF errors
+                dr_arcsec_p4 = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
+                radial_energy_data_p4 = 2.0 * np.pi * r_fit * I_fit * dr_arcsec_p4
+                cumulative_data_p4 = np.cumsum(radial_energy_data_p4)
+                total_data_p4 = cumulative_data_p4[-1] if cumulative_data_p4.size else 1.0
+                eef_data_p4 = cumulative_data_p4 / total_data_p4 if total_data_p4 > 0 else cumulative_data_p4
+                
+                def residual_p4(params):
+                    model = pearson4_model.eval(params=params, x=r_fit)
+                    model = np.maximum(model, floor)
+                    # Intensity residual (log scale)
+                    log_resid = np.log(model) - np.log(I_fit)
+                    res_int = log_resid * np.sqrt(weights)
+                    # EEF residual
+                    cumulative_model_p4 = np.cumsum(2.0 * np.pi * r_fit * model * dr_arcsec_p4)
+                    total_model_p4 = cumulative_model_p4[-1] if cumulative_model_p4.size else 1.0
+                    eef_model_p4 = cumulative_model_p4 / total_model_p4 if total_model_p4 > 0 else cumulative_model_p4
+                    res_eef = (eef_model_p4 - eef_data_p4) * eef_weight
+                    return np.concatenate([res_int, res_eef])
+                
+                # Fit with least_squares for combined optimization
+                if have_least_squares:
+                    try:
+                        from lmfit import Minimizer
+                        fitter = Minimizer(residual_p4, params, nan_policy='omit')
+                        pearson4_result = fitter.minimize(method='leastsq', max_nfev=10000)
+                    except Exception:
+                        # Fallback to lmfit's built-in fit
+                        try:
+                            pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
+                        except Exception:
+                            pearson4_result = None
+                else:
+                    try:
+                        pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
+                    except Exception:
+                        pearson4_result = None
+                
+                # Generate Pearson4 diagnostic plot and compute EEF profile
+                if pearson4_result is not None:
+                    try:
+                        rplot_p4 = np.linspace(0.0, float(r_arcsec.max()), 1000)
+                        Ifit_p4 = pearson4_model.eval(pearson4_result.params, x=rplot_p4)
+                        
+                        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+                        
+                        # Left: intensity fit
+                        axes[0].plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
+                        axes[0].plot(rplot_p4, Ifit_p4, 'b-', lw=2, label='Pearson4')
+                        axes[0].set_xlabel('Radius [arcsec]')
+                        axes[0].set_ylabel('Mean intensity')
+                        axes[0].set_yscale('log')
+                        if np.any(I_profile > 0):
+                            lower = np.nanmin(I_profile[I_profile > 0])
+                            axes[0].set_ylim(bottom=max(lower * 0.1, 1e-12))
+                        axes[0].legend()
+                        axes[0].grid(True, which='both', linestyle='--', alpha=0.4)
+                        axes[0].set_title('Pearson4 Intensity Fit (log scale)')
+                        
+                        # Right: residuals (log scale)
+                        residuals = np.log(Ifit_p4 + floor) - np.log(I_profile + floor)
+                        axes[1].plot(r_fit, residuals[np.searchsorted(rplot_p4, r_fit)], 'ro', ms=4)
+                        axes[1].axhline(0, color='k', linestyle='--', linewidth=1)
+                        axes[1].set_xlabel('Radius [arcsec]')
+                        axes[1].set_ylabel('Log residual')
+                        axes[1].set_yscale('log')
+                        axes[1].grid(True, which='both', linestyle='--', alpha=0.4)
+                        axes[1].set_title('Pearson4 Fit Quality')
+                        
+                        plt.tight_layout()
+                        outfn_p4 = os.path.join('Figures', 'E2E_fit_pearson4.png')
+                        plt.savefig(outfn_p4, dpi=150)
+                        plt.close()
+                        
+                        # Compute EEF profile for Pearson4
+                        I_fit_model_p4 = pearson4_model.eval(pearson4_result.params, x=r_arcsec)
+                        radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
+                        total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
+                        if total_fit_energy_p4 > 0:
+                            fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
+                            pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
+                            pearson4_profile_diam = 2.0 * r_arcsec
+                        
+                    except Exception as e:
+                        pearson4_result = None
+                        pearson4_profile_pct = None
+                        pearson4_profile_diam = None
+            except ImportError:
+                pearson4_result = None
+                pearson4_profile_pct = None
+                pearson4_profile_diam = None
+            except Exception:
+                pearson4_result = None
+                pearson4_profile_pct = None
+                pearson4_profile_diam = None
+            
+            # Export fit parameters to Excel
+            try:
+                fit_export_data = {
+                    'Parameter': [],
+                    'Modified Pseudo-Voigt': [],
+                    'Pearson4': []
+                }
+                
+                # Pseudo-Voigt parameters
+                pv_params = {
+                    'Amplitude (A)': A_fit,
+                    'Core width (Gamma_c) [arcsec]': Gamma_c_fit,
+                    'Wing width (Gamma_w) [arcsec]': Gamma_w_fit,
+                    'Mixing ratio (eta)': eta_fit,
+                    'Wing exponent (beta)': beta_fit,
+                    'Wing scale (scalar)': scalar_fit,
+                }
+                
+                for param_name, value in pv_params.items():
+                    fit_export_data['Parameter'].append(param_name)
+                    fit_export_data['Modified Pseudo-Voigt'].append(value)
+                    fit_export_data['Pearson4'].append(None)
+                
+                # Pearson4 parameters
+                if pearson4_result is not None:
+                    p4_params = {
+                        'Amplitude': pearson4_result.params['amplitude'].value,
+                        'Center [arcsec]': pearson4_result.params['center'].value,
+                        'Sigma [arcsec]': pearson4_result.params['sigma'].value,
+                        'Exponent (m)': pearson4_result.params['expon'].value,
+                        'Skewness (nu)': pearson4_result.params['skew'].value,
+                    }
+                    
+                    # Add Pearson4-specific parameters
+                    for param_name, value in p4_params.items():
+                        if param_name not in fit_export_data['Parameter']:
+                            fit_export_data['Parameter'].append(param_name)
+                            fit_export_data['Modified Pseudo-Voigt'].append(None)
+                        idx = fit_export_data['Parameter'].index(param_name)
+                        fit_export_data['Pearson4'][idx] = value
+                
+                # Export to CSV
+                fit_df = pd.DataFrame(fit_export_data)
+                export_fit_path = os.path.join('Figures', 'fit_parameters.csv')
+                fit_df.to_csv(export_fit_path, index=False)
+                
+            except Exception:
+                pass
 
         else:
             pass
@@ -3587,6 +3778,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     if fit_profile_pct is not None and fit_profile_diam is not None:
         fit_profile_pct_95, fit_profile_diam_95 = limit_percentile(fit_profile_pct, fit_profile_diam)
         plt.plot(fit_profile_pct_95, fit_profile_diam_95, label='Pseudo-Voigt fit', color='red', linestyle='--', linewidth=1.8)
+    if pearson4_profile_pct is not None and pearson4_profile_diam is not None:
+        pearson4_profile_pct_95, pearson4_profile_diam_95 = limit_percentile(pearson4_profile_pct, pearson4_profile_diam)
+        plt.plot(pearson4_profile_pct_95, pearson4_profile_diam_95, label='Pearson4 fit', color='orange', linestyle=':', linewidth=2.0)
     
     # Add optimized curve if provided
     if df_optimized is not None and opt_frac_profile is not None:
