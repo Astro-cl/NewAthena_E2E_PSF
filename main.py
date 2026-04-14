@@ -17,6 +17,12 @@ import matplotlib
 import matplotlib.pyplot as plt  # For plotting
 import matplotlib.gridspec as gridspec
 import os
+import subprocess
+import math
+import shutil
+import time
+import zipfile
+from pathlib import Path
 from scipy.optimize import curve_fit
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
@@ -6814,6 +6820,7 @@ if __name__ == '__main__':
     # Removed --input-pickle support; keep input-csv for CSV single-sheet paths
     parser.add_argument('--input-csv', default=None, help=argparse.SUPPRESS)
     parser.add_argument('--export-package', dest='export_package', action='store_true', default=False, help='Create a timestamped folder with input, FITS, Excel and PNG artifacts')
+    parser.add_argument('--batch-combinations', dest='batch_combinations', default=None, help='Path to Excel file containing combinations (one config per row). If provided the script will run each configuration against the input file and exit.')
     args = parser.parse_args()
 
     # Expose parsed args to helper functions that inspect __main__.args
@@ -6867,6 +6874,144 @@ if __name__ == '__main__':
             pass
 
     # Load data from Excel
+    # Batch mode: process combinations file and exit
+    if getattr(args, 'batch_combinations', None):
+        comb_path = args.batch_combinations
+        try:
+            combos = pd.read_excel(comb_path, engine='openpyxl')
+        except Exception as e:
+            print(f"Failed to read combinations file {comb_path}: {e}")
+            sys.exit(2)
+
+        # Iterate rows: expect columns as follows (by position):
+        # A: (ignored), B: config name (prefix), C: off-axis, D: energy, E: defocus
+        for rid, crow in combos.iterrows():
+            try:
+                prefix = str(crow.iat[1]).strip()
+            except Exception:
+                print(f"Skipping row {rid}: cannot read prefix in column B")
+                continue
+            try:
+                offaxis_val = float(crow.iat[2]) if not pd.isna(crow.iat[2]) else 0.0
+            except Exception:
+                offaxis_val = 0.0
+            try:
+                energy_val = float(crow.iat[3]) if not pd.isna(crow.iat[3]) else 0.0
+            except Exception:
+                energy_val = 0.0
+            try:
+                defocus_val = float(crow.iat[4]) if not pd.isna(crow.iat[4]) else 0.0
+            except Exception:
+                defocus_val = 0.0
+
+            print(f"Processing configuration '{prefix}': offaxis={offaxis_val}, energy={energy_val}, defocus={defocus_val}")
+
+            # Prepare new input workbook path
+            src_path = args.file
+            src_dir = os.path.dirname(src_path) or '.'
+            src_basename = os.path.basename(src_path)
+            new_basename = f"{prefix}_{src_basename}"
+            new_path = os.path.join(src_dir, new_basename)
+            try:
+                shutil.copy2(src_path, new_path)
+            except Exception as e:
+                print(f"Failed to copy input workbook to {new_path}: {e}")
+                continue
+
+            # Modify the copy: adjust Thermal sheet d_therm_rotx/roty and d_therm_z,
+            # and set energy in C2 of vignetting sheets.
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(new_path)
+
+                # Thermal adjustments
+                if 'Thermal' in wb.sheetnames:
+                    ws = wb['Thermal']
+                    # Read header row (assume first row contains headers)
+                    headers = [str(c.value).strip() if c.value is not None else '' for c in ws[1]]
+                    # Find matching columns (case-insensitive contains)
+                    col_rotx = None
+                    col_roty = None
+                    col_z = None
+                    for idx, h in enumerate(headers):
+                        hn = h.lower()
+                        if 'd_therm_rotx' in hn.replace(' ', '') or 'd_therm_rotx' in hn:
+                            col_rotx = idx + 1
+                        if 'd_therm_roty' in hn.replace(' ', '') or 'd_therm_roty' in hn:
+                            col_roty = idx + 1
+                        if 'd_therm_z' in hn.replace(' ', '') or 'd_therm_z' in hn:
+                            col_z = idx + 1
+
+                    # Compute deltas
+                    # offaxis in input sheet is in arcminutes; convert to arcseconds
+                    offaxis_arcsec = float(offaxis_val) * 60.0
+                    # split equally between rot x/y by dividing by sqrt(2)
+                    delta_rot = offaxis_arcsec / math.sqrt(2.0)
+                    # defocus in input sheet is in millimetres; convert to microns
+                    defocus_um = float(defocus_val) * 1e3
+
+                    for r in range(2, ws.max_row + 1):
+                        if col_rotx:
+                            cell = ws.cell(row=r, column=col_rotx)
+                            try:
+                                cell_val = float(cell.value) if cell.value is not None else 0.0
+                            except Exception:
+                                cell_val = 0.0
+                            cell.value = cell_val + delta_rot
+                        if col_roty:
+                            cell = ws.cell(row=r, column=col_roty)
+                            try:
+                                cell_val = float(cell.value) if cell.value is not None else 0.0
+                            except Exception:
+                                cell_val = 0.0
+                            cell.value = cell_val + delta_rot
+                        if col_z:
+                            cell = ws.cell(row=r, column=col_z)
+                            try:
+                                cell_val = float(cell.value) if cell.value is not None else 0.0
+                            except Exception:
+                                cell_val = 0.0
+                            cell.value = cell_val + defocus_um
+
+                # Vignetting energy in C2 for both rotrad and rotazi
+                for sname in ('Vignetting rotrad', 'Vignetting rotazi'):
+                    if sname in wb.sheetnames:
+                        ws_v = wb[sname]
+                        try:
+                            ws_v.cell(row=2, column=3).value = float(energy_val)
+                        except Exception:
+                            pass
+
+                wb.save(new_path)
+            except Exception as e:
+                print(f"Failed to modify workbook {new_path}: {e}")
+                continue
+
+            # Run this script on the modified workbook with --export-package
+            try:
+                cmd = [sys.executable, os.path.abspath(__file__), '--file', new_path, '--export-package']
+                print('Running:', ' '.join(cmd))
+                subprocess.check_call(cmd)
+            except Exception as e:
+                print(f"Failed to run export for {prefix}: {e}")
+
+            # Find latest export directory and zip it with prefix appended to the input filename
+            try:
+                exports_root = os.path.join(os.getcwd(), 'Exports')
+                if os.path.isdir(exports_root):
+                    subdirs = [os.path.join(exports_root, d) for d in os.listdir(exports_root) if os.path.isdir(os.path.join(exports_root, d))]
+                    if subdirs:
+                        latest_dir = max(subdirs, key=os.path.getmtime)
+                        zip_target = os.path.join(exports_root, f"{prefix}_{src_basename}.zip")
+                        # create zip
+                        shutil.make_archive(os.path.splitext(zip_target)[0], 'zip', latest_dir)
+                        print(f"Created package: {zip_target}")
+            except Exception as e:
+                print(f"Failed to zip export for {prefix}: {e}")
+
+        # Completed batch processing
+        sys.exit(0)
+
     df = load_gaussians_from_excel(args.file, args.sheet)
     plot_title_suffix = ""
     df_optimized = None

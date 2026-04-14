@@ -52,3 +52,9 @@ Distributions/TestDistribution_placed.xlsx
 
 # Ignore generated sensitivity input workbooks and sampling details
 sensitivity/input/
+
+# Ignore common data and image file types
+*.csv
+*.fits
+*.xlsx
+*.png
