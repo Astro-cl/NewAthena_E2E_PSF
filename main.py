@@ -7037,6 +7037,9 @@ if __name__ == '__main__':
                 # Build timestamp and safe stem for zip naming (no .xlsx)
                 src_stem = os.path.splitext(src_basename)[0]
                 ts = time.strftime('%Y%m%d_%H%M%S')
+                # Create a per-batch Export_<ts> folder under Exports to hold all generated zips
+                export_batch_dir = os.path.join(exports_root, f"Export_{ts}")
+                os.makedirs(export_batch_dir, exist_ok=True)
                 if new_dirs:
                     # Prefer the newest created package folder
                     latest_dir = max(new_dirs, key=lambda d: os.path.getmtime(os.path.join(exports_root, d)))
@@ -7075,12 +7078,14 @@ if __name__ == '__main__':
                         _rename_in_pkg(['E2E_aggregated_*.fits', 'E2E_aggregated*.fits'], 'E2E_PSF.fits')
                         # 5) Rename EEF & fit params workbook
                         _rename_in_pkg(['E2E_EEF_and_fitparams_*.xlsx', 'E2E_EEF_and_fitparams*.xlsx', 'E2E_EEF_and_fitparams_*.xls'], 'EEF_fittingparams.xlsx')
+                        # 6) Rename Encircled Energy plot to standardized EEF.png
+                        _rename_in_pkg(['Encircled_Energy_*.png', 'Encircled_Energy*.png', 'Encircled_Energy_*.PNG'], 'EEF.png')
                     except Exception as e:
                         print(f"Warning: renaming artifacts failed: {e}")
 
                     # Create zip with controlled ordering: input, Combined_E2E_EEF.png,
                     # E2E_PSF.png, E2E_PSF.fits, EEF_fittingparams.xlsx, then rest.
-                    zip_base = os.path.join(exports_root, f"{prefix}_{src_stem}_{ts}")
+                    zip_base = os.path.join(export_batch_dir, f"{prefix}_{src_stem}_{ts}")
                     zip_target = f"{zip_base}.zip"
                     try:
                         with zipfile.ZipFile(zip_target, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
@@ -7104,6 +7109,10 @@ if __name__ == '__main__':
                                 ordered.append(p)
                             # 5) EEF_fittingparams.xlsx
                             p = os.path.join(pkg_path, 'EEF_fittingparams.xlsx')
+                            if os.path.exists(p):
+                                ordered.append(p)
+                            # 6) EEF.png (renamed Encircled Energy)
+                            p = os.path.join(pkg_path, 'EEF.png')
                             if os.path.exists(p):
                                 ordered.append(p)
 
@@ -7134,7 +7143,7 @@ if __name__ == '__main__':
                         print(f"Failed to create package archive: {e}")
                 else:
                     # Fallback: create a zip containing just the modified workbook
-                    zip_base = os.path.join(exports_root, f"{prefix}_{src_stem}_{ts}")
+                    zip_base = os.path.join(export_batch_dir, f"{prefix}_{src_stem}_{ts}")
                     zip_target = f"{zip_base}.zip"
                     with zipfile.ZipFile(zip_target, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
                         zf.write(new_path, arcname=os.path.basename(new_path))
