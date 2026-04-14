@@ -42,8 +42,8 @@ def main():
             'theta_degrees': row['theta_degrees'],
             'weight': row['weight'],
             'distribution': row['distribution'],
-            'alpha_azi': row['alpha_azi'],
-            'alpha_rad': row['alpha_rad'],
+            'alpha_azi': row.get('alpha_azi', 0.5),
+            'alpha_rad': row.get('alpha_rad', 0.5),
         }
     ])
     # Set grid resolution

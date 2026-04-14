@@ -8,7 +8,6 @@ print("Exploring the lookup table range ($S$24:$AA$38):")
 print("\n  Columns S-AA, Rows 24-38:")
 
 # S is column 19, AA is column 27 in 1-based indexing (openpyxl)
-# Actually, let me count: A=1, B=2, ..., S=19, T=20, ..., Z=26, AA=27
 for r in range(24, 39):
     row_data = []
     for c in range(19, 28):  # S to AA
