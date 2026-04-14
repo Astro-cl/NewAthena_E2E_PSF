@@ -6995,19 +6995,17 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Failed to run export for {prefix}: {e}")
 
-            # Find latest export directory and zip it with prefix appended to the input filename
+            # Create an Exports zip for this configuration containing the modified workbook.
             try:
                 exports_root = os.path.join(os.getcwd(), 'Exports')
-                if os.path.isdir(exports_root):
-                    subdirs = [os.path.join(exports_root, d) for d in os.listdir(exports_root) if os.path.isdir(os.path.join(exports_root, d))]
-                    if subdirs:
-                        latest_dir = max(subdirs, key=os.path.getmtime)
-                        zip_target = os.path.join(exports_root, f"{prefix}_{src_basename}.zip")
-                        # create zip
-                        shutil.make_archive(os.path.splitext(zip_target)[0], 'zip', latest_dir)
-                        print(f"Created package: {zip_target}")
+                os.makedirs(exports_root, exist_ok=True)
+                zip_target = os.path.join(exports_root, f"{prefix}_{src_basename}.zip")
+                # Create a zip containing the modified workbook file.
+                with zipfile.ZipFile(zip_target, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(new_path, arcname=os.path.basename(new_path))
+                print(f"Created package: {zip_target}")
             except Exception as e:
-                print(f"Failed to zip export for {prefix}: {e}")
+                print(f"Failed to create package for {prefix}: {e}")
 
         # Completed batch processing
         sys.exit(0)

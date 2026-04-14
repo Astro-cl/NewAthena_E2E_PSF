@@ -35,6 +35,18 @@ def test_batch_combinations_creates_zips(tmp_path):
 
     wb.save(sample_input)
 
+    # Add a minimal MM_PSF sheet and MM configuration so main.py can load the workbook
+    ws4 = wb.create_sheet('MM_PSF')
+    ws4.append(['MM #', 'm_rad [arcsec]', 'm_azi [arcsec]', 'sigma_rad [arcsec]', 'sigma_azi [arcsec]'])
+    ws4.append([1, 0.0, 0.0, 1.0, 1.0])
+
+    ws_cfg = wb.create_sheet('MM configuration')
+    ws_cfg.append(['MM #', 'x_MM [m]', 'r_MM [m]'])
+    ws_cfg.append([1, 0.0, 0.0])
+    # Add A_eff sheet with base A_eff for MM #1
+    ws_a = wb.create_sheet('A_eff')
+    ws_a.append([1, 1.0])
+
     # Create combinations Excel (columns: A,B,C,D,E -> we use B-E)
     combos = pd.DataFrame(
         [
