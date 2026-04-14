@@ -6830,6 +6830,21 @@ if __name__ == '__main__':
     except Exception:
         pass
 
+    # If running in batch/export mode, disable interactive plotting to avoid
+    # blocking on GUI windows. Force non-interactive mode and noop plt.show().
+    try:
+        if getattr(args, 'export_package', False) or getattr(args, 'batch_combinations', None):
+            try:
+                plt.ioff()
+            except Exception:
+                pass
+            try:
+                plt.show = lambda *a, **k: None
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # If an explicit input CSV path was provided, prefer it as the input file
     if getattr(args, 'input_csv', None):
         args.file = args.input_csv
