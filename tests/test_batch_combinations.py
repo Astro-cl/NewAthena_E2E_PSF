@@ -70,12 +70,9 @@ def test_batch_combinations_creates_zips(tmp_path):
 
     # Check that a zip was created for each config with expected basename
     for prefix in ['cfgA', 'cfgB', 'cfgC']:
-        # New naming: <prefix>_<input_stem>_<YYYYMMDD_HHMMSS>.zip
-        matches = list(exports.glob(f"{prefix}_{sample_input.stem}_*.zip"))
-        assert matches, f"Expected package not found for prefix {prefix} (pattern {prefix}_{sample_input.stem}_*.zip)"
+        # New naming: files are placed under Exports/Export_<input_stem>_<ts>/
+        # Search recursively for the expected ZIPs
+        matches = list(exports.glob(f"**/{prefix}_{sample_input.stem}_*.zip"))
+        assert matches, f"Expected package not found for prefix {prefix} (pattern **/{prefix}_{sample_input.stem}_*.zip)"
 
-    # Cleanup: remove Exports to avoid polluting workspace (tmp_path is ephemeral anyway)
-    try:
-        shutil.rmtree(exports)
-    except Exception:
-        pass
+    # NOTE: do not remove Exports here so test artifacts can be inspected manually

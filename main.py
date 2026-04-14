@@ -6901,6 +6901,16 @@ if __name__ == '__main__':
 
         # Iterate rows: expect columns as follows (by position):
         # A: (ignored), B: config name (prefix), C: off-axis, D: energy, E: defocus
+        # Prepare a single per-batch Export folder named Export_<input_stem>_<ts>
+        exports_root = os.path.join(os.getcwd(), 'Exports')
+        os.makedirs(exports_root, exist_ok=True)
+        src_path = args.file
+        src_basename = os.path.basename(src_path)
+        src_stem = os.path.splitext(src_basename)[0]
+        batch_ts = time.strftime('%Y%m%d_%H%M%S')
+        export_batch_dir = os.path.join(exports_root, f"Export_{src_stem}_{batch_ts}")
+        os.makedirs(export_batch_dir, exist_ok=True)
+
         for rid, crow in combos.iterrows():
             try:
                 prefix = str(crow.iat[1]).strip()
@@ -7021,7 +7031,6 @@ if __name__ == '__main__':
                 print('Running:', ' '.join(cmd))
 
                 # Record existing Exports subfolders so we can detect a new package
-                exports_root = os.path.join(os.getcwd(), 'Exports')
                 existing_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
 
                 subprocess.check_call(cmd)
@@ -7035,11 +7044,7 @@ if __name__ == '__main__':
                 all_dirs = [d for d in os.listdir(exports_root) if os.path.isdir(os.path.join(exports_root, d))]
                 new_dirs = [d for d in all_dirs if d not in existing_dirs]
                 # Build timestamp and safe stem for zip naming (no .xlsx)
-                src_stem = os.path.splitext(src_basename)[0]
                 ts = time.strftime('%Y%m%d_%H%M%S')
-                # Create a per-batch Export_<ts> folder under Exports to hold all generated zips
-                export_batch_dir = os.path.join(exports_root, f"Export_{ts}")
-                os.makedirs(export_batch_dir, exist_ok=True)
                 if new_dirs:
                     # Prefer the newest created package folder
                     latest_dir = max(new_dirs, key=lambda d: os.path.getmtime(os.path.join(exports_root, d)))
