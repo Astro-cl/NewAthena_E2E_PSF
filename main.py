@@ -507,6 +507,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     }
         except Exception:
             pass
+
     
 
     # Load alignment deltas (prefer Position #)
@@ -2910,6 +2911,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             norm = (1.0-eta) + eta*scalar
             return A * (mix / norm)
 
+        # King profile often used for PSFs: I(r) = I0 * (1 + (r/rc)^2)^(-alpha) + b
+        def king_profile(r, I0, rc, alpha, b):
+            return I0 * (1.0 + (r/np.maximum(rc, 1e-12))**2.0)**(-np.maximum(alpha, 0.01)) + b
+
         def core_weights(r, r0):
             return np.exp(-(r/r0)**2)
 
@@ -2917,12 +2922,20 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         mask = np.isfinite(I_profile) & (I_profile > 0)
         r_fit = r_arcsec[mask]
         I_fit = I_profile[mask]
+        try:
+            print(f"r_fit size={r_fit.size}, I_fit finite count={np.count_nonzero(np.isfinite(I_fit))}")
+        except Exception:
+            pass
 
         fit_params_available = False
         fit_profile_pct = None
         fit_profile_diam = None
 
         if r_fit.size >= 7:
+            try:
+                print("Entering radial-fit block (r_fit.size >= 7)")
+            except Exception:
+                pass
             # STEP 1: core-only Gaussian fit for robust initial Gamma estimate
             A0 = float(np.nanmax(I_fit))
             try:
@@ -2969,24 +2982,53 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             cumulative_data = np.cumsum(radial_energy_data)
             total_data = cumulative_data[-1] if cumulative_data.size else 1.0
             eef_data = cumulative_data / total_data if total_data > 0 else cumulative_data
-            eef_weight = 20.0
+            # Give the EEF objective most weight but keep a small intensity
+            # residual component to stabilise the core fit and prevent large
+            # deviations at intermediate radii.
+            eef_weight = 12.0
+            intensity_weight_scale = 0.25
 
             def resid_pvoigt(params):
                 A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x = params
                 model = beta_pseudo_gaussian(r_fit, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
                 model = np.maximum(model, floor)
+                # intensity residual (log-space), scaled down
                 log_resid = np.log(model) - np.log(I_fit)
-                res_int = log_resid * np.sqrt(weights)
+                res_int = (log_resid * np.sqrt(weights)) * intensity_weight_scale
+                # EEF residual (fraction)
                 cumulative_model = np.cumsum(2.0 * np.pi * r_fit * model * dr_arcsec)
                 total_model = cumulative_model[-1] if cumulative_model.size else 1.0
                 eef_model = cumulative_model / total_model if total_model > 0 else cumulative_model
                 res_eef = (eef_model - eef_data) * eef_weight
-                return np.concatenate([res_int, res_eef])
+                # Combined residuals: EEF first (dominant), then intensity
+                return np.concatenate([res_eef, res_int])
 
+            # Use multi-start least_squares for robustness
             if have_least_squares:
                 try:
-                    res = least_squares(resid_pvoigt, x0, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=10000)
-                    A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = res.x.tolist()
+                    best_score = np.inf
+                    best_x = np.array(x0)
+                    rng = np.random.default_rng(12345)
+                    last_res = None
+                    for attempt in range(6):
+                        pert = np.array(x0) * (1.0 + rng.normal(0.0, 0.12, size=len(x0)))
+                        pert = np.maximum(lb, np.minimum(ub, pert))
+                        try:
+                            res = least_squares(resid_pvoigt, pert, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=15000)
+                        except Exception:
+                            res = None
+                        if res is not None and hasattr(res, 'fun'):
+                            score = float(np.sqrt(np.mean(res.fun**2)))
+                            if np.isfinite(score) and score < best_score:
+                                best_score = score
+                                best_x = res.x
+                                last_res = res
+                    if last_res is not None:
+                        A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = best_x.tolist()
+                    else:
+                        # fallback to curve_fit if LS failed
+                        popt, _ = curve_fit(fit_func, r_fit, I_fit, p0=x0, bounds=(lb, ub), sigma=sigma, maxfev=5000)
+                        A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = popt
                 except Exception:
                     try:
                         popt, _ = curve_fit(fit_func, r_fit, I_fit, p0=x0, bounds=(lb, ub), sigma=sigma, maxfev=5000)
@@ -3002,25 +3044,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
 
             # Save aggregated fit diagnostic plot
             fit_params_available = True
+            # Standalone PV diagnostic figure generation disabled (user request).
             try:
-                os.makedirs('Figures', exist_ok=True)
-                rplot = np.linspace(0.0, float(r_arcsec.max()), 1000)
-                Ifit = beta_pseudo_gaussian(rplot, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
-                plt.figure(figsize=(6,4))
-                plt.plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
-                plt.plot(rplot, Ifit, 'r-', lw=2, label='Modified pseudo-Voigt')
-                plt.xlabel('Radius [arcsec]')
-                plt.ylabel('Mean intensity')
-                plt.yscale('log')
-                if np.any(I_profile > 0):
-                    lower = np.nanmin(I_profile[I_profile > 0])
-                    plt.ylim(bottom=max(lower * 0.1, 1e-12))
-                plt.legend()
-                plt.grid(True, which='both', linestyle='--', alpha=0.4)
-                outfn = os.path.join('Figures', 'E2E_fit.png')
-                plt.tight_layout()
-                plt.savefig(outfn, dpi=150)
-                plt.close()
+                # Previously saved a standalone E2E_fit.png here; intentionally skipping.
+                pass
             except Exception:
                 pass
 
@@ -3097,54 +3124,60 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                         pearson4_result = None
                 
                 # Generate Pearson4 diagnostic plot and compute EEF profile
-                if pearson4_result is not None:
+                try:
+                    # Use fitted params when available, otherwise fall back to initial guess
+                    pearson4_used_params_final = pearson4_result.params if (pearson4_result is not None and hasattr(pearson4_result, 'params')) else params
+                    rplot_p4 = np.linspace(0.0, float(r_arcsec.max()), 1000)
+                    Ifit_p4 = pearson4_model.eval(pearson4_used_params_final, x=rplot_p4)
+
+                    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+                    # Left: intensity fit
+                    axes[0].plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
+                    axes[0].plot(rplot_p4, Ifit_p4, 'b-', lw=2, label='Pearson4')
+                    axes[0].set_xlabel('Radius [arcsec]')
+                    axes[0].set_ylabel('Mean intensity')
+                    axes[0].set_yscale('log')
+                    if np.any(I_profile > 0):
+                        lower = np.nanmin(I_profile[I_profile > 0])
+                        axes[0].set_ylim(bottom=max(lower * 0.1, 1e-12))
+                    axes[0].legend()
+                    axes[0].grid(True, which='both', linestyle='--', alpha=0.4)
+                    axes[0].set_title('Pearson4 Intensity Fit (log scale)')
+
+                    # Right: residuals (log residuals evaluated on r_fit)
+                    Ifit_p4_rfit = pearson4_model.eval(pearson4_used_params_final, x=r_fit)
+                    residuals = np.log(Ifit_p4_rfit + floor) - np.log(I_fit + floor)
+                    axes[1].plot(r_fit, residuals, 'ro', ms=4)
+                    axes[1].axhline(0, color='k', linestyle='--', linewidth=1)
+                    axes[1].set_xlabel('Radius [arcsec]')
+                    axes[1].set_ylabel('Log residual')
+                    axes[1].grid(True, which='both', linestyle='--', alpha=0.4)
+                    axes[1].set_title('Pearson4 Fit Quality')
+
+                    plt.tight_layout()
+                    # Do not save the standalone Pearson4 diagnostic figure (user request)
                     try:
-                        rplot_p4 = np.linspace(0.0, float(r_arcsec.max()), 1000)
-                        Ifit_p4 = pearson4_model.eval(pearson4_result.params, x=rplot_p4)
-                        
-                        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-                        
-                        # Left: intensity fit
-                        axes[0].plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
-                        axes[0].plot(rplot_p4, Ifit_p4, 'b-', lw=2, label='Pearson4')
-                        axes[0].set_xlabel('Radius [arcsec]')
-                        axes[0].set_ylabel('Mean intensity')
-                        axes[0].set_yscale('log')
-                        if np.any(I_profile > 0):
-                            lower = np.nanmin(I_profile[I_profile > 0])
-                            axes[0].set_ylim(bottom=max(lower * 0.1, 1e-12))
-                        axes[0].legend()
-                        axes[0].grid(True, which='both', linestyle='--', alpha=0.4)
-                        axes[0].set_title('Pearson4 Intensity Fit (log scale)')
-                        
-                        # Right: residuals (log scale)
-                        residuals = np.log(Ifit_p4 + floor) - np.log(I_profile + floor)
-                        axes[1].plot(r_fit, residuals[np.searchsorted(rplot_p4, r_fit)], 'ro', ms=4)
-                        axes[1].axhline(0, color='k', linestyle='--', linewidth=1)
-                        axes[1].set_xlabel('Radius [arcsec]')
-                        axes[1].set_ylabel('Log residual')
-                        axes[1].set_yscale('log')
-                        axes[1].grid(True, which='both', linestyle='--', alpha=0.4)
-                        axes[1].set_title('Pearson4 Fit Quality')
-                        
-                        plt.tight_layout()
-                        outfn_p4 = os.path.join('Figures', 'E2E_fit_pearson4.png')
-                        plt.savefig(outfn_p4, dpi=150)
-                        plt.close()
-                        
-                        # Compute EEF profile for Pearson4
-                        I_fit_model_p4 = pearson4_model.eval(pearson4_result.params, x=r_arcsec)
-                        radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
-                        total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
-                        if total_fit_energy_p4 > 0:
-                            fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
-                            pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
-                            pearson4_profile_diam = 2.0 * r_arcsec
-                        
-                    except Exception as e:
-                        pearson4_result = None
+                        pass
+                    except Exception:
+                        pass
+                    plt.close()
+
+                    # Compute EEF profile for Pearson4 using the chosen params
+                    I_fit_model_p4 = pearson4_model.eval(pearson4_used_params_final, x=r_arcsec)
+                    I_fit_model_p4 = np.maximum(I_fit_model_p4, 0.0)
+                    radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
+                    total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
+                    if total_fit_energy_p4 > 0 and np.isfinite(total_fit_energy_p4):
+                        fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
+                        pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
+                        pearson4_profile_diam = 2.0 * r_arcsec
+                    else:
                         pearson4_profile_pct = None
                         pearson4_profile_diam = None
+                except Exception as e:
+                    pearson4_profile_pct = None
+                    pearson4_profile_diam = None
             except ImportError:
                 pearson4_result = None
                 pearson4_profile_pct = None
@@ -3154,12 +3187,616 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 pearson4_profile_pct = None
                 pearson4_profile_diam = None
             
+            # Create merged diagnostic: intensity curves + residuals, then export fit parameters
+            # Disabled by default to avoid creating a second figure window.
+            if False:
+                os.makedirs('Figures', exist_ok=True)
+                # Define plotting grid
+                rplot = np.linspace(0.0, float(r_arcsec.max()), 1000)
+                # PV model on rplot
+                Ifit_pv_plot = beta_pseudo_gaussian(rplot, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+                # Pearson4 model params: prefer fit result params, fall back to params
+                try:
+                    p4_params_plot = pearson4_result.params if (pearson4_result is not None and hasattr(pearson4_result, 'params')) else (params if 'params' in locals() else None)
+                except Exception:
+                    p4_params_plot = (params if 'params' in locals() else None)
+                Ifit_p4_plot = None
+                if p4_params_plot is not None:
+                    try:
+                        Ifit_p4_plot = pearson4_model.eval(p4_params_plot, x=rplot)
+                    except Exception:
+                        Ifit_p4_plot = None
+
+                # --- King profile fitting (EEF-only objective) ---
+                Ifit_king_plot = None
+                king_profile_pct = None
+                king_profile_diam = None
+                try:
+                    # initial guesses
+                    I0_0 = float(np.nanmax(I_fit)) if I_fit.size else 1.0
+                    # Use pseudo-Voigt core width as a better initial guess for King core size when available
+                    try:
+                        rc_guess = float(Gamma_c_fit)
+                    except Exception:
+                        rc_guess = float(np.median(r_fit)) if r_fit.size else 1.0
+                    rc_0 = max(0.5 * rc_guess, 1e-3)
+                    alpha_0 = 2.0
+                    b0 = float(np.nanmin(I_fit)) if np.any(np.isfinite(I_fit)) else 0.0
+                    x0k = [I0_0, rc_0, alpha_0, b0]
+                    # Constrain I0 to be at least the noise floor and limit background b using data percentiles
+                    I0_lb = float(floor)
+                    try:
+                        p25 = float(np.nanpercentile(I_fit, 25)) if np.any(np.isfinite(I_fit)) else None
+                        p50 = float(np.nanmedian(I_fit)) if np.any(np.isfinite(I_fit)) else None
+                    except Exception:
+                        p25, p50 = None, None
+                    if p25 is not None and np.isfinite(p25):
+                        b_ub = max(p25 * 2.0, p50 if (p50 is not None and np.isfinite(p50)) else p25 * 2.0)
+                    else:
+                        b_ub = max(float(floor) * 100.0, 1.0)
+                    # Tighten King parameter bounds to avoid degenerate long tails
+                    lbk = [I0_lb, 1e-3, 1.0, 0.0]  # enforce alpha >= 1.0
+                    # limit rc to a reasonable fraction of the sampled radius and cap it
+                    rc_cap = float(min(r_arcsec.max() * 0.5 if r_arcsec.size else 10.0, 50.0))
+                    ubk = [np.inf, rc_cap, 8.0, float(b_ub)]
+
+                    def resid_king(vec):
+                        try:
+                            I0_k, rc_k, alpha_k, b_k = vec
+                            model_vals = king_profile(r_arcsec, I0_k, rc_k, alpha_k, b_k)
+                            model_vals = np.maximum(model_vals, 0.0)
+                            dr = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size>1 else 1.0
+                            radial = 2.0 * np.pi * r_arcsec * model_vals * dr
+                            tot = np.sum(radial)
+                            if tot <= 0 or not np.isfinite(tot):
+                                return np.ones_like(eef_data) * 1e6
+                            model_eef_pct = 100.0 * np.cumsum(radial) / tot
+                            from numpy import interp
+                            # use eef_data (computed on r_fit) as the reference EEF values at r_fit (fractions 0..1)
+                            ref_at_r = eef_data
+                            # convert model EEF percent -> fraction before comparing
+                            model_at_ref = interp(r_fit, r_arcsec, model_eef_pct) / 100.0
+                            # scale by the eef weight used elsewhere so residuals have comparable magnitude
+                            return (model_at_ref - ref_at_r) * eef_weight
+                        except Exception:
+                            return np.ones_like(eef_data) * 1e6
+
+                    # run King fit if we have the reference EEF computed on r_fit (eef_data)
+                    if 'eef_data' in locals() and eef_data is not None:
+                        if have_least_squares:
+                            try:
+                                best_score = np.inf
+                                best_vec = np.array(x0k)
+                                rng = np.random.default_rng(1234)
+                                try:
+                                    print(f"King fit: initial x0k={x0k}, lbk={lbk}, ubk={ubk}")
+                                except Exception:
+                                    pass
+                                last_resk = None
+                                for attempt in range(6):
+                                    pert = np.array(x0k) * (1.0 + rng.normal(0.0, 0.12, size=4))
+                                    pert = np.maximum(lbk, np.minimum(ubk, pert))
+                                    last_resk = least_squares(resid_king, pert, bounds=(lbk, ubk), loss='soft_l1', f_scale=1.0, max_nfev=20000)
+                                    score = float(np.sqrt(np.mean((last_resk.fun)**2))) if hasattr(last_resk, 'fun') else np.inf
+                                    try:
+                                        print(f"  attempt {attempt}: start={pert}, score={score}, success={getattr(last_resk,'success',None)}")
+                                    except Exception:
+                                        pass
+                                    if np.isfinite(score) and score < best_score:
+                                        best_score = score
+                                        best_vec = last_resk.x
+                                try:
+                                    print(f"King fit chosen best_score={best_score}, best_vec={best_vec}")
+                                except Exception:
+                                    pass
+                                I0_k, rc_k, alpha_k, b_k = best_vec.tolist()
+                            except Exception:
+                                I0_k, rc_k, alpha_k, b_k = x0k
+                        else:
+                            I0_k, rc_k, alpha_k, b_k = x0k
+
+                        # compute king model and EEF
+                        try:
+                            try:
+                                print(f"Computing King model with params: I0={I0_k}, rc={rc_k}, alpha={alpha_k}, b={b_k}")
+                            except Exception:
+                                pass
+                            Ifit_king_plot = king_profile(rplot, I0_k, rc_k, alpha_k, b_k)
+                            vals_k = king_profile(r_arcsec, I0_k, rc_k, alpha_k, b_k)
+                            dr = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size>1 else 1.0
+                            radial_k = 2.0 * np.pi * r_arcsec * vals_k * dr
+                            totk = np.sum(radial_k)
+                            try:
+                                print(f"  King totk={totk}")
+                            except Exception:
+                                pass
+                            if totk > 0 and np.isfinite(totk):
+                                cumk = np.cumsum(radial_k)
+                                king_profile_pct = 100.0 * cumk / totk
+                                king_profile_diam = 2.0 * r_arcsec
+                                try:
+                                    print(f"King fit succeeded: I0={I0_k:.3g}, rc={rc_k:.3g}, alpha={alpha_k:.3g}, b={b_k:.3g}")
+                                    print(f"  king_profile_pct len={len(king_profile_pct)}, min={np.nanmin(king_profile_pct):.3g}, max={np.nanmax(king_profile_pct):.3g}")
+                                except Exception:
+                                    pass
+                            else:
+                                king_profile_pct = None
+                                king_profile_diam = None
+                        except Exception:
+                            king_profile_pct = None
+                            king_profile_diam = None
+                except Exception:
+                    Ifit_king_plot = None
+                    king_profile_pct = None
+                    king_profile_diam = None
+
+                # Prepare residuals evaluated at r_fit (data sample points)
+                model_pv_rfit = beta_pseudo_gaussian(r_fit, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+                model_pv_rfit = np.maximum(model_pv_rfit, floor)
+                res_int_pv = np.log(model_pv_rfit + floor) - np.log(I_fit + floor)
+
+                res_int_p4 = None
+                if p4_params_plot is not None:
+                    try:
+                        model_p4_rfit = pearson4_model.eval(p4_params_plot, x=r_fit)
+                        model_p4_rfit = np.maximum(model_p4_rfit, floor)
+                        res_int_p4 = np.log(model_p4_rfit + floor) - np.log(I_fit + floor)
+                    except Exception:
+                        res_int_p4 = None
+
+                # King intensity residuals at r_fit
+                res_int_king = None
+                if Ifit_king_plot is not None:
+                    try:
+                        model_king_rfit = king_profile(r_fit, I0_k, rc_k, alpha_k, b_k)
+                        model_king_rfit = np.maximum(model_king_rfit, floor)
+                        res_int_king = np.log(model_king_rfit + floor) - np.log(I_fit + floor)
+                    except Exception:
+                        res_int_king = None
+
+                # EEF residuals: compute model EEF on r_arcsec grid and interpolate to r_fit
+                eef_ref_pct = profile_pct if ('profile_pct' in locals() and profile_pct is not None) else None
+                eef_ref_diam = profile_diam if ('profile_diam' in locals() and profile_diam is not None) else None
+                res_eef_pv = None
+                res_eef_p4 = None
+                try:
+                    if fit_profile_pct is not None and fit_profile_diam is not None and eef_ref_pct is not None and eef_ref_diam is not None:
+                        # PV model EEF on r_arcsec
+                        pv_vals = beta_pseudo_gaussian(r_arcsec, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+                        dr = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size>1 else 1.0
+                        radial_pv = 2.0 * np.pi * r_arcsec * pv_vals * dr
+                        tot_pv = np.sum(radial_pv)
+                        if tot_pv > 0 and np.isfinite(tot_pv):
+                            pv_eef_pct = 100.0 * np.cumsum(radial_pv) / tot_pv
+                            # interpolate PV EEF to r_fit (r in arcsec)
+                            from numpy import interp
+                            pv_eef_at_rfit = interp(r_fit, r_arcsec, pv_eef_pct)
+                            ref_at_rfit = interp(r_fit, eef_ref_diam/2.0, eef_ref_pct)
+                            res_eef_pv = pv_eef_at_rfit - ref_at_rfit
+                        # Pearson4 EEF
+                        if p4_params_plot is not None:
+                            p4_vals = pearson4_model.eval(p4_params_plot, x=r_arcsec)
+                            radial_p4 = 2.0 * np.pi * r_arcsec * p4_vals * dr
+                            tot_p4 = np.sum(radial_p4)
+                            if tot_p4 > 0 and np.isfinite(tot_p4):
+                                p4_eef_pct = 100.0 * np.cumsum(radial_p4) / tot_p4
+                                p4_eef_at_rfit = interp(r_fit, r_arcsec, p4_eef_pct)
+                                ref_at_rfit = interp(r_fit, eef_ref_diam/2.0, eef_ref_pct)
+                                res_eef_p4 = p4_eef_at_rfit - ref_at_rfit
+                        # King EEF
+                        if king_profile_pct is not None and king_profile_diam is not None:
+                            try:
+                                king_eef_at_rfit = interp(r_fit, king_profile_diam/2.0, king_profile_pct)
+                                king_vals = king_profile(r_arcsec, I0_k, rc_k, alpha_k, b_k)
+                                radial_k = 2.0 * np.pi * r_arcsec * king_vals * dr
+                                tot_k = np.sum(radial_k)
+                                if tot_k > 0 and np.isfinite(tot_k):
+                                    king_eef_pct = 100.0 * np.cumsum(radial_k) / tot_k
+                                    king_eef_at_rfit = interp(r_fit, r_arcsec, king_eef_pct)
+                                    ref_at_rfit = interp(r_fit, eef_ref_diam/2.0, eef_ref_pct)
+                                    res_eef_king = king_eef_at_rfit - ref_at_rfit
+                                else:
+                                    res_eef_king = None
+                            except Exception:
+                                res_eef_king = None
+                except Exception:
+                    res_eef_pv = None
+                    res_eef_p4 = None
+
+                # Prepare aggregated EEF arrays for plotting (robustly)
+                profile_pct = None
+                profile_diam = None
+                try:
+                    # r_profile is in meters; convert to arcsec using arcsec_to_m
+                    if ('cumulative_profile' in locals() and 'total_energy' in locals() and total_energy and 'r_profile' in locals() and 'arcsec_to_m' in locals()):
+                        profile_pct = 100.0 * (cumulative_profile / total_energy)
+                        # diameter in arcsec = 2 * (r_profile [m] / arcsec_to_m [m/arcsec])
+                        profile_diam = 2.0 * (r_profile / arcsec_to_m)
+                except Exception:
+                    profile_pct = None
+                    profile_diam = None
+
+                # Recompute EEF residuals at r_fit explicitly for plotting (ensure bottom-right shows data)
+                res_eef_pv_plot = None
+                res_eef_p4_plot = None
+                res_eef_king_plot = None
+                try:
+                    from numpy import interp
+                    dr0 = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size>1 else 1.0
+                    # reference EEF at r_fit (fraction)
+                    ref_at_rfit = eef_data if ('eef_data' in locals() and eef_data is not None) else None
+                    if ref_at_rfit is not None:
+                        # PV model
+                        try:
+                            pv_vals_full = beta_pseudo_gaussian(r_arcsec, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+                            radial_pv_full = 2.0 * np.pi * r_arcsec * pv_vals_full * dr0
+                            tot_pv_full = np.sum(radial_pv_full)
+                            if tot_pv_full > 0 and np.isfinite(tot_pv_full):
+                                pv_eef_pct_full = 100.0 * np.cumsum(radial_pv_full) / tot_pv_full
+                                pv_eef_at_rfit = interp(r_fit, r_arcsec, pv_eef_pct_full) / 100.0
+                                res_eef_pv_plot = pv_eef_at_rfit - ref_at_rfit
+                        except Exception:
+                            res_eef_pv_plot = None
+                        # Pearson4 model
+                        try:
+                            if p4_params_plot is not None:
+                                p4_vals_full = pearson4_model.eval(p4_params_plot, x=r_arcsec)
+                                radial_p4_full = 2.0 * np.pi * r_arcsec * p4_vals_full * dr0
+                                tot_p4_full = np.sum(radial_p4_full)
+                                if tot_p4_full > 0 and np.isfinite(tot_p4_full):
+                                    p4_eef_pct_full = 100.0 * np.cumsum(radial_p4_full) / tot_p4_full
+                                    p4_eef_at_rfit = interp(r_fit, r_arcsec, p4_eef_pct_full) / 100.0
+                                    res_eef_p4_plot = p4_eef_at_rfit - ref_at_rfit
+                        except Exception:
+                            res_eef_p4_plot = None
+                        # King model
+                        try:
+                            if 'king_profile_pct' in locals() and king_profile_pct is not None and 'king_profile_diam' in locals() and king_profile_diam is not None:
+                                king_vals_full = king_profile(r_arcsec, I0_k, rc_k, alpha_k, b_k)
+                                radial_k_full = 2.0 * np.pi * r_arcsec * king_vals_full * dr0
+                                tot_k_full = np.sum(radial_k_full)
+                                if tot_k_full > 0 and np.isfinite(tot_k_full):
+                                    king_eef_pct_full = 100.0 * np.cumsum(radial_k_full) / tot_k_full
+                                    king_eef_at_rfit = interp(r_fit, r_arcsec, king_eef_pct_full) / 100.0
+                                    res_eef_king_plot = king_eef_at_rfit - ref_at_rfit
+                        except Exception:
+                            res_eef_king_plot = None
+                except Exception:
+                    res_eef_pv_plot = None
+                    res_eef_p4_plot = None
+                    res_eef_king_plot = None
+
+                # Plot combined figure
+                # Create a 2x2 figure: top row = intensity + residuals; bottom row = EEF + EEF residuals
+                fig, axes = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True)
+                ax_int = axes[0, 0]
+                ax_res = axes[0, 1]
+                ax_eef = axes[1, 0]
+                ax_eef_res = axes[1, 1]
+
+                # Top-left: intensities
+                # define linewidths for combined figure: thin for dashed fits, thicker for solid/reference
+                _combined_thin_lw = 1.0
+                _combined_thick_lw = 2.0
+                ax_int.plot(r_arcsec, I_profile, 'k.', ms=3, label='Aggregated PSF (data)')
+                line_pv_comb = ax_int.plot(rplot, Ifit_pv_plot, color='red', linestyle='--', lw=_combined_thin_lw, label='Modified pseudo-Voigt')[0]
+                try:
+                    line_pv_comb.set_dashes([6, 2])
+                except Exception:
+                    pass
+                if Ifit_p4_plot is not None:
+                    ax_int.plot(rplot, Ifit_p4_plot, color='orange', linestyle='--', lw=_combined_thin_lw, label=label_p4)
+                if Ifit_king_plot is not None:
+                    ax_int.plot(rplot, Ifit_king_plot, color='purple', linestyle='--', lw=_combined_thin_lw, label=label_king)
+                ax_int.set_xlabel('Radius [arcsec]')
+                ax_int.set_ylabel('Mean intensity')
+                ax_int.set_yscale('log')
+                ax_int.legend(fontsize=9)
+                ax_int.grid(True, which='both', linestyle='--', alpha=0.4)
+
+                # Top-right: intensity residuals + EEF residuals (as before)
+                if res_int_pv is not None:
+                    ax_res.plot(r_fit, res_int_pv, color='red', linestyle='--', lw=_combined_thin_lw, label='Intensity residual: Data - Pseudo-Voigt (log)')
+                if res_int_p4 is not None:
+                    ax_res.plot(r_fit, res_int_p4, color='orange', linestyle='--', lw=_combined_thin_lw, label='Intensity residual: Data - Pearson4 (log)')
+                if res_int_king is not None:
+                    ax_res.plot(r_fit, res_int_king, color='purple', linestyle='--', lw=_combined_thin_lw, label=f'Intensity residual: Data - {label_king} (log)')
+                if res_eef_pv is not None:
+                    ax_res.plot(r_fit, res_eef_pv, color='red', linestyle='--', lw=_combined_thin_lw, label='EEF residual: PV - Data (pct)')
+                if res_eef_p4 is not None:
+                    ax_res.plot(r_fit, res_eef_p4, color='orange', linestyle='--', lw=_combined_thin_lw, label='EEF residual: P4 - Data (pct)')
+                if 'res_eef_king' in locals() and res_eef_king is not None:
+                    ax_res.plot(r_fit, res_eef_king, color='purple', linestyle='--', lw=_combined_thin_lw, label='EEF residual: King - Data (pct)')
+                ax_res.axhline(0.0, color='k', linestyle='--', linewidth=1)
+                ax_res.set_xlabel('Radius [arcsec]')
+                ax_res.set_ylabel('Residual')
+                ax_res.legend(fontsize=9)
+                ax_res.grid(True, which='both', linestyle='--', alpha=0.4)
+
+                # Bottom-left: EEF curves (aggregated PSF and fitted models)
+                # Flip axes: diameter on X, encircled energy (%) on Y. Plot aggregated PSF as black dots.
+                label_data = 'Aggregated PSF (data)'
+                label_pv = 'Modified pseudo-Voigt radial fit'
+                # Use short, clean labels for fitted models in the combined EEF figure
+                # Full fit parameters are retained in the exported Excel/CSV, not the legend.
+                label_p4 = 'Pearson4 radial fit'
+                label_king = 'King radial fit'
+                try:
+                    if profile_pct is not None and profile_diam is not None and len(profile_pct) and len(profile_diam):
+                        pct_arr = np.asarray(profile_pct, dtype=float)
+                        diam_arr = np.asarray(profile_diam, dtype=float)
+                        order = np.argsort(pct_arr)
+                        pct_sorted = pct_arr[order]
+                        diam_sorted = diam_arr[order]
+                        # Clip to 95% percentile
+                        mask95 = pct_sorted <= 95.0
+                        if np.any(mask95):
+                            ax_eef.plot(diam_sorted[mask95], pct_sorted[mask95], color='k', marker='.', linestyle='None', ms=4, label=label_data, zorder=10)
+                    # Plot PV EEF if available (diameter vs pct, clipped to 95%)
+                    # Prefer explicit PV EEF computed on the fine rplot grid so it's always visible
+                    try:
+                        if 'Ifit_pv_plot' in locals() and Ifit_pv_plot is not None:
+                            # rplot is in arcsec
+                            rpv = rplot
+                            drpv = float(rpv[1] - rpv[0]) if rpv.size > 1 else 1.0
+                            radial_pv_plot = 2.0 * np.pi * rpv * Ifit_pv_plot * drpv
+                            tot_pv_plot = np.sum(radial_pv_plot)
+                            if tot_pv_plot > 0 and np.isfinite(tot_pv_plot):
+                                pv_eef_pct_plot = 100.0 * np.cumsum(radial_pv_plot) / tot_pv_plot
+                                pv_diam_plot = 2.0 * rpv
+                                maskpv = pv_eef_pct_plot <= 95.0
+                                if np.any(maskpv):
+                                    line_pv_eef = ax_eef.plot(pv_diam_plot[maskpv], pv_eef_pct_plot[maskpv], color='red', linestyle='--', lw=_combined_thin_lw, label=label_pv)[0]
+                                    try:
+                                        line_pv_eef.set_dashes([6, 2])
+                                    except Exception:
+                                        pass
+                        elif fit_profile_pct is not None and fit_profile_diam is not None:
+                            fp_pct = np.asarray(fit_profile_pct, dtype=float)
+                            fp_diam = np.asarray(fit_profile_diam, dtype=float)
+                            mask = fp_pct <= 95.0
+                            if np.any(mask):
+                                line_pv_eef2 = ax_eef.plot(fp_diam[mask], fp_pct[mask], color='red', linestyle='--', lw=_combined_thin_lw, label=label_pv)[0]
+                                try:
+                                    line_pv_eef2.set_dashes([6, 2])
+                                except Exception:
+                                    pass
+                    except Exception:
+                        try:
+                            if fit_profile_pct is not None and fit_profile_diam is not None:
+                                fp_pct = np.asarray(fit_profile_pct, dtype=float)
+                                fp_diam = np.asarray(fit_profile_diam, dtype=float)
+                                mask = fp_pct <= 95.0
+                                if np.any(mask):
+                                    line_pv_eef3 = ax_eef.plot(fp_diam[mask], fp_pct[mask], color='red', linestyle='--', lw=_combined_thin_lw, label=label_pv)[0]
+                                    try:
+                                        line_pv_eef3.set_dashes([6, 2])
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                    # Pearson4
+                    if pearson4_profile_pct is not None and pearson4_profile_diam is not None:
+                        p4_pct = np.asarray(pearson4_profile_pct, dtype=float)
+                        p4_diam = np.asarray(pearson4_profile_diam, dtype=float)
+                        mask = p4_pct <= 95.0
+                        if np.any(mask):
+                            ax_eef.plot(p4_diam[mask], p4_pct[mask], color='orange', linestyle='--', lw=_combined_thin_lw, label=label_p4)
+                    # King
+                    if 'king_profile_pct' in locals() and king_profile_pct is not None and 'king_profile_diam' in locals() and king_profile_diam is not None:
+                        k_pct = np.asarray(king_profile_pct, dtype=float)
+                        k_diam = np.asarray(king_profile_diam, dtype=float)
+                        mask = k_pct <= 95.0
+                        if np.any(mask):
+                            ax_eef.plot(k_diam[mask], k_pct[mask], color='purple', linestyle='--', linewidth=_combined_thin_lw, label=label_king)
+                    else:
+                        # Fallback: if we have an evaluated King profile on rplot, compute its EEF and plot
+                        try:
+                            if 'Ifit_king_plot' in locals() and Ifit_king_plot is not None:
+                                rpv = rplot if 'rplot' in locals() else (np.linspace(0.0, float(r_arcsec.max()), 1000) if 'r_arcsec' in locals() else None)
+                                if rpv is not None:
+                                    drpv = float(rpv[1] - rpv[0]) if rpv.size > 1 else 1.0
+                                    radial_k_plot = 2.0 * np.pi * rpv * Ifit_king_plot * drpv
+                                    tot_k_plot = np.sum(radial_k_plot)
+                                    if tot_k_plot > 0 and np.isfinite(tot_k_plot):
+                                        k_eef_pct_plot = 100.0 * np.cumsum(radial_k_plot) / tot_k_plot
+                                        k_diam_plot = 2.0 * rpv
+                                        maskk = k_eef_pct_plot <= 95.0
+                                        if np.any(maskk):
+                                            ax_eef.plot(k_diam_plot[maskk], k_eef_pct_plot[maskk], color='purple', linestyle='--', linewidth=_combined_thin_lw, label=label_king)
+                        except Exception:
+                            pass
+                    ax_eef.set_xlabel('Diameter [arcsec]')
+                    ax_eef.set_ylabel('Encircled energy (%)')
+                    # Use default legend from available handles so the full
+                    # constructed labels (e.g. label_king) are shown without
+                    # attempting fragile re-ordering.
+                    try:
+                        import textwrap
+                        handles_all, labels_all = ax_eef.get_legend_handles_labels()
+                        if handles_all:
+                            # Wrap long legend labels to avoid over-wide single-line entries
+                            wrapped_labels = [textwrap.fill(lbl, width=40) if isinstance(lbl, str) else lbl for lbl in labels_all]
+                            # Place EEF legend inside the plotting area (upper left)
+                            ax_eef.legend(handles_all, wrapped_labels, loc='upper left', fontsize=9)
+                        
+                    except Exception:
+                        try:
+                            ax_eef.legend()
+                        except Exception:
+                            pass
+                    ax_eef.grid(True, which='both', linestyle='--', alpha=0.4)
+                    # EEF 50% markers: vertical line at diameter for 50% and horizontal at 50%
+                    try:
+                        if 'pct_sorted' in locals() and np.any(pct_sorted <= 95.0):
+                            pct_for_interp = pct_sorted
+                            diam_for_interp = diam_sorted
+                            if pct_for_interp[0] <= 50.0 <= pct_for_interp[-1]:
+                                diam50 = float(np.interp(50.0, pct_for_interp, diam_for_interp))
+                                # make 50% markers subtle: light grey and thinner
+                                subtle_lw = 0.8
+                                subtle_col = 'lightgrey'
+                                ax_eef.axvline(x=diam50, linestyle='--', color=subtle_col, linewidth=subtle_lw)
+                                ax_eef.axhline(y=50.0, linestyle='--', color=subtle_col, linewidth=subtle_lw)
+                                try:
+                                    ax_eef.text(diam_for_interp.min(), 50.0, f'EEF 50% = {diam50:.3f}"', ha='left', va='bottom', fontsize=9, color='purple')
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                except Exception:
+                    # fallback: do nothing
+                    pass
+
+                # Bottom-right: EEF residuals (Data - Model) evaluated at r_fit
+                # Plot as percent. Use recomputed fractional residuals when available
+                # (those are in fractions -> multiply by 100), otherwise fall back
+                # to earlier-percent values and just flip sign.
+                if res_eef_pv_plot is not None:
+                    line_pv_res = ax_eef_res.plot(r_fit, (-res_eef_pv_plot) * 100.0, color='red', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_pv} (pct)')[0]
+                    try:
+                        line_pv_res.set_dashes([6, 2])
+                    except Exception:
+                        pass
+                elif res_eef_pv is not None:
+                    line_pv_res2 = ax_eef_res.plot(r_fit, (-res_eef_pv), color='red', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_pv} (pct)')[0]
+                    try:
+                        line_pv_res2.set_dashes([6, 2])
+                    except Exception:
+                        pass
+                if res_eef_p4_plot is not None:
+                    ax_eef_res.plot(r_fit, (-res_eef_p4_plot) * 100.0, color='orange', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_p4} (pct)')
+                elif res_eef_p4 is not None:
+                    ax_eef_res.plot(r_fit, (-res_eef_p4), color='orange', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_p4} (pct)')
+                if res_eef_king_plot is not None:
+                    ax_eef_res.plot(r_fit, (-res_eef_king_plot) * 100.0, color='purple', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_king} (pct)')
+                elif 'res_eef_king' in locals() and res_eef_king is not None:
+                    ax_eef_res.plot(r_fit, (-res_eef_king), color='purple', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_king} (pct)')
+                ax_eef_res.axhline(0.0, color='k', linestyle='--', linewidth=1)
+                ax_eef_res.set_xlabel('Radius [arcsec]')
+                ax_eef_res.set_ylabel('EEF residual (pct)')
+                # Mark radius corresponding to EEF 50% (diameter from bottom-left / 2)
+                try:
+                    if 'diam50' in locals():
+                        radius50 = float(diam50) / 2.0
+                        subtle_lw = 0.8
+                        subtle_col = 'lightgrey'
+                        ax_eef_res.axvline(x=radius50, linestyle='--', color=subtle_col, linewidth=subtle_lw)
+                        try:
+                            ylim = ax_eef_res.get_ylim()
+                            # move R50 label further away from the line (increase vertical offset)
+                            ax_eef_res.text(radius50, ylim[0] + 0.08 * (ylim[1] - ylim[0]), f'R50 = {radius50:.3f}"', ha='center', va='bottom', fontsize=9, color='black', rotation=90)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    handles_r, labels_r = ax_eef_res.get_legend_handles_labels()
+                    if handles_r:
+                        ax_eef_res.legend(handles_r, labels_r, loc='upper right', fontsize=9)
+                except Exception:
+                    try:
+                        ax_eef_res.legend()
+                    except Exception:
+                        pass
+                ax_eef_res.grid(True, which='both', linestyle='--', alpha=0.4)
+
+                outfn_comb = os.path.join('Figures', 'E2E_fit_combined.png')
+                # Ensure 50% markers are drawn even if earlier variables were missing
+                try:
+                    diam50_forced = None
+                    def try_from_arrays(pct_arr, diam_arr):
+                        try:
+                            pa = np.asarray(pct_arr, dtype=float)
+                            da = np.asarray(diam_arr, dtype=float)
+                            order = np.argsort(pa)
+                            pa_s = pa[order]
+                            da_s = da[order]
+                            if pa_s.size and pa_s[0] <= 50.0 <= pa_s[-1]:
+                                return float(np.interp(50.0, pa_s, da_s))
+                        except Exception:
+                            return None
+                        return None
+
+                    # Try preferred sources in order
+                    if diam50_forced is None and 'profile_pct' in locals() and profile_pct is not None:
+                        diam50_forced = try_from_arrays(profile_pct, profile_diam)
+                    if diam50_forced is None and 'fit_profile_pct' in locals() and fit_profile_pct is not None:
+                        diam50_forced = try_from_arrays(fit_profile_pct, fit_profile_diam)
+                    if diam50_forced is None and 'pearson4_profile_pct' in locals() and pearson4_profile_pct is not None:
+                        diam50_forced = try_from_arrays(pearson4_profile_pct, pearson4_profile_diam)
+                    if diam50_forced is None and 'king_profile_pct' in locals() and king_profile_pct is not None:
+                        diam50_forced = try_from_arrays(king_profile_pct, king_profile_diam)
+
+                    # If we didn't find diam50 earlier, force-compute from frac_profile/r_profile
+                    try:
+                        if diam50_forced is None:
+                            diam50_forced = None
+                            if 'frac_profile' in locals() and 'r_profile' in locals() and frac_profile is not None and r_profile is not None:
+                                try:
+                                    fp = np.asarray(frac_profile, dtype=float) * 100.0
+                                    rp = np.asarray(r_profile, dtype=float) * m_to_arcsec * 2.0  # diameter
+                                    order = np.argsort(fp)
+                                    fp_s = fp[order]
+                                    rp_s = rp[order]
+                                    if fp_s.size and fp_s[0] <= 50.0 <= fp_s[-1]:
+                                        diam50_forced = float(np.interp(50.0, fp_s, rp_s))
+                                except Exception:
+                                    diam50_forced = None
+                        if diam50_forced is not None:
+                            # draw with high zorder so they're visible above plotted curves
+                            try:
+                                subtle_lw_forced = 0.8
+                                subtle_col = 'lightgrey'
+                                ax_eef.axvline(x=diam50_forced, linestyle='--', color=subtle_col, linewidth=subtle_lw_forced, zorder=100)
+                                ax_eef.axhline(y=50.0, linestyle='--', color=subtle_col, linewidth=subtle_lw_forced, zorder=100)
+                                # mark intersection with a small circle
+                                try:
+                                    ax_eef.scatter([diam50_forced], [50.0], color='purple', s=40, zorder=101)
+                                except Exception:
+                                    pass
+                                ax_eef.text(max(ax_eef.get_xlim()[0], 0), 50.0, f'EEF 50% = {diam50_forced:.3f}"', ha='left', va='bottom', fontsize=9, color='purple')
+                            except Exception:
+                                pass
+                            try:
+                                radius50_forced = float(diam50_forced) / 2.0
+                                subtle_lw_forced = 0.8
+                                subtle_col = 'lightgrey'
+                                ax_eef_res.axvline(x=radius50_forced, linestyle='--', color=subtle_col, linewidth=subtle_lw_forced, zorder=100)
+                                try:
+                                    ax_eef_res.scatter([radius50_forced], [0.0], color=subtle_col, s=30, zorder=101)
+                                except Exception:
+                                    pass
+                                try:
+                                    ylim = ax_eef_res.get_ylim()
+                                    # move R50 label further away from the line (increase vertical offset)
+                                    ax_eef_res.text(radius50_forced, ylim[0] + 0.08 * (ylim[1] - ylim[0]), f'R50 = {radius50_forced:.3f}"', ha='center', va='bottom', fontsize=9, color='black', rotation=90)
+                                except Exception:
+                                    pass
+                                # draw a short horizontal dashed marker at the top of the residual axis (in axes coords)
+                                try:
+                                    hw = max(0.5, float(radius50_forced) * 0.05)
+                                    ax_eef_res.plot([radius50_forced - hw, radius50_forced + hw], [0.95, 0.95], transform=ax_eef_res.get_xaxis_transform(), linestyle='--', color=subtle_col, linewidth=subtle_lw_forced, zorder=100)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                    plt.savefig(outfn_comb, dpi=150)
+                    plt.close()
+                except Exception:
+                    pass
+
             # Export fit parameters to Excel
             try:
                 fit_export_data = {
                     'Parameter': [],
                     'Modified Pseudo-Voigt': [],
-                    'Pearson4': []
+                    'Pearson4': [],
+                    'King': []
                 }
                 
                 # Pseudo-Voigt parameters
@@ -3176,6 +3813,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     fit_export_data['Parameter'].append(param_name)
                     fit_export_data['Modified Pseudo-Voigt'].append(value)
                     fit_export_data['Pearson4'].append(None)
+                    fit_export_data['King'].append(None)
                 
                 # Pearson4 parameters
                 if pearson4_result is not None:
@@ -3192,8 +3830,30 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                         if param_name not in fit_export_data['Parameter']:
                             fit_export_data['Parameter'].append(param_name)
                             fit_export_data['Modified Pseudo-Voigt'].append(None)
+                            fit_export_data['King'].append(None)
+                            fit_export_data['Pearson4'].append(None)
                         idx = fit_export_data['Parameter'].index(param_name)
                         fit_export_data['Pearson4'][idx] = value
+
+                # King parameters
+                try:
+                    if 'I0_k' in locals():
+                        king_params = {
+                            'King I0': I0_k,
+                            'King rc [arcsec]': rc_k,
+                            'King alpha': alpha_k,
+                            'King background (b)': b_k,
+                        }
+                        for param_name, value in king_params.items():
+                            if param_name not in fit_export_data['Parameter']:
+                                fit_export_data['Parameter'].append(param_name)
+                                fit_export_data['Modified Pseudo-Voigt'].append(None)
+                                fit_export_data['Pearson4'].append(None)
+                                fit_export_data['King'].append(None)
+                            idx = fit_export_data['Parameter'].index(param_name)
+                            fit_export_data['King'][idx] = value
+                except Exception:
+                    pass
                 
                 # Export to CSV
                 fit_df = pd.DataFrame(fit_export_data)
@@ -3421,17 +4081,22 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     Z = _sum_on_grid(X, Y, normalize)
 
     # Create the plots in a single figure with two subplots
-    # Use a reasonable figure size that will fit most screens
-    fig = plt.figure(figsize=(16, 9))
+    # Use a reasonable figure size that will fit most screens; enable constrained layout
+    # Produce the large PSF+EEF figure (single-window diagnostic).
+    fig = plt.figure(figsize=(16, 8), constrained_layout=True)
+    # Standard linewidth for EEF marker lines (keep 90% and 80% consistent)
+    eef_linewidth = 1.5
     
-    # Use GridSpec with 20 columns for finer control: 65% left (13 cols) + 35% right (7 cols)
-    gs = gridspec.GridSpec(1, 20)
+    # Use GridSpec with 20 columns for finer control: left (12 cols) + right (8 cols)
+    # Right (EEF) will therefore be 8/20 = 40% of the figure width
+    gs = gridspec.GridSpec(1, 20, figure=fig)
     
-    # First subplot: weighted sum of Gaussians (65% width)
-    ax1 = plt.subplot(gs[0, :13])
+    # First subplot: weighted sum of Gaussians (left, wider)
+    ax1 = plt.subplot(gs[0, :12])
     # Convert to microns for display (1 m = 1e6 µm)
     im = plt.imshow(Z, extent=[x.min()*1e6, x.max()*1e6, y.min()*1e6, y.max()*1e6], origin='lower', cmap='viridis', aspect='equal')
-    cbar = plt.colorbar(im, label='counts', pad=0.12)
+    # Smaller, tighter colorbar attached to ax1 to reduce horizontal crowding
+    cbar = plt.colorbar(im, ax=ax1, label='counts', pad=0.02, fraction=0.046)
     ax1.set_xlabel('x [µm]')
     ax1.set_ylabel('y [µm]')
     
@@ -3449,8 +4114,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1_right = ax1.secondary_yaxis('right', functions=(lambda um: um * um_to_arcsec, lambda arcsec: arcsec / um_to_arcsec))
     ax1_right.set_ylabel('y [arcsec]', rotation=270, va='bottom')
     
-    # Mark the best focus with a green cross and coordinates
-    plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='best focus')
+    # Mark the minimum with a green cross and coordinates (label updated)
+    plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='center for minimum HEW')
     plt.text(center_x*1e6, center_y*1e6, f'({center_x*1e6:.2f}, {center_y*1e6:.2f})', color='green', ha='left', va='bottom')
     # Mark (0,0) with a blue cross
     plt.plot(0, 0, 'bx', markersize=10, label='(0,0)')
@@ -3687,18 +4352,18 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         except Exception:
             pass
     if radius_90 is not None:
-        # Add a dashed circle for 90% encircled energy in red
-        label_90 = f'EEF 90% centered on best focus ({eef90_arcsec:.4f}" diameter)' if eef90_arcsec is not None else 'EEF 90% centered on best focus'
+        # Add a dashed circle for 90% encircled energy in red (short legend label)
+        label_90 = 'EEF 90% (min)'
         circle_90 = plt.Circle((center_x*1e6, center_y*1e6), radius_90*1e6, fill=False, color='red', linestyle='--', linewidth=2, label=label_90)
         plt.gca().add_patch(circle_90)
     if radius_50_00 is not None:
-        # Add a dashed circle for 50% encircled energy from (0,0) in blue
-        label_50_00 = f'HEW centered on (0,0) ({hew_origin_arcsec:.4f}" diameter)' if hew_origin_arcsec is not None else 'HEW centered on (0,0)'
+        # Add a dashed circle for 50% encircled energy from (0,0) in blue (short label)
+        label_50_00 = 'HEW (0,0)'
         circle_50_00 = plt.Circle((0, 0), radius_50_00*1e6, fill=False, color='blue', linestyle='--', linewidth=2, label=label_50_00)
         plt.gca().add_patch(circle_50_00)
     if radius_50 is not None:
-        # Add a dashed circle for 50% encircled energy in green
-        label_50 = f'HEW centered on best focus ({hew_best_arcsec:.4f}" diameter)' if hew_best_arcsec is not None else 'HEW centered on best focus'
+        # Add a dashed circle for 50% encircled energy in green (short label)
+        label_50 = 'HEW (min)'
         circle_50 = plt.Circle((center_x*1e6, center_y*1e6), radius_50*1e6, fill=False, color='green', linestyle='--', linewidth=2, label=label_50)
         plt.gca().add_patch(circle_50)
     
@@ -3707,14 +4372,14 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         opt_hew_arcsec = 2 * opt_radius_50 * m_to_arcsec
         opt_eef90_arcsec = 2 * opt_radius_90 * m_to_arcsec if opt_radius_90 is not None else None
         # Mark optimized best focus
-        plt.plot(opt_center_x*1e6, opt_center_y*1e6, 'mx', markersize=10, label='optimized best focus')
-        # HEW circle (magenta dotted)
-        label_opt_50 = f'HEW optimized ({opt_hew_arcsec:.4f}" diameter)'
+        plt.plot(opt_center_x*1e6, opt_center_y*1e6, 'mx', markersize=10, label='optimized minimum')
+        # HEW circle (magenta dotted) — short label
+        label_opt_50 = 'HEW (optimized)'
         circle_opt_50 = plt.Circle((opt_center_x*1e6, opt_center_y*1e6), opt_radius_50*1e6, fill=False, color='magenta', linestyle=':', linewidth=2, label=label_opt_50)
         plt.gca().add_patch(circle_opt_50)
         # EEF 90% circle (orange dotted)
         if opt_radius_90 is not None:
-            label_opt_90 = f'EEF 90% optimized ({opt_eef90_arcsec:.4f}" diameter)'
+            label_opt_90 = 'EEF 90% (opt)'
             circle_opt_90 = plt.Circle((opt_center_x*1e6, opt_center_y*1e6), opt_radius_90*1e6, fill=False, color='orange', linestyle=':', linewidth=2, label=label_opt_90)
             plt.gca().add_patch(circle_opt_90)
     
@@ -3723,24 +4388,32 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     handles, labels = ax1.get_legend_handles_labels()
 
     focus_order = {
-        'best focus': 0,
-        '(0,0)': 1,
-        'optimized best focus': 2,
+        '(0,0)': 0,
+        'center for minimum HEW': 1,
+        'minimum': 2,
+        'optimized minimum': 3,
     }
 
     def _legend_sort_key(label: str) -> tuple[int, int, str]:
         if label in focus_order:
             return (0, focus_order[label], label)
         if label.startswith('HEW'):
-            if 'best focus' in label:
+            if 'minimum' in label:
                 return (1, 0, label)
             if '(0,0)' in label:
                 return (1, 1, label)
             if 'optimized' in label:
                 return (1, 2, label)
             return (1, 99, label)
+        if label.startswith('EEF 80%'):
+            # Place EEF 80% entries before EEF 90%
+            if '(min)' in label or 'minimum' in label:
+                return (2, -1, label)
+            if 'optimized' in label:
+                return (2, 0, label)
+            return (2, 50, label)
         if label.startswith('EEF 90%'):
-            if 'best focus' in label:
+            if '(min)' in label or 'minimum' in label:
                 return (2, 0, label)
             if 'optimized' in label:
                 return (2, 1, label)
@@ -3748,23 +4421,53 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         return (3, 99, label)
 
     order = sorted(range(len(labels)), key=lambda i: _legend_sort_key(labels[i]))
-    handles_sorted = [handles[i] for i in order]
-    labels_sorted = [labels[i] for i in order]
-    ax1.legend(handles_sorted, labels_sorted, loc='upper right')
+    # Ensure (0,0) is first and 'center for minimum HEW' is second if present
+    preferred_first = []
+    try:
+        idx_00 = next(i for i, lbl in enumerate(labels) if lbl == '(0,0)')
+        preferred_first.append(idx_00)
+    except StopIteration:
+        idx_00 = None
+    try:
+        idx_center = next(i for i, lbl in enumerate(labels) if lbl == 'center for minimum HEW')
+        # Only add if it's not the same as (0,0)
+        if idx_center is not None and idx_center != idx_00:
+            preferred_first.append(idx_center)
+    except StopIteration:
+        pass
+
+    # Build final order: preferred labels first (in the requested sequence), then the rest in the sorted order
+    remaining = [i for i in order if i not in preferred_first]
+    final_order = preferred_first + remaining
+    handles_sorted = [handles[i] for i in final_order]
+    labels_sorted = [labels[i] for i in final_order]
+    # place compact legend inside the left subplot (upper-left) with 2 columns x 3 rows
+    try:
+        ax1.legend(handles_sorted, labels_sorted, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+    except Exception:
+        try:
+            ax1.legend(handles_sorted, labels_sorted, loc='upper left', framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+        except Exception:
+            ax1.legend(handles_sorted, labels_sorted, loc='upper left')
     
-    # Second subplot: encircled energy function (35% width)
-    ax2 = plt.subplot(gs[0, 13:])
+    # Second subplot: encircled energy function (right, 40% width)
+    ax2 = plt.subplot(gs[0, 12:])
     # Convert diameter from meters to arcsec (1 m = 54000/π arcsec)
     profile_pct = frac_profile * 100 if 'frac_profile' in locals() else []
     profile_diam = 2 * r_profile * m_to_arcsec if 'r_profile' in locals() else []
     profile_pct_00 = frac_00 * 100 if 'frac_00' in locals() else []
     profile_diam_00 = 2 * r_profile_00 * m_to_arcsec if 'r_profile_00' in locals() else []
-    label_best = 'Centered on best focus'
-    if (fwhm_x_arcsec is not None) and (fwhm_y_arcsec is not None):
-        label_best = f'Centered on best focus (FWHM_x={fwhm_x_arcsec:.4f}", FWHM_y={fwhm_y_arcsec:.4f}")'
-    label_00 = 'Centered on (0,0)'
-    if (fwhm_x_arcsec is not None) and (fwhm_y_arcsec is not None):
-        label_00 = f'Centered on (0,0) (FWHM_x={fwhm_x_arcsec:.4f}", FWHM_y={fwhm_y_arcsec:.4f}")'
+    # labels for the EEF subplot — include FWHM values when available
+    try:
+        if fwhm_x_arcsec is not None and fwhm_y_arcsec is not None:
+            label_best = f'Centered on minimum (FWHM_x={fwhm_x_arcsec:.4f}\", FWHM_y={fwhm_y_arcsec:.4f}\")'
+            label_00 = f'Centered on (0,0) (FWHM_x={fwhm_x_arcsec:.4f}\", FWHM_y={fwhm_y_arcsec:.4f}\")'
+        else:
+            label_best = 'Centered on minimum'
+            label_00 = 'Centered on (0,0)'
+    except Exception:
+        label_best = 'Centered on minimum'
+        label_00 = 'Centered on (0,0)'
     # Limit plot to 95% percentile
     def limit_percentile(pct, diam, max_pct=95):
         pct = np.array(pct)
@@ -3773,28 +4476,273 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         return pct[mask], diam[mask]
     profile_pct_95, profile_diam_95 = limit_percentile(profile_pct, profile_diam)
     profile_pct_00_95, profile_diam_00_95 = limit_percentile(profile_pct_00, profile_diam_00)
-    plt.plot(profile_pct_95, profile_diam_95, label=label_best, color='green')
-    plt.plot(profile_pct_00_95, profile_diam_00_95, label=label_00, color='blue')
+    plt.plot(profile_pct_95, profile_diam_95, label=label_best, color='green', linestyle='-', linewidth=2.5)
+    plt.plot(profile_pct_00_95, profile_diam_00_95, label=label_00, color='blue', linestyle='-', linewidth=2.5)
     if fit_profile_pct is not None and fit_profile_diam is not None:
         fit_profile_pct_95, fit_profile_diam_95 = limit_percentile(fit_profile_pct, fit_profile_diam)
-        plt.plot(fit_profile_pct_95, fit_profile_diam_95, label='Pseudo-Voigt fit', color='red', linestyle='--', linewidth=1.8)
+    # PV label for EEF subplot — include full fit parameters when available
+    pv_label = 'Modified pseudo-Voigt radial fit'
+    try:
+        if 'A_fit' in locals():
+            pv_label = (f"Modified pseudo-Voigt radial fit (A={A_fit:.2e}, Gamma_c={Gamma_c_fit:.2f}\"",
+                        f"Gamma_w={Gamma_w_fit:.2f}\", eta={eta_fit:.3f}, beta={beta_fit:.2f}, s={scalar_fit:.2f})")
+            # join tuple if accidentally created as tuple above (fallback safety)
+            if isinstance(pv_label, tuple):
+                pv_label = ' '.join(pv_label)
+    except Exception:
+        pv_label = 'Modified pseudo-Voigt radial fit'
+
+    # Plot PV EEF on this right-side EEF subplot. Prefer PV evaluated on the fine rplot
+    # grid (`Ifit_pv_plot` with `rplot`) when available; otherwise fall back to the
+    # precomputed `fit_profile_*` arrays.
+    try:
+        if 'Ifit_pv_plot' in locals() and 'rplot' in locals() and Ifit_pv_plot is not None:
+            rpv = np.asarray(rplot, dtype=float)
+            drpv = float(rpv[1] - rpv[0]) if rpv.size > 1 else 1.0
+            radial_pv_plot = 2.0 * np.pi * rpv * np.asarray(Ifit_pv_plot, dtype=float) * drpv
+            tot_pv_plot = np.sum(radial_pv_plot)
+            if tot_pv_plot > 0 and np.isfinite(tot_pv_plot):
+                pv_eef_pct_plot = 100.0 * np.cumsum(radial_pv_plot) / tot_pv_plot
+                pv_diam_plot = 2.0 * rpv
+                maskpv = pv_eef_pct_plot <= 95.0
+                if np.any(maskpv):
+                    plt.plot(pv_eef_pct_plot[maskpv], pv_diam_plot[maskpv], label=pv_label, color='red', linestyle='--', linewidth=eef_linewidth)
+        elif fit_profile_pct is not None and fit_profile_diam is not None:
+            plt.plot(fit_profile_pct_95, fit_profile_diam_95, label=pv_label, color='red', linestyle='--', linewidth=eef_linewidth)
+    except Exception:
+        try:
+            if fit_profile_pct is not None and fit_profile_diam is not None:
+                plt.plot(fit_profile_pct_95, fit_profile_diam_95, label=pv_label, color='red', linestyle='--', linewidth=eef_linewidth)
+        except Exception:
+            pass
+
+    # Draw 80% EEF circle on the left PSF image (ax1) as a purple dashed circle
+    try:
+        if 'profile_pct' in locals() and profile_pct is not None and len(profile_pct):
+            pct_arr_full = np.asarray(profile_pct, dtype=float)
+            diam_arr_full = np.asarray(profile_diam, dtype=float)
+            order_full = np.argsort(pct_arr_full)
+            pct_sorted_full = pct_arr_full[order_full]
+            diam_sorted_full = diam_arr_full[order_full]
+            if pct_sorted_full[0] <= 80.0 <= pct_sorted_full[-1]:
+                diam80 = float(np.interp(80.0, pct_sorted_full, diam_sorted_full))
+                # convert diameter arcsec to radius in microns for ax1 (which uses µm)
+                arcsec_to_m_local = 1.0 / m_to_arcsec
+                radius_um = (diam80 / 2.0) * arcsec_to_m_local * 1e6
+                try:
+                    import matplotlib.patches as mpatches
+                    label_80 = 'EEF 80% (min)'
+                    circ = mpatches.Circle((center_x * 1e6, center_y * 1e6), radius_um, edgecolor='purple', linestyle='--', linewidth=eef_linewidth, fill=False, zorder=9, label=label_80)
+                    ax1.add_patch(circ)
+                    # update ax1 legend to include the new circle label
+                    try:
+                        handles_now, labels_now = ax1.get_legend_handles_labels()
+                        order_now = sorted(range(len(labels_now)), key=lambda i: _legend_sort_key(labels_now[i]))
+                        handles_sorted_now = [handles_now[i] for i in order_now]
+                        labels_sorted_now = [labels_now[i] for i in order_now]
+                        # place compact legend inside the left subplot to avoid overlap with colorbar
+                        ax1.legend(handles_sorted_now, labels_sorted_now, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+                    except Exception:
+                        try:
+                            ax1.legend(handles_sorted_now, labels_sorted_now, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+                        except Exception:
+                            try:
+                                ax1.legend()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # (EEF legend will be created after all fit curves are plotted,
+    #  so that fit parameter labels are available and included.)
     if pearson4_profile_pct is not None and pearson4_profile_diam is not None:
         pearson4_profile_pct_95, pearson4_profile_diam_95 = limit_percentile(pearson4_profile_pct, pearson4_profile_diam)
-        plt.plot(pearson4_profile_pct_95, pearson4_profile_diam_95, label='Pearson4 fit', color='orange', linestyle=':', linewidth=2.0)
+        # Pearson4 label — include key fit parameters when available
+        try:
+            # Build a compact Pearson4 legend label showing only the five requested parameters
+            p4_label = 'Pearson4 radial fit'
+            try:
+                params_p4 = None
+                if 'pearson4_result' in locals() and pearson4_result is not None and hasattr(pearson4_result, 'params'):
+                    params_p4 = pearson4_result.params
+                elif 'pearson4_used_params_final' in locals() and pearson4_used_params_final is not None:
+                    params_p4 = pearson4_used_params_final
+                if params_p4 is not None:
+                    # Map lmfit parameter names to the exact output keys the user expects
+                    mapping = [
+                        ('amplitude', 'Pearson4_Amplitude', 'Amplitude'),
+                        ('center', 'Pearson4_Center_arcsec', 'Center_arcsec'),
+                        ('sigma', 'Pearson4_Sigma_arcsec', 'Sigma_arcsec'),
+                        ('expon', 'Pearson4_Exponent_m', 'Exponent_m'),
+                        ('skew', 'Pearson4_Skew_nu', 'Skew_nu')
+                    ]
+                    parts = []
+                    for lm_name, out_key, disp_name in mapping:
+                        try:
+                            if lm_name in params_p4:
+                                val = params_p4[lm_name].value if hasattr(params_p4[lm_name], 'value') else float(params_p4[lm_name])
+                                sval = f"{val:.4g}"
+                                parts.append(f"{disp_name}={sval}")
+                        except Exception:
+                            continue
+                        if parts:
+                            p4_label = 'Pearson4 radial fit (' + ', '.join(parts) + ')'
+            except Exception:
+                pass
+            plt.plot(pearson4_profile_pct_95, pearson4_profile_diam_95, label=p4_label, color='orange', linestyle='--', linewidth=eef_linewidth)
+        except Exception:
+            pass
+    # Add King profile to EEF subplot if available (clip to 95% percentile)
+    if 'king_profile_pct' in locals() and king_profile_pct is not None and 'king_profile_diam' in locals() and king_profile_diam is not None:
+        try:
+            # King label — include fit params if the least-squares King fit produced them
+            kp_label = 'King radial fit'
+            try:
+                if 'I0_k' in locals():
+                    kp_label = f'King radial fit (I0={I0_k:.2e}, rc={rc_k:.2f}\", alpha={alpha_k:.2f}, b={b_k:.2e})'
+            except Exception:
+                pass
+            try:
+                k_pct = np.asarray(king_profile_pct, dtype=float)
+                k_diam = np.asarray(king_profile_diam, dtype=float)
+                k_pct_95, k_diam_95 = limit_percentile(k_pct, k_diam, max_pct=95)
+                if len(k_pct_95) > 0:
+                    plt.plot(k_pct_95, k_diam_95, label=kp_label, color='purple', linestyle='--', linewidth=eef_linewidth, alpha=0.95)
+            except Exception:
+                # fallback: attempt to plot raw arrays but still guard errors
+                try:
+                    plt.plot(king_profile_pct, king_profile_diam, label=kp_label, color='purple', linestyle='--', linewidth=eef_linewidth, alpha=0.95)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    else:
+        # Try a proper King least-squares fit to the EEF reference if available
+        try:
+            if 'have_least_squares' in locals() and have_least_squares and ('eef_data' in locals() and eef_data is not None) and ('r_arcsec' in locals() and 'r_fit' in locals()):
+                try:
+                    # initial guesses (reuse sensible defaults from earlier)
+                    I0_0 = float(np.nanmax(I_fit)) if ('I_fit' in locals() and I_fit.size) else 1.0
+                except Exception:
+                    I0_0 = 1.0
+                try:
+                    rc_guess = float(Gamma_c_fit) if 'Gamma_c_fit' in locals() else (float(np.median(r_fit)) if ('r_fit' in locals() and r_fit.size) else 1.0)
+                except Exception:
+                    rc_guess = 1.0
+                rc_0 = max(0.5 * rc_guess, 1e-3)
+                alpha_0 = 2.0
+                try:
+                    b0 = float(np.nanmin(I_fit)) if ('I_fit' in locals() and np.any(np.isfinite(I_fit))) else 0.0
+                except Exception:
+                    b0 = 0.0
+                x0k = [I0_0, rc_0, alpha_0, b0]
+                # bounds
+                lbk = [max(float(floor) if 'floor' in locals() else 1e-12, 0.0), 1e-3, 1.0, 0.0]
+                rc_cap = float(min(r_arcsec.max() * 0.5 if ('r_arcsec' in locals() and r_arcsec.size) else 10.0, 50.0))
+                ubk = [np.inf, rc_cap, 8.0, np.inf]
+
+                def _resid_king(vec):
+                    try:
+                        I0_k, rc_k, alpha_k, b_k = vec
+                        model_vals = king_profile(r_arcsec, I0_k, rc_k, alpha_k, b_k)
+                        model_vals = np.maximum(model_vals, 0.0)
+                        dr = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size>1 else 1.0
+                        radial = 2.0 * np.pi * r_arcsec * model_vals * dr
+                        tot = np.sum(radial)
+                        if tot <= 0 or not np.isfinite(tot):
+                            return np.ones_like(eef_data) * 1e6
+                        model_eef_pct = 100.0 * np.cumsum(radial) / tot
+                        from numpy import interp
+                        model_at_ref = interp(r_fit, r_arcsec, model_eef_pct) / 100.0
+                        return (model_at_ref - eef_data) * (eef_weight if 'eef_weight' in locals() else 1.0)
+                    except Exception:
+                        return np.ones_like(eef_data) * 1e6
+
+                try:
+                    resk = least_squares(_resid_king, x0k, bounds=(lbk, ubk), loss='soft_l1', f_scale=1.0, max_nfev=10000)
+                    if hasattr(resk, 'x'):
+                        I0_k, rc_k, alpha_k, b_k = resk.x.tolist()
+                except Exception:
+                    I0_k, rc_k, alpha_k, b_k = x0k
+
+                # compute King model on rplot for EEF plotting
+                try:
+                    rpv = np.asarray(rplot if 'rplot' in locals() else np.linspace(0.0, float(r_arcsec.max()), 1000), dtype=float)
+                    Ifit_king_plot = king_profile(rpv, I0_k, rc_k, alpha_k, b_k)
+                    drpv = float(rpv[1] - rpv[0]) if rpv.size>1 else 1.0
+                    radial_k_plot = 2.0 * np.pi * rpv * Ifit_king_plot * drpv
+                    tot_k_plot = np.sum(radial_k_plot)
+                    if tot_k_plot > 0 and np.isfinite(tot_k_plot):
+                        k_eef_pct_plot = 100.0 * np.cumsum(radial_k_plot) / tot_k_plot
+                        k_diam_plot = 2.0 * rpv
+                        maskk = k_eef_pct_plot <= 95.0
+                        if np.any(maskk):
+                            try:
+                                kp_label = f'King fit (I0={I0_k:.2e}, rc={rc_k:.2f}\", alpha={alpha_k:.2f}, b={b_k:.2e})'
+                            except Exception:
+                                kp_label = 'King fit'
+                            plt.plot(k_eef_pct_plot[maskk], k_diam_plot[maskk], label=kp_label, color='purple', linestyle='--', linewidth=eef_linewidth, alpha=0.95)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+
+    # Add EEF 80% markers: vertical at x=80% (black dashed) and horizontal at diameter where best-focus reaches 80% (purple dashed)
+    try:
+        plt.axvline(x=80.0, linestyle='--', color='black', linewidth=eef_linewidth)
+        if isinstance(profile_pct, (list, np.ndarray)) and len(profile_pct) and isinstance(profile_diam, (list, np.ndarray)) and len(profile_diam):
+            # Ensure arrays are numpy arrays and increasing in pct
+            pct_arr = np.asarray(profile_pct, dtype=float)
+            diam_arr = np.asarray(profile_diam, dtype=float)
+            # Sort by pct just in case
+            order_idx = np.argsort(pct_arr)
+            pct_sorted = pct_arr[order_idx]
+            diam_sorted = diam_arr[order_idx]
+            if pct_sorted[0] <= 80.0 <= pct_sorted[-1]:
+                diam80 = float(np.interp(80.0, pct_sorted, diam_sorted))
+                plt.axhline(y=diam80, linestyle='--', color='purple', linewidth=eef_linewidth)
+                # Add label slightly below the horizontal line (with slight offset and larger font)
+                try:
+                    ymin, ymax = ax2.get_ylim()
+                    yoff = 0.02 * (ymax - ymin)
+                    text_y = diam80 - yoff
+                    ax2.text(0, text_y, f'EEF 80% minimum = {diam80:.2f}"', ha='left', va='top', fontsize=9, color='purple')
+                except Exception:
+                    pass
+    except Exception:
+        pass
     
     # Add optimized curve if provided
     if df_optimized is not None and opt_frac_profile is not None:
         opt_profile_pct = opt_frac_profile * 100
         opt_profile_diam = 2 * opt_r_profile * m_to_arcsec
         opt_profile_pct_95, opt_profile_diam_95 = limit_percentile(opt_profile_pct, opt_profile_diam)
-        label_opt = 'Optimized best focus'
-        if (fwhm_opt_x_arcsec is not None) and (fwhm_opt_y_arcsec is not None):
-            label_opt = f'Optimized best focus (FWHM_x={fwhm_opt_x_arcsec:.4f}", FWHM_y={fwhm_opt_y_arcsec:.4f}")'
+        label_opt = 'Optimized minimum'
         plt.plot(opt_profile_pct_95, opt_profile_diam_95, label=label_opt, linestyle=':', linewidth=2.5, color='magenta')
     
+    # Create final legend for EEF subplot now that all fit curves have been plotted
+    try:
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        if handles2:
+            # Wrap long legend labels and place legend slightly higher/outside
+            try:
+                import textwrap
+                wrapped2 = [textwrap.fill(lbl, width=40) if isinstance(lbl, str) else lbl for lbl in labels2]
+            except Exception:
+                wrapped2 = labels2
+            # Place EEF legend inside the EEF subplot area (upper right)
+            ax2.legend(handles2, wrapped2, loc='upper left', ncol=1, fontsize=8)
+    except Exception:
+        pass
+
+    # Add inline labels near each EEF curve so labels appear inside the graph area
+    # (Inline curve labels removed — rely on legend and horizontal-line annotations)
+
     ax2.set_xlabel('Percentage (%)')
     ax2.set_ylabel('Diameter [arcsec]')
-    ax2.legend()
     # Increase tick density by reducing major tick spacing by half
     from matplotlib.ticker import MultipleLocator, AutoMinorLocator
     ax2.xaxis.set_major_locator(MultipleLocator(10))  # Major ticks every 10%
@@ -3802,37 +4750,101 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # For y-axis, use auto locator with more ticks
     ax2.yaxis.set_major_locator(plt.MaxNLocator(nbins=20))  # More bins for denser ticks
     ax2.yaxis.set_minor_locator(AutoMinorLocator(5))
-    # Mark the 50% encircled energy (Half Energy Width - HEW) in green for best focus
-    plt.axhline(y=hew_best_arcsec, linestyle='--', color='green')  # Horizontal line at HEW diameter
-    plt.axvline(x=50, linestyle='--', color='black')  # Vertical line at 50%
+    # Mark the 50% encircled energy (Half Energy Width - HEW) in green for minimum
+    plt.axhline(y=hew_best_arcsec, linestyle='--', color='green', linewidth=eef_linewidth)  # Horizontal line at HEW diameter
+    plt.axvline(x=50, linestyle='--', color='black', linewidth=eef_linewidth)  # Vertical line at 50%
     if hew_best_arcsec is not None:
-        plt.text(0, hew_best_arcsec, f'HEW best focus: {hew_best_arcsec:.4f}"', ha='left', va='top', fontsize=10, color='green')  # Label HEW with value
+        try:
+            ymin, ymax = ax2.get_ylim()
+            yoff = 0.02 * (ymax - ymin)
+            text_y = hew_best_arcsec - yoff
+            ax2.text(0, text_y, f'HEW minimum = {hew_best_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='green')  # Label HEW with value
+        except Exception:
+            ax2.text(0, hew_best_arcsec, f'HEW minimum = {hew_best_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='green')
     # Mark the 50% from (0,0) in blue
-    plt.axhline(y=hew_origin_arcsec, linestyle='--', color='blue')  # Horizontal line at HEW(0,0) diameter
+    plt.axhline(y=hew_origin_arcsec, linestyle='--', color='blue', linewidth=eef_linewidth)  # Horizontal line at HEW(0,0) diameter
     if hew_origin_arcsec is not None:
-        plt.text(100, hew_origin_arcsec, f'HEW (0,0): {hew_origin_arcsec:.4f}"', ha='center', va='top', fontsize=10, color='blue')  # Label HEW (0,0) with value
+        try:
+            ymin, ymax = ax2.get_ylim()
+            yoff = 0.02 * (ymax - ymin)
+            text_y = hew_origin_arcsec - yoff
+            # place near right side (x=100) but slightly below the line
+            ax2.text(100, text_y, f'HEW (0,0) = {hew_origin_arcsec:.3f}"', ha='center', va='top', fontsize=9, color='blue')
+        except Exception:
+            ax2.text(100, hew_origin_arcsec, f'HEW (0,0) = {hew_origin_arcsec:.3f}"', ha='center', va='top', fontsize=9, color='blue')
     # Mark the 90% encircled energy in red
     if radius_90 is not None:
-        plt.axhline(y=eef90_arcsec, linestyle='--', color='red')  # Horizontal line at EEF90 diameter
-        plt.axvline(x=90, linestyle='--', color='black')  # Vertical line at 90%
-        plt.text(0, eef90_arcsec, f'EEF 90% best focus: {eef90_arcsec:.4f}"', ha='left', va='top', fontsize=10, color='red')  # Label 90% with value
+        plt.axhline(y=eef90_arcsec, linestyle='--', color='red', linewidth=eef_linewidth)  # Horizontal line at EEF90 diameter
+        plt.axvline(x=90, linestyle='--', color='black', linewidth=eef_linewidth)  # Vertical line at 90%
+        try:
+            ymin, ymax = ax2.get_ylim()
+            yoff = 0.02 * (ymax - ymin)
+            text_y = eef90_arcsec - yoff
+            ax2.text(0, text_y, f'EEF 90% minimum = {eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='red')  # Label 90% with value
+        except Exception:
+            ax2.text(0, eef90_arcsec, f'EEF 90% minimum = {eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='red')
     
     # Add optimized reference lines if provided
     if df_optimized is not None and opt_radius_50 is not None:
         opt_hew_arcsec = 2 * opt_radius_50 * m_to_arcsec
         plt.axhline(y=opt_hew_arcsec, linestyle=':', color='magenta', linewidth=1.5)
-        plt.text(0, opt_hew_arcsec, f'HEW optimized: {opt_hew_arcsec:.4f}"', ha='left', va='bottom', fontsize=10, color='magenta')
+        try:
+            ymin, ymax = ax2.get_ylim()
+            yoff = 0.02 * (ymax - ymin)
+            text_y = opt_hew_arcsec - yoff
+            ax2.text(0, text_y, f'HEW(opt)={opt_hew_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='magenta')
+        except Exception:
+            ax2.text(0, opt_hew_arcsec, f'HEW(opt)={opt_hew_arcsec:.3f}"', ha='left', va='bottom', fontsize=9, color='magenta')
         if opt_radius_90 is not None:
             opt_eef90_arcsec = 2 * opt_radius_90 * m_to_arcsec
-            plt.axhline(y=opt_eef90_arcsec, linestyle=':', color='orange', linewidth=1.5)
-            plt.text(0, opt_eef90_arcsec, f'EEF 90% optimized: {opt_eef90_arcsec:.4f}"', ha='left', va='bottom', fontsize=10, color='orange')
+            plt.axhline(y=opt_eef90_arcsec, linestyle=':', color='orange', linewidth=eef_linewidth)
+            try:
+                ymin, ymax = ax2.get_ylim()
+                yoff = 0.02 * (ymax - ymin)
+                text_y = opt_eef90_arcsec - yoff
+                ax2.text(0, text_y, f'EEF90(opt)={opt_eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='orange')
+            except Exception:
+                ax2.text(0, opt_eef90_arcsec, f'EEF90(opt)={opt_eef90_arcsec:.3f}"', ha='left', va='bottom', fontsize=9, color='orange')
     
     # Add titles at the same y-coordinate
     fig.suptitle('')  # Clear any figure title
-    ax1.set_title(f'E2E PSF{title_suffix}', fontweight='bold', fontsize=24, y=1.08)
-    ax2.set_title(f'Encircled energy function{title_suffix}', fontweight='bold', fontsize=24, y=1.08)
-    
-    plt.tight_layout()  # Adjust layout
+    # Nudge titles upward to avoid overlapping the PSF image when using constrained_layout
+    # Nudge titles upward to avoid overlapping other elements
+    ax1.set_title(f'E2E PSF{title_suffix}', fontweight='bold', fontsize=12, y=1.08)
+    ax2.set_title(f'Encircled energy function{title_suffix}', fontweight='bold', fontsize=12, y=1.08)
+    # layout is handled by constrained_layout on the figure
+    # Rebuild the left subplot legend explicitly to guarantee order and layout
+    try:
+        # Remove any existing legend and rebuild in a deterministic order
+        try:
+            existing = ax1.get_legend()
+            if existing is not None:
+                existing.remove()
+        except Exception:
+            pass
+        handles_all, labels_all = ax1.get_legend_handles_labels()
+        preferred = []
+        for name in ['(0,0)', 'center for minimum HEW']:
+            if name in labels_all:
+                preferred.append(labels_all.index(name))
+        remaining = [i for i in range(len(labels_all)) if i not in preferred]
+        final_idx = preferred + remaining
+        handles_final = [handles_all[i] for i in final_idx]
+        labels_final = [labels_all[i] for i in final_idx]
+        ax1.legend(handles_final, labels_final, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+    except Exception:
+        try:
+            ax1.legend(loc='upper left', ncol=2, fontsize=8, framealpha=0.85)
+        except Exception:
+            pass
+
+    # Also write a guaranteed copy of the combined figure to the canonical filename
+    try:
+        out_comb = os.path.join('Figures', 'E2E_fit_combined.png')
+        fig.savefig(out_comb, dpi=150, bbox_inches='tight')
+        print(f"Saved combined figure to {out_comb}")
+    except Exception:
+        pass
     
     # Context menu implementation (cross-platform)
     menu_annotation = None
@@ -3958,6 +4970,337 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         df_out.to_csv(out, index=False)
         print('Wrote fit parameters CSV to', out)
 
+    def export_eef_and_params_excel():
+        """Export EEF curves and fit parameters into a single Excel workbook with two sheets."""
+        import time as _time, os as _os
+        try:
+            import pandas as _pd
+        except Exception:
+            print('pandas required for Excel export')
+            return
+
+        if not fit_params_available:
+            print('Warning: fit parameters not available; will still try to export EEF curves.')
+
+        ts = _time.strftime('%Y%m%d_%H%M%S')
+        out = _os.path.join('CustomPSFs', f'E2E_EEF_and_fitparams_{ts}.xlsx')
+        _os.makedirs(_os.path.dirname(out), exist_ok=True)
+
+        # Build a common diameter grid (arcsec) from 0..max r_arcsec
+        try:
+            rgrid = np.linspace(0.0, float(r_arcsec.max()), 1000)
+        except Exception:
+            rgrid = np.linspace(0.0, 100.0, 1000)
+        diam_grid = 2.0 * rgrid
+
+        # Helper to compute EEF percent from intensity profile on rgrid
+        def compute_eef_pct_from_I(I_vals, r_vals):
+            try:
+                dr = float(r_vals[1] - r_vals[0]) if r_vals.size > 1 else 1.0
+                radial = 2.0 * np.pi * r_vals * I_vals * dr
+                tot = np.sum(radial)
+                if tot <= 0 or not np.isfinite(tot):
+                    return np.full_like(r_vals, np.nan)
+                eef = 100.0 * np.cumsum(radial) / tot
+                return eef
+            except Exception:
+                return np.full_like(r_vals, np.nan)
+
+        # Aggregated (data) EEF interpolated to diam_grid
+        try:
+            if profile_pct is not None and profile_diam is not None:
+                # Sort and interp
+                pa = np.asarray(profile_pct, dtype=float)
+                da = np.asarray(profile_diam, dtype=float)
+                order = np.argsort(da)
+                da_s = da[order]
+                pa_s = pa[order]
+                # interpolate percent at diam_grid; values outside range will be extrapolated as edge values
+                agg_pct_on_grid = np.interp(diam_grid, da_s, pa_s, left=pa_s[0], right=pa_s[-1])
+                agg_pct_on_grid[agg_pct_on_grid > 95.0] = np.nan
+            else:
+                agg_pct_on_grid = np.full_like(diam_grid, np.nan)
+        except Exception:
+            agg_pct_on_grid = np.full_like(diam_grid, np.nan)
+
+        # PV model EEF on grid
+        try:
+            pv_I = beta_pseudo_gaussian(rgrid, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+            pv_eef = compute_eef_pct_from_I(pv_I, rgrid)
+            pv_eef[pv_eef > 95.0] = np.nan
+        except Exception:
+            pv_eef = np.full_like(diam_grid, np.nan)
+
+        # Pearson4 EEF on grid
+        try:
+            if 'pearson4_model' in locals() and p4_params_plot is not None:
+                p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                p4_I = np.maximum(p4_I, 0.0)
+                p4_eef = compute_eef_pct_from_I(p4_I, rgrid)
+                p4_eef[p4_eef > 95.0] = np.nan
+            else:
+                p4_eef = np.full_like(diam_grid, np.nan)
+        except Exception:
+            p4_eef = np.full_like(diam_grid, np.nan)
+
+        # King EEF on grid
+        try:
+            if 'I0_k' in locals():
+                k_I = king_profile(rgrid, I0_k, rc_k, alpha_k, b_k)
+                k_I = np.maximum(k_I, 0.0)
+                k_eef = compute_eef_pct_from_I(k_I, rgrid)
+                k_eef[k_eef > 95.0] = np.nan
+            else:
+                k_eef = np.full_like(diam_grid, np.nan)
+        except Exception:
+            k_eef = np.full_like(diam_grid, np.nan)
+
+        # Build DataFrame for sheet1: one column per curve (index = diameter)
+        df_eef = _pd.DataFrame({'diameter_arcsec': diam_grid, 'EEF_aggregated_pct': agg_pct_on_grid,
+                                 'EEF_pv_pct': pv_eef, 'EEF_pearson4_pct': p4_eef, 'EEF_king_pct': k_eef})
+
+        # Build parameter table for sheet2
+        params = {}
+        # If a pearson4 params object used for plotting exists (p4_params_plot),
+        # capture its values even if pearson4_result wasn't stored as a full fit result.
+        try:
+            if 'p4_params_plot' in locals() and p4_params_plot is not None:
+                pr = p4_params_plot
+                # lmfit.Parameters-like object
+                try:
+                    if hasattr(pr, 'keys'):
+                        for src_name, out_key in (('amplitude', 'Pearson4_Amplitude'),
+                                                  ('center', 'Pearson4_Center_arcsec'),
+                                                  ('sigma', 'Pearson4_Sigma_arcsec'),
+                                                  ('expon', 'Pearson4_Exponent_m'),
+                                                  ('skew', 'Pearson4_Skew_nu')):
+                            try:
+                                if src_name in pr:
+                                    val = pr[src_name].value if hasattr(pr[src_name], 'value') else pr[src_name]
+                                    params[out_key] = float(val)
+                            except Exception:
+                                continue
+                except Exception:
+                    # fallback for plain dict-like
+                    try:
+                        for src_name, out_key in (('amplitude', 'Pearson4_Amplitude'),
+                                                  ('center', 'Pearson4_Center_arcsec'),
+                                                  ('sigma', 'Pearson4_Sigma_arcsec'),
+                                                  ('expon', 'Pearson4_Exponent_m'),
+                                                  ('skew', 'Pearson4_Skew_nu')):
+                            if src_name in pr:
+                                params[out_key] = float(pr[src_name])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            params['Modified_PV_Amplitude_A'] = A_fit
+            params['Modified_PV_Gamma_c_arcsec'] = Gamma_c_fit
+            params['Modified_PV_Gamma_w_arcsec'] = Gamma_w_fit
+            params['Modified_PV_eta'] = eta_fit
+            params['Modified_PV_beta'] = beta_fit
+            params['Modified_PV_scalar'] = scalar_fit
+        except Exception:
+            pass
+        try:
+            if pearson4_result is not None and hasattr(pearson4_result, 'params'):
+                pr = pearson4_result.params
+                # Core fitted parameters (store with the exact keys requested)
+                params['Pearson4_Amplitude'] = float(pr['amplitude'].value) if 'amplitude' in pr else None
+                params['Pearson4_Center_arcsec'] = float(pr['center'].value) if 'center' in pr else None
+                params['Pearson4_Sigma_arcsec'] = float(pr['sigma'].value) if 'sigma' in pr else None
+                params['Pearson4_Exponent_m'] = float(pr['expon'].value) if 'expon' in pr else None
+                params['Pearson4_Skew_nu'] = float(pr['skew'].value) if 'skew' in pr else None
+        except Exception:
+            pass
+        try:
+            if 'I0_k' in locals():
+                params['King_I0'] = I0_k
+                params['King_rc_arcsec'] = rc_k
+                params['King_alpha'] = alpha_k
+                params['King_b'] = b_k
+        except Exception:
+            pass
+
+        # Convert params dict to DataFrame
+        try:
+            df_params = _pd.DataFrame(list(params.items()), columns=['parameter', 'value'])
+        except Exception:
+            df_params = _pd.DataFrame(columns=['parameter', 'value'])
+
+        # Prepare PSF shape sheets (one per fit) on rgrid
+        # We'll write Excel formulas for PV and King that reference the
+        # Fit_parameters sheet via VLOOKUP, so the workbook contains the fit
+        # expressions rather than only numeric values.
+        formulas_pv = []
+        formulas_k = []
+        radii_list = list(rgrid)
+        # Build lookup expressions once
+        A_lookup = 'VLOOKUP("Modified_PV_Amplitude_A",Fit_parameters!$A:$B,2,FALSE)'
+        eta_lookup = 'VLOOKUP("Modified_PV_eta",Fit_parameters!$A:$B,2,FALSE)'
+        scalar_lookup = 'VLOOKUP("Modified_PV_scalar",Fit_parameters!$A:$B,2,FALSE)'
+        beta_lookup = 'VLOOKUP("Modified_PV_beta",Fit_parameters!$A:$B,2,FALSE)'
+        Gc_lookup = 'VLOOKUP("Modified_PV_Gamma_c_arcsec",Fit_parameters!$A:$B,2,FALSE)'
+        Gw_lookup = 'VLOOKUP("Modified_PV_Gamma_w_arcsec",Fit_parameters!$A:$B,2,FALSE)'
+        I0_lookup = 'VLOOKUP("King_I0",Fit_parameters!$A:$B,2,FALSE)'
+        rc_lookup = 'VLOOKUP("King_rc_arcsec",Fit_parameters!$A:$B,2,FALSE)'
+        alpha_lookup = 'VLOOKUP("King_alpha",Fit_parameters!$A:$B,2,FALSE)'
+        b_lookup = 'VLOOKUP("King_b",Fit_parameters!$A:$B,2,FALSE)'
+
+        for i, rval in enumerate(radii_list, start=2):
+            r_cell = f"A{i}"
+            # PV formula components
+            G_expr = f"EXP(-4*LN(2)*(({r_cell}/{Gc_lookup})^2))"
+            a_expr = f"(POWER(2,1/{beta_lookup})-1)"
+            C_expr = f"1/POWER(1 + {a_expr}*(POWER(2*{r_cell}/{Gw_lookup},2)), {beta_lookup})"
+            mix_expr = f"(1 - {eta_lookup})*{G_expr} + {eta_lookup}*{scalar_lookup}*{C_expr}"
+            norm_expr = f"(1 - {eta_lookup}) + {eta_lookup}*{scalar_lookup}"
+            pv_formula = f"={A_lookup}*({mix_expr}/{norm_expr})"
+
+            # King formula
+            king_formula = f"={I0_lookup}*POWER(1 + POWER({r_cell}/{rc_lookup},2), -{alpha_lookup}) + {b_lookup}"
+
+            formulas_pv.append(pv_formula)
+            formulas_k.append(king_formula)
+
+        # Radius numeric column; intensity columns contain Excel formulas (strings starting with '=')
+        df_pv = _pd.DataFrame({'radius_arcsec': radii_list, 'I_pv_formula': formulas_pv})
+        try:
+            df_p4 = _pd.DataFrame({'radius_arcsec': rgrid, 'I_pearson4': p4_I})
+        except Exception:
+            df_p4 = _pd.DataFrame({'radius_arcsec': rgrid, 'I_pearson4': [None] * len(rgrid)})
+        df_k = _pd.DataFrame({'radius_arcsec': radii_list, 'I_king_formula': formulas_k})
+
+        # Write to Excel with multiple sheets
+        wrote = False
+        try:
+            with _pd.ExcelWriter(out, engine='openpyxl') as writer:
+                df_eef.to_excel(writer, sheet_name='EEF_curves', index=False)
+                df_params.to_excel(writer, sheet_name='Fit_parameters', index=False)
+                df_pv.to_excel(writer, sheet_name='PSF_pv', index=False)
+                df_p4.to_excel(writer, sheet_name='PSF_pearson4', index=False)
+                df_k.to_excel(writer, sheet_name='PSF_king', index=False)
+            wrote = True
+            print('Wrote combined EEF+fit Excel to', out)
+        except Exception as e:
+            try:
+                with _pd.ExcelWriter(out, engine='xlsxwriter') as writer:
+                    df_eef.to_excel(writer, sheet_name='EEF_curves', index=False)
+                    df_params.to_excel(writer, sheet_name='Fit_parameters', index=False)
+                    df_pv.to_excel(writer, sheet_name='PSF_pv', index=False)
+                    df_p4.to_excel(writer, sheet_name='PSF_pearson4', index=False)
+                    df_k.to_excel(writer, sheet_name='PSF_king', index=False)
+                wrote = True
+                print('Wrote combined EEF+fit Excel to', out)
+            except Exception:
+                print('Failed to write Excel file:', e)
+        # Also generate a 4-panel fitting performance PNG and save it into CustomPSFs and Figures
+        try:
+            import matplotlib.pyplot as _plt
+            ts_short = ts
+            perf_fname_ts = _os.path.join('CustomPSFs', f'fitting_performance_{ts_short}.png')
+            perf_fname = _os.path.join('CustomPSFs', 'fitting_performance.png')
+            # Prepare data for intensity panel (interpolate observed I_fit to rgrid)
+            try:
+                if 'I_fit' in locals() and I_fit is not None and 'r_arcsec' in locals():
+                    r_obs = np.asarray(r_arcsec)
+                    I_obs = np.asarray(I_fit)
+                    order_obs = np.argsort(r_obs)
+                    r_obs_s = r_obs[order_obs]
+                    I_obs_s = I_obs[order_obs]
+                    I_on_rgrid = np.interp(rgrid, r_obs_s, I_obs_s, left=np.nan, right=np.nan)
+                else:
+                    I_on_rgrid = np.full_like(rgrid, np.nan)
+            except Exception:
+                I_on_rgrid = np.full_like(rgrid, np.nan)
+
+            # Ensure pv_I and p4_I arrays exist for plotting
+            try:
+                pv_I
+            except NameError:
+                try:
+                    pv_I = beta_pseudo_gaussian(rgrid, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
+                except Exception:
+                    pv_I = np.full_like(rgrid, np.nan)
+            try:
+                p4_I
+            except NameError:
+                try:
+                    if 'pearson4_model' in locals() and ('p4_params_plot' in locals() and p4_params_plot is not None):
+                        p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                    else:
+                        p4_I = np.full_like(rgrid, np.nan)
+                except Exception:
+                    p4_I = np.full_like(rgrid, np.nan)
+
+            # Residuals for intensity
+            resid_pv = I_on_rgrid - pv_I
+            resid_p4 = I_on_rgrid - p4_I
+
+            # EEF residuals (agg_pct_on_grid vs models)
+            try:
+                eef_resid_pv = agg_pct_on_grid - pv_eef
+            except Exception:
+                eef_resid_pv = np.full_like(diam_grid, np.nan)
+            try:
+                eef_resid_p4 = agg_pct_on_grid - p4_eef
+            except Exception:
+                eef_resid_p4 = np.full_like(diam_grid, np.nan)
+
+            # Create 2x2 figure
+            figp = _plt.figure(figsize=(12, 8))
+            ax1p = figp.add_subplot(2, 2, 1)
+            ax1p.plot(rgrid, I_on_rgrid, 'k.', markersize=3, label='Observed (radial)')
+            ax1p.plot(rgrid, pv_I, color='red', linestyle='--', label='PV fit')
+            ax1p.plot(rgrid, p4_I, color='orange', linestyle=':', label='Pearson4 fit')
+            ax1p.set_xlabel('Radius [arcsec]')
+            ax1p.set_ylabel('Intensity (arb)')
+            ax1p.legend(fontsize=8)
+
+            ax2p = figp.add_subplot(2, 2, 3)
+            ax2p.plot(rgrid, resid_pv, color='red', label='obs - PV')
+            ax2p.plot(rgrid, resid_p4, color='orange', label='obs - P4')
+            ax2p.axhline(0, color='gray', linewidth=0.8)
+            ax2p.set_xlabel('Radius [arcsec]')
+            ax2p.set_ylabel('Residual (arb)')
+            ax2p.legend(fontsize=8)
+
+            ax3p = figp.add_subplot(2, 2, 2)
+            ax3p.plot(diam_grid, agg_pct_on_grid, color='blue', label='Aggregated EEF')
+            ax3p.plot(diam_grid, pv_eef, color='red', linestyle='--', label='PV EEF')
+            ax3p.plot(diam_grid, p4_eef, color='orange', linestyle=':', label='Pearson4 EEF')
+            ax3p.set_xlabel('Diameter [arcsec]')
+            ax3p.set_ylabel('EEF (%)')
+            ax3p.legend(fontsize=8)
+
+            ax4p = figp.add_subplot(2, 2, 4)
+            ax4p.plot(diam_grid, eef_resid_pv, color='red', label='agg - PV')
+            ax4p.plot(diam_grid, eef_resid_p4, color='orange', label='agg - P4')
+            ax4p.axhline(0, color='gray', linewidth=0.8)
+            ax4p.set_xlabel('Diameter [arcsec]')
+            ax4p.set_ylabel('EEF residual (pct)')
+            ax4p.legend(fontsize=8)
+
+            figp.tight_layout()
+            # Save timestamped and canonical copies into CustomPSFs and Figures
+            try:
+                _plt.savefig(perf_fname_ts, dpi=150, bbox_inches='tight')
+                _plt.savefig(perf_fname, dpi=150, bbox_inches='tight')
+                # Also save a copy in Figures for quick viewing
+                _plt.savefig(os.path.join('Figures', f'fitting_performance_{ts_short}.png'), dpi=150, bbox_inches='tight')
+                _plt.savefig(os.path.join('Figures', 'fitting_performance.png'), dpi=150, bbox_inches='tight')
+                _plt.close(figp)
+                print('Wrote fitting performance PNG to', perf_fname)
+            except Exception:
+                try:
+                    _plt.savefig(perf_fname, dpi=150, bbox_inches='tight')
+                    _plt.close(figp)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def export_fits():
         """Export the aggregated E2E PSF grid `Z` to a minimal FITS file.
 
@@ -4075,14 +5418,15 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             hide_context_menu()
             return
         
-        menu_text = "┌───────────────────────────────────┐\n"
-        menu_text += "│  1. Export PSF Plot               │\n"
-        menu_text += "│  2. Export EEF Plot               │\n"
-        menu_text += "│  3. Export FITS                   │\n"
-        menu_text += "│  4. Export EEF CSV                │\n"
-        menu_text += "│  5. Export Fit Parameters CSV     │\n"
-        menu_text += "│  6. Cancel                       │\n"
-        menu_text += "└───────────────────────────────────┘"
+        menu_text = "┌────────────────────────────────────────────┐\n"
+        menu_text += "│  1. Export PSF Plot                         │\n"
+        menu_text += "│  2. Export EEF Plot                         │\n"
+        menu_text += "│  3. Export FITS                             │\n"
+        menu_text += "│  4. Export EEF CSV                          │\n"
+        menu_text += "│  5. Export Fit Parameters CSV               │\n"
+        menu_text += "│  6. Export combined EEF + Fit (Excel)       │\n"
+        menu_text += "│  7. Cancel                                  │\n"
+        menu_text += "└────────────────────────────────────────────┘"
         
         menu_annotation = fig.text(x, y, menu_text,
                                    fontfamily='monospace',
@@ -4151,7 +5495,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     elif 0.26 < relative_y <= 0.40:  # Option 5 (Export Fit Params CSV)
                         hide_context_menu()
                         export_fit_params_csv()
-                    elif 0.08 < relative_y <= 0.26:  # Option 6 (Cancel)
+                    elif 0.14 < relative_y <= 0.26:  # Option 6 (Export combined EEF + Fit Excel)
+                        hide_context_menu()
+                        export_eef_and_params_excel()
+                    elif 0.08 < relative_y <= 0.14:  # Option 7 (Cancel)
                         hide_context_menu()
                 else:
                     # Clicked outside menu, hide it
@@ -4173,10 +5520,15 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 export_fits()
             elif event.key in ['4', 'c']:
                 hide_context_menu()
+            elif event.key in ['x', '6']:
+                export_eef_and_params_excel()
                 export_eef_csv()
             elif event.key in ['5', 's']:
                 hide_context_menu()
                 export_fit_params_csv()
+            elif event.key in ['6', 'x']:
+                hide_context_menu()
+                export_eef_and_params_excel()
             elif event.key in ['6', 'escape']:
                 hide_context_menu()
         else:
@@ -4241,6 +5593,74 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             # Default: show the interactive plot and keep it open. If this
             # fails (e.g. running in a headless environment), do NOT auto-save
             # a PNG; instead instruct the user to run with --output to save.
+            # Additionally, support --export-package: generate exports into a
+            # timestamped folder containing input, FITS, Excel and figures.
+            try:
+                # Check CLI flag exposed on __main__
+                _main_mod = sys.modules.get('__main__')
+                _main_args = getattr(_main_mod, 'args', None) if _main_mod is not None else None
+                _export_pkg = getattr(_main_args, 'export_package', False) if _main_args is not None else False
+            except Exception:
+                _export_pkg = False
+
+            if _export_pkg:
+                try:
+                    import shutil, glob, time as _time
+                    ts = _time.strftime('%Y%m%d_%H%M%S')
+                    pkg_dir = os.path.join('Exports', ts)
+                    os.makedirs(pkg_dir, exist_ok=True)
+                    # Copy input workbook
+                    try:
+                        shutil.copy2(args.file, os.path.join(pkg_dir, os.path.basename(args.file)))
+                    except Exception:
+                        pass
+                    # Trigger standard exports (they will write into CustomPSFs/ and Figures/)
+                    try:
+                        export_fits()
+                    except Exception:
+                        pass
+                    try:
+                        export_eef_and_params_excel()
+                    except Exception:
+                        pass
+                    try:
+                        export_psf_plot()
+                    except Exception:
+                        pass
+                    try:
+                        export_eef_plot()
+                    except Exception:
+                        pass
+                    # Collect generated artifacts by pattern and copy newest matches
+                    def copy_latest(patterns, dest_dir):
+                        for pat in patterns:
+                            try:
+                                matches = glob.glob(pat)
+                                if not matches:
+                                    continue
+                                latest = max(matches, key=os.path.getmtime)
+                                shutil.copy2(latest, os.path.join(dest_dir, os.path.basename(latest)))
+                            except Exception:
+                                continue
+
+                    # FITS
+                    copy_latest(['CustomPSFs/E2E_aggregated_*.fits'], pkg_dir)
+                    # Combined EEF+fit Excel
+                    copy_latest(['CustomPSFs/E2E_EEF_and_fitparams_*.xlsx', 'CustomPSFs/E2E_EEF_and_fitparams_*.xls'], pkg_dir)
+                    # PSF and EEF PNGs
+                    copy_latest(['Figures/E2E_PSF_*.png', 'Figures/E2E_PSF_*.PNG'], pkg_dir)
+                    copy_latest(['Figures/Encircled_Energy_*.png', 'Figures/Encircled_Energy_*.PNG'], pkg_dir)
+                    # EEF fit combined figure (may be named without timestamp)
+                    copy_latest(['Figures/E2E_fit_combined*.png', 'Figures/E2E_fit_combined.png'], pkg_dir)
+                    # Include fitting performance PNG if present in CustomPSFs
+                    copy_latest(['CustomPSFs/fitting_performance*.png', 'CustomPSFs/fitting_performance.png'], pkg_dir)
+
+                    print(f"Exported package to {pkg_dir}")
+                except Exception as e:
+                    try:
+                        print('Failed to create export package:', e)
+                    except Exception:
+                        pass
             try:
                 plt.show()
             except Exception:
@@ -4304,6 +5724,7 @@ if __name__ == '__main__':
     parser.add_argument('--metrics-r-margin', type=float, default=None, help=argparse.SUPPRESS)
     # Removed --input-pickle support; keep input-csv for CSV single-sheet paths
     parser.add_argument('--input-csv', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--export-package', dest='export_package', action='store_true', default=False, help='Create a timestamped folder with input, FITS, Excel and PNG artifacts')
     args = parser.parse_args()
 
     # Expose parsed args to helper functions that inspect __main__.args

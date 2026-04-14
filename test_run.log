@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/ivo ferreira/Library/CloudStorage/OneDrive-ESA/NewAthenaE2EPSF/main.py", line 2, in <module>
+    import numpy as np  # For numerical operations and arrays
+ModuleNotFoundError: No module named 'numpy'
