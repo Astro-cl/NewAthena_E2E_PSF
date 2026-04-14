@@ -6929,17 +6929,29 @@ if __name__ == '__main__':
                     ws = wb['Thermal']
                     # Read header row (assume first row contains headers)
                     headers = [str(c.value).strip() if c.value is not None else '' for c in ws[1]]
-                    # Find matching columns (case-insensitive contains)
+                    # Find matching columns (prefer exact base names and skip
+                    # any headers that end with an underscore to avoid backup
+                    # columns like 'd_therm_rotx_'). Normalise by removing
+                    # non-alphanumeric characters (except underscore) for matching.
+                    import re as _re
+                    def _norm_header(s: str) -> str:
+                        return _re.sub(r"[^0-9a-z_]+", "", s.lower()).strip()
+
                     col_rotx = None
                     col_roty = None
                     col_z = None
                     for idx, h in enumerate(headers):
-                        hn = h.lower()
-                        if 'd_therm_rotx' in hn.replace(' ', '') or 'd_therm_rotx' in hn:
+                        if not h:
+                            continue
+                        # Skip headers that intentionally end with an underscore
+                        if h.strip().endswith('_'):
+                            continue
+                        nh = _norm_header(h)
+                        if nh == 'd_therm_rotx' or nh.startswith('d_therm_rotx'):
                             col_rotx = idx + 1
-                        if 'd_therm_roty' in hn.replace(' ', '') or 'd_therm_roty' in hn:
+                        if nh == 'd_therm_roty' or nh.startswith('d_therm_roty'):
                             col_roty = idx + 1
-                        if 'd_therm_z' in hn.replace(' ', '') or 'd_therm_z' in hn:
+                        if nh == 'd_therm_z' or nh.startswith('d_therm_z'):
                             col_z = idx + 1
 
                     # Compute deltas
