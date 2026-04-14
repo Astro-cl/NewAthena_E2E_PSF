@@ -7018,16 +7018,21 @@ if __name__ == '__main__':
                 # Look for new subdirectories created during the child run
                 all_dirs = [d for d in os.listdir(exports_root) if os.path.isdir(os.path.join(exports_root, d))]
                 new_dirs = [d for d in all_dirs if d not in existing_dirs]
+                # Build timestamp and safe stem for zip naming (no .xlsx)
+                src_stem = os.path.splitext(src_basename)[0]
+                ts = time.strftime('%Y%m%d_%H%M%S')
                 if new_dirs:
                     # Prefer the newest created package folder
                     latest_dir = max(new_dirs, key=lambda d: os.path.getmtime(os.path.join(exports_root, d)))
                     pkg_path = os.path.join(exports_root, latest_dir)
-                    zip_target = os.path.join(exports_root, f"{prefix}_{src_basename}.zip")
-                    shutil.make_archive(os.path.splitext(zip_target)[0], 'zip', pkg_path)
+                    zip_base = os.path.join(exports_root, f"{prefix}_{src_stem}_{ts}")
+                    shutil.make_archive(zip_base, 'zip', pkg_path)
+                    zip_target = f"{zip_base}.zip"
                     print(f"Created package from export folder: {zip_target}")
                 else:
                     # Fallback: create a zip containing just the modified workbook
-                    zip_target = os.path.join(exports_root, f"{prefix}_{src_basename}.zip")
+                    zip_base = os.path.join(exports_root, f"{prefix}_{src_stem}_{ts}")
+                    zip_target = f"{zip_base}.zip"
                     with zipfile.ZipFile(zip_target, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
                         zf.write(new_path, arcname=os.path.basename(new_path))
                     print(f"Created fallback package (workbook only): {zip_target}")
