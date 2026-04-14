@@ -7025,10 +7025,97 @@ if __name__ == '__main__':
                     # Prefer the newest created package folder
                     latest_dir = max(new_dirs, key=lambda d: os.path.getmtime(os.path.join(exports_root, d)))
                     pkg_path = os.path.join(exports_root, latest_dir)
+
+                    # Attempt to rename specific artifacts inside the package dir
+                    try:
+                        # Rename helpers: operate on files inside pkg_path
+                        def _rename_in_pkg(glob_patterns, new_name):
+                            for pat in glob_patterns:
+                                matches = glob.glob(os.path.join(pkg_path, pat))
+                                if not matches:
+                                    continue
+                                latest = max(matches, key=os.path.getmtime)
+                                dst = os.path.join(pkg_path, new_name)
+                                try:
+                                    # If dst exists remove it first
+                                    if os.path.exists(dst):
+                                        os.remove(dst)
+                                    os.replace(latest, dst)
+                                    return True
+                                except Exception:
+                                    try:
+                                        shutil.copy2(latest, dst)
+                                        return True
+                                    except Exception:
+                                        return False
+                            return False
+
+                        # 1) Input file already copied into pkg_dir earlier
+                        # 2) Rename combined figure
+                        _rename_in_pkg(['E2E_fit_combined*.png', 'E2E_fit_combined.png'], 'Combined_E2E_EEF.png')
+                        # 3) Rename PSF PNG
+                        _rename_in_pkg(['E2E_PSF_*.png', 'E2E_PSF*.png', 'E2E_PSF_*.PNG'], 'E2E_PSF.png')
+                        # 4) Rename aggregated FITS
+                        _rename_in_pkg(['E2E_aggregated_*.fits', 'E2E_aggregated*.fits'], 'E2E_PSF.fits')
+                        # 5) Rename EEF & fit params workbook
+                        _rename_in_pkg(['E2E_EEF_and_fitparams_*.xlsx', 'E2E_EEF_and_fitparams*.xlsx', 'E2E_EEF_and_fitparams_*.xls'], 'EEF_fittingparams.xlsx')
+                    except Exception as e:
+                        print(f"Warning: renaming artifacts failed: {e}")
+
+                    # Create zip with controlled ordering: input, Combined_E2E_EEF.png,
+                    # E2E_PSF.png, E2E_PSF.fits, EEF_fittingparams.xlsx, then rest.
                     zip_base = os.path.join(exports_root, f"{prefix}_{src_stem}_{ts}")
-                    shutil.make_archive(zip_base, 'zip', pkg_path)
                     zip_target = f"{zip_base}.zip"
-                    print(f"Created package from export folder: {zip_target}")
+                    try:
+                        with zipfile.ZipFile(zip_target, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                            ordered = []
+                            # 1) Input file
+                            input_dst = os.path.join(pkg_path, os.path.basename(args.file))
+                            if os.path.exists(input_dst):
+                                ordered.append(input_dst)
+                            # 2) Combined figure
+                            for name in ('Combined_E2E_EEF.png',):
+                                p = os.path.join(pkg_path, name)
+                                if os.path.exists(p):
+                                    ordered.append(p)
+                            # 3) E2E_PSF.png
+                            p = os.path.join(pkg_path, 'E2E_PSF.png')
+                            if os.path.exists(p):
+                                ordered.append(p)
+                            # 4) E2E_PSF.fits
+                            p = os.path.join(pkg_path, 'E2E_PSF.fits')
+                            if os.path.exists(p):
+                                ordered.append(p)
+                            # 5) EEF_fittingparams.xlsx
+                            p = os.path.join(pkg_path, 'EEF_fittingparams.xlsx')
+                            if os.path.exists(p):
+                                ordered.append(p)
+
+                            # Add ordered files first
+                            added = set()
+                            for fpath in ordered:
+                                arcname = os.path.basename(fpath)
+                                try:
+                                    zf.write(fpath, arcname=arcname)
+                                    added.add(os.path.abspath(fpath))
+                                except Exception:
+                                    pass
+
+                            # Then add remaining files under pkg_path
+                            for root, _, files in os.walk(pkg_path):
+                                for fname in files:
+                                    full = os.path.join(root, fname)
+                                    if os.path.abspath(full) in added:
+                                        continue
+                                    # compute archive name relative to pkg_path
+                                    arcname = os.path.relpath(full, pkg_path)
+                                    try:
+                                        zf.write(full, arcname=arcname)
+                                    except Exception:
+                                        pass
+                        print(f"Created package from export folder: {zip_target}")
+                    except Exception as e:
+                        print(f"Failed to create package archive: {e}")
                 else:
                     # Fallback: create a zip containing just the modified workbook
                     zip_base = os.path.join(exports_root, f"{prefix}_{src_stem}_{ts}")
