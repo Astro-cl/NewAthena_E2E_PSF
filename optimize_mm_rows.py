@@ -1,3 +1,14 @@
+"""Row-wise MM assignment optimizer and HEW approximations.
+
+This module contains utilities to evaluate and optimize mirror-module (MM)
+assignments within physical rows/slots to reduce HEW-like objectives.
+It provides incremental HEW approximations, swap-based local search helpers
+and convenient CLI entrypoints used for offline optimization runs.
+
+Non-core helper scripts have been moved into `tools/`; this module
+focuses on algorithmic primitives and should be importable by tests.
+"""
+
 import argparse
 import math
 import random

@@ -1,3 +1,15 @@
+"""Command-line entrypoints and Excel I/O helpers for PSF generation.
+
+This module implements the primary CLI functions used by the project's
+headless test harness and the command-line workflow. It provides Excel
+loaders for the `MM_PSF` and `A_eff` tables, PSF parameter conversion,
+vignetting application and plotting helpers.
+
+Note: many small utility scripts have been moved to `tools/` (e.g.
+`tools/compute_aeff_values.py`) to keep the repository root focused on
+core modules and the GUI. Use the `tools/` folder for one-off helper
+commands and legacy scripts retained under `scripts/legacy/`.
+"""
 import argparse  # For parsing command-line arguments
 import numpy as np  # For numerical operations and arrays
 import pandas as pd  # For data manipulation and Excel reading
@@ -5,6 +17,7 @@ import matplotlib
 import matplotlib.pyplot as plt  # For plotting
 import matplotlib.gridspec as gridspec
 import os
+from scipy.optimize import curve_fit
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 from distributions_rotated import (
@@ -347,9 +360,18 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         try:
             mm_config_df = pd.read_excel(path, sheet_name='MM configuration', engine='openpyxl')
             if 'MM #' in mm_config_df.columns and 'x_MM [m]' in mm_config_df.columns and 'r_MM [m]' in mm_config_df.columns:
-                # Create mapping from MM # to theta_degrees
-                # theta_cw_from_y: angle clockwise from y-axis (this is what user specifies)
-                # Both theta_position and theta_degrees use the same formula: -(theta_cw_from_y - 90)
+                # Create mapping from MM # to theta_degrees.
+                # Convention note:
+                # - User-facing MM configuration historically specifies an
+                #   angle measured clockwise from the Y axis. Internally we
+                #   convert to the project's `theta_degrees` convention via
+                #   `-(theta_cw_from_y - 90)` so that theta_degrees==0 points
+                #   along +Y and positive angles rotate the PSF as used by
+                #   gaussian_2d_rotated/pseudo_voigt_2d_rotated.
+                # - We compute an initial counter-clockwise angle via
+                #   `atan2(x, y)` (note the swapped args to match the
+                #   clockwise-from-Y intent), convert to a clockwise-from-Y
+                #   range [0, 360) and finally apply the above transform.
                 if 'y_MM [m]' in mm_config_df.columns:
                     theta_ccw = np.degrees(np.arctan2(mm_config_df['x_MM [m]'], mm_config_df['y_MM [m]']))
                     theta_cw_from_y = np.where(
@@ -2328,6 +2350,18 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
 
 def _resolve_custom_psf_path(workbook_path: str, stem: str) -> str | None:
+    """Resolve a workbook-referenced PSF file stem to an existing path.
+
+    The workbook may reference a PSF file by a stem or relative path.
+    This helper tries common extensions and a small set of search
+    directories (workbook dir, repo Distributions/ and CustomPSFs/, CWD)
+    and returns the first existing absolute path or ``None`` when not
+    found. Returns ``None`` for empty or placeholder stems.
+
+    Parameters
+    - workbook_path: path to the workbook containing the stem reference
+    - stem: filename stem or relative path as provided in the workbook
+    """
     stem = str(stem).strip()
     if not stem or stem.lower() in {'nan', 'none'}:
         return None
@@ -2469,6 +2503,18 @@ def compute_dm_from_dz(mm: dict, row: dict, d_z: float) -> tuple[float, float]:
 
 
 def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None, return_metrics_only: bool = False, debug: bool = False, metrics_n_r_final: int | None = None, metrics_n_theta_final: int | None = None, metrics_r_margin: float | None = None):
+    """Create combined PSF image, compute HEW/EEF metrics, and optionally save output.
+
+    This function composes per-MM PSFs (analytic or matrix-based) described
+    in `df`, computes rotation-invariant HEW and EEF via polar integration,
+    fits aggregated radial profiles (modified pseudo-Voigt and King) and
+    produces a summary figure. Use `return_metrics_only=True` to retrieve
+    computed numeric metrics without creating the plot (useful for CI).
+
+    Important: `df` must include at minimum `mux`, `muy`, `sigmax`,
+    `sigmay`, `weight` and `distribution`/custom PSF references as used by
+    the rest of the codebase.
+    """
     # Close any existing matplotlib figures to prevent accumulation
     plt.close('all')
 
@@ -2918,6 +2964,37 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         def core_weights(r, r0):
             return np.exp(-(r/r0)**2)
 
+        # Utility: bounded multi-start least_squares runner to fit EEF-focused residuals
+        def multi_start_least_squares(resid_func, x0, lb, ub, attempts=6, rng_seed=12345, **ls_kwargs):
+            try:
+                from scipy.optimize import least_squares
+            except Exception:
+                return None, None
+            rng = np.random.default_rng(rng_seed)
+            best_score = np.inf
+            best_x = None
+            last_res = None
+            x0 = np.asarray(x0, dtype=float)
+            lb = np.asarray(lb, dtype=float)
+            ub = np.asarray(ub, dtype=float)
+            for attempt in range(attempts):
+                try:
+                    pert = x0 * (1.0 + rng.normal(0.0, 0.12, size=x0.shape))
+                    pert = np.maximum(lb, np.minimum(ub, pert))
+                    res = least_squares(resid_func, pert, bounds=(lb, ub), **ls_kwargs)
+                except Exception:
+                    res = None
+                if res is not None and hasattr(res, 'fun'):
+                    try:
+                        score = float(np.sqrt(np.mean(res.fun**2)))
+                    except Exception:
+                        score = np.inf
+                    if np.isfinite(score) and score < best_score:
+                        best_score = score
+                        best_x = res.x
+                        last_res = res
+            return best_x, last_res
+
         # Prepare data mask (positive intensities)
         mask = np.isfinite(I_profile) & (I_profile > 0)
         r_fit = r_arcsec[mask]
@@ -2985,45 +3062,26 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             # Give the EEF objective most weight but keep a small intensity
             # residual component to stabilise the core fit and prevent large
             # deviations at intermediate radii.
-            eef_weight = 12.0
+            eef_weight = 30.0
             intensity_weight_scale = 0.25
 
             def resid_pvoigt(params):
                 A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x = params
                 model = beta_pseudo_gaussian(r_fit, A_x, Gc_x, Gw_x, eta_x, beta_x, scalar_x)
                 model = np.maximum(model, floor)
-                # intensity residual (log-space), scaled down
-                log_resid = np.log(model) - np.log(I_fit)
-                res_int = (log_resid * np.sqrt(weights)) * intensity_weight_scale
-                # EEF residual (fraction)
+                # EEF residual (fraction) only: compute cumulative model energy and compare
                 cumulative_model = np.cumsum(2.0 * np.pi * r_fit * model * dr_arcsec)
                 total_model = cumulative_model[-1] if cumulative_model.size else 1.0
                 eef_model = cumulative_model / total_model if total_model > 0 else cumulative_model
                 res_eef = (eef_model - eef_data) * eef_weight
-                # Combined residuals: EEF first (dominant), then intensity
-                return np.concatenate([res_eef, res_int])
+                return res_eef
 
-            # Use multi-start least_squares for robustness
+            # Use multi-start least_squares for robustness (EEF-only objective)
             if have_least_squares:
                 try:
-                    best_score = np.inf
-                    best_x = np.array(x0)
-                    rng = np.random.default_rng(12345)
-                    last_res = None
-                    for attempt in range(6):
-                        pert = np.array(x0) * (1.0 + rng.normal(0.0, 0.12, size=len(x0)))
-                        pert = np.maximum(lb, np.minimum(ub, pert))
-                        try:
-                            res = least_squares(resid_pvoigt, pert, bounds=(lb, ub), loss='soft_l1', f_scale=1e-3, max_nfev=15000)
-                        except Exception:
-                            res = None
-                        if res is not None and hasattr(res, 'fun'):
-                            score = float(np.sqrt(np.mean(res.fun**2)))
-                            if np.isfinite(score) and score < best_score:
-                                best_score = score
-                                best_x = res.x
-                                last_res = res
-                    if last_res is not None:
+                    # increase PV multi-start attempts and allow longer evaluation per start
+                    best_x, last_res = multi_start_least_squares(resid_pvoigt, x0, lb, ub, attempts=36, rng_seed=12345, loss='soft_l1', f_scale=1e-3, max_nfev=120000)
+                    if last_res is not None and best_x is not None:
                         A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit = best_x.tolist()
                     else:
                         # fallback to curve_fit if LS failed
@@ -3072,12 +3130,17 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             try:
                 from lmfit.models import Pearson4Model
                 from lmfit import Parameters
+                print("DEBUG: lmfit imported successfully for Pearson4 fitting")
                 
                 # Create Pearson4 model
                 pearson4_model = Pearson4Model()
                 
                 # Initial guess from pseudo-Voigt peak parameters
                 params = pearson4_model.guess(I_fit, x=r_fit)
+                try:
+                    print(f"DEBUG: pearson4 initial guess amp={params['amplitude'].value}, center={params['center'].value}, sigma={params['sigma'].value}, expon={params['expon'].value}, skew={params['skew'].value}")
+                except Exception:
+                    print("DEBUG: pearson4 initial guess created but some params missing")
                 # Adjust initial values for better convergence
                 params['amplitude'].value = A_fit
                 params['center'].value = Gamma_c_fit * 0.5
@@ -3085,94 +3148,652 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 params['expon'].value = 1.5
                 params['skew'].value = 0.0
                 
-                # Define custom residual that combines intensity and EEF errors
+                # Define EEF-only residual for Pearson4 and run bounded multi-start least_squares
                 dr_arcsec_p4 = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
                 radial_energy_data_p4 = 2.0 * np.pi * r_fit * I_fit * dr_arcsec_p4
                 cumulative_data_p4 = np.cumsum(radial_energy_data_p4)
                 total_data_p4 = cumulative_data_p4[-1] if cumulative_data_p4.size else 1.0
                 eef_data_p4 = cumulative_data_p4 / total_data_p4 if total_data_p4 > 0 else cumulative_data_p4
-                
-                def residual_p4(params):
-                    model = pearson4_model.eval(params=params, x=r_fit)
-                    model = np.maximum(model, floor)
-                    # Intensity residual (log scale)
-                    log_resid = np.log(model) - np.log(I_fit)
-                    res_int = log_resid * np.sqrt(weights)
-                    # EEF residual
-                    cumulative_model_p4 = np.cumsum(2.0 * np.pi * r_fit * model * dr_arcsec_p4)
-                    total_model_p4 = cumulative_model_p4[-1] if cumulative_model_p4.size else 1.0
-                    eef_model_p4 = cumulative_model_p4 / total_model_p4 if total_model_p4 > 0 else cumulative_model_p4
-                    res_eef = (eef_model_p4 - eef_data_p4) * eef_weight
-                    return np.concatenate([res_int, res_eef])
-                
-                # Fit with least_squares for combined optimization
-                if have_least_squares:
+
+                # Prepare parameter bounds via lmfit Parameters when available
+                try:
+                    # set sensible bounds on lmfit params to stabilize EEF-only optimization
+                    params['amplitude'].min = max(float(floor), 0.0)
+                    params['amplitude'].max = float(np.nanmax(I_fit) * 10.0 if I_fit.size else params['amplitude'].value * 100.0)
+                    params['center'].min = 0.0
+                    params['center'].max = float(min(r_arcsec.max() * 0.5 if r_arcsec.size else 50.0, 50.0))
+                    params['sigma'].min = 1e-3
+                    params['sigma'].max = float(max(1.0, r_arcsec.max()))
+                    params['expon'].min = 1.0
+                    params['expon'].max = 8.0
+                    params['skew'].min = -2.0
+                    params['skew'].max = 2.0
+                except Exception:
+                    pass
+
+                # Residual that returns only EEF difference (scaled)
+                def residual_p4_params(pdict):
                     try:
-                        from lmfit import Minimizer
-                        fitter = Minimizer(residual_p4, params, nan_policy='omit')
-                        pearson4_result = fitter.minimize(method='leastsq', max_nfev=10000)
+                        # Use a coarser radial grid for EEF evaluation to speed residuals
+                        try:
+                            rg = r_arcsec_coarse
+                        except NameError:
+                            rg = r_arcsec
+                        model = pearson4_model.eval(params=pdict, x=rg)
+                        model = np.maximum(model, 0.0)
+                        dr_rg = float(rg[1] - rg[0]) if rg.size > 1 else dr_arcsec_p4
+                        radial_model = 2.0 * np.pi * rg * model * dr_rg
+                        tot_model = np.sum(radial_model)
+                        if tot_model <= 0 or not np.isfinite(tot_model):
+                            return np.ones_like(eef_data_p4) * 1e6
+                        eef_model = np.cumsum(radial_model) / tot_model
+                        # interpolate model EEF (fraction) to the data sample radii r_fit
+                        from numpy import interp
+                        model_at_rfit = interp(r_fit, rg, eef_model)
+                        # Normalize EEF residuals by typical EEF variation to smooth objective
+                        try:
+                            eef_scale = float(np.maximum(1e-3, np.nanstd(eef_data_p4)))
+                        except Exception:
+                            eef_scale = 1.0
+                        eef_weight_norm = 1.0
+                        return (model_at_rfit - eef_data_p4) / eef_scale * eef_weight_norm
                     except Exception:
-                        # Fallback to lmfit's built-in fit
+                        return np.ones_like(eef_data_p4) * 1e6
+
+                # Run bounded multi-start optimization using least_squares when available
+                pearson4_result = None
+                try:
+                    if have_least_squares:
+                        best_score = np.inf
+                        best_params = None
+                        rng = np.random.default_rng(4321)
+                        # Build initial vector from params
+                        try:
+                            p0_vec = np.array([params['amplitude'].value, params['center'].value, params['sigma'].value, params['expon'].value, params['skew'].value])
+                        except Exception:
+                            # Derive a better initial guess from the pseudo-Voigt
+                            # aggregated fit: amplitude from PV core, center from
+                            # data peak, sigma from PV core width, and expon
+                            # loosely informed by PV beta.
+                            try:
+                                amp_guess = float(A_fit)
+                            except Exception:
+                                amp_guess = float(np.nanmax(I_fit) if I_fit.size else 1.0)
+                            try:
+                                # center: radius of maximum measured intensity
+                                center_guess = float(r_fit[np.nanargmax(I_fit)]) if (r_fit.size and np.any(np.isfinite(I_fit))) else 0.0
+                            except Exception:
+                                center_guess = 0.0
+                            try:
+                                sigma_guess = max(1e-3, float(Gamma_c_fit))
+                            except Exception:
+                                sigma_guess = max(1e-3, float(np.median(r_fit)) if r_fit.size else 1.0)
+                            try:
+                                expon_guess = float(beta_fit) if ('beta_fit' in locals() and np.isfinite(beta_fit)) else 1.5
+                                # clamp to Pearson4 reasonable range
+                                expon_guess = float(max(1.0, min(6.0, expon_guess)))
+                            except Exception:
+                                expon_guess = 1.5
+                            p0_vec = np.array([amp_guess, center_guess, sigma_guess, expon_guess, 0.0])
+                        try:
+                            print(f"DEBUG: pearson4 p0_vec={p0_vec}")
+                        except Exception:
+                            pass
+
+                        # Try a quick lmfit intensity-only fit to obtain a robust
+                        # starting point for the multi-start EEF optimization.
+                        try:
+                            quick_fit = None
+                            try:
+                                quick_fit = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=3000)
+                            except Exception:
+                                quick_fit = None
+                            if quick_fit is not None and hasattr(quick_fit, 'params'):
+                                try:
+                                    amp_q = float(quick_fit.params['amplitude'].value)
+                                    cen_q = float(quick_fit.params['center'].value) if 'center' in quick_fit.params else 0.0
+                                    sig_q = float(quick_fit.params['sigma'].value)
+                                    exp_q = float(quick_fit.params['expon'].value) if 'expon' in quick_fit.params else 1.5
+                                    skew_q = float(quick_fit.params['skew'].value) if 'skew' in quick_fit.params else 0.0
+                                    p0_vec = np.array([amp_q, cen_q, sig_q, exp_q, skew_q])
+                                    try:
+                                        print(f"DEBUG: seed p0_vec from quick lmfit intensity fit: {p0_vec}")
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # Build a coarser radial grid for EEF computations to reduce
+                        # costly full-array evaluations during multi-starts.
+                        try:
+                            max_pts = 300
+                            if r_arcsec.size > max_pts:
+                                r_arcsec_coarse = np.linspace(0.0, float(r_arcsec.max()), max_pts)
+                            else:
+                                r_arcsec_coarse = r_arcsec
+                        except Exception:
+                            r_arcsec_coarse = r_arcsec
+                        # Subsample r_fit for intensity residuals during multi-starts
+                        try:
+                            max_int_samples = 300
+                            if r_fit.size > max_int_samples:
+                                idxs = np.round(np.linspace(0, r_fit.size-1, max_int_samples)).astype(int)
+                                r_fit_sub = r_fit[idxs]
+                                I_fit_sub = I_fit[idxs]
+                            else:
+                                r_fit_sub = r_fit
+                                I_fit_sub = I_fit
+                        except Exception:
+                            r_fit_sub = r_fit
+                            I_fit_sub = I_fit
+
+                        # Bounds vector: [amp, center, sigma, expon, skew]
+                        try:
+                            lb = np.array([params['amplitude'].min if hasattr(params['amplitude'], 'min') else max(float(floor), 0.0),
+                                           params['center'].min if hasattr(params['center'], 'min') else 0.0,
+                                           params['sigma'].min if hasattr(params['sigma'], 'min') else 1e-6,
+                                           params['expon'].min if hasattr(params['expon'], 'min') else 1.0,
+                                           params['skew'].min if hasattr(params['skew'], 'min') else -5.0])
+                            ub = np.array([params['amplitude'].max if hasattr(params['amplitude'], 'max') else np.inf,
+                                           params['center'].max if hasattr(params['center'], 'max') else float(r_arcsec.max() if r_arcsec.size else 50.0),
+                                           params['sigma'].max if hasattr(params['sigma'], 'max') else float(max(1.0, r_arcsec.max() if r_arcsec.size else 50.0)),
+                                           params['expon'].max if hasattr(params['expon'], 'max') else 8.0,
+                                           params['skew'].max if hasattr(params['skew'], 'max') else 5.0])
+                        except Exception:
+                            lb = np.array([max(float(floor), 0.0), 0.0, 1e-6, 1.0, -5.0])
+                            ub = np.array([np.inf, float(r_arcsec.max() if r_arcsec.size else 50.0), float(max(1.0, r_arcsec.max() if r_arcsec.size else 50.0)), 8.0, 5.0])
+
+                        from scipy.optimize import least_squares
+
+                        def vec_to_params(vec):
+                            # convert vector to lmfit-like param dict for pearson4_model.eval
+                            try:
+                                p = {
+                                    'amplitude': vec[0],
+                                    'center': vec[1],
+                                    'sigma': vec[2],
+                                    'expon': vec[3],
+                                    'skew': vec[4]
+                                }
+                                return p
+                            except Exception:
+                                return None
+
+                        def compute_p4_eef_rms_from_vec(vec):
+                            """Compute unscaled EEF RMS (model vs data) for a Pearson4 parameter vector.
+                            Returns np.inf on failure.
+                            """
+                            try:
+                                pd = vec_to_params(np.asarray(vec, dtype=float))
+                                if pd is None:
+                                    return np.inf
+                                model_full = pearson4_model.eval(params=pd, x=r_arcsec)
+                                model_full = np.maximum(model_full, 0.0)
+                                radial_model = 2.0 * np.pi * r_arcsec * model_full * dr_arcsec_p4
+                                tot_model = np.sum(radial_model)
+                                if tot_model <= 0 or not np.isfinite(tot_model):
+                                    return np.inf
+                                eef_model = np.cumsum(radial_model) / tot_model
+                                from numpy import interp
+                                model_eef_at_rfit = interp(r_fit, r_arcsec, eef_model)
+                                # compare to the data EEF computed for Pearson4 block
+                                try:
+                                    ref = eef_data_p4
+                                except Exception:
+                                    ref = eef_data
+                                res = model_eef_at_rfit - ref
+                                return float(np.sqrt(np.mean(res**2))) if res.size else np.inf
+                            except Exception:
+                                return np.inf
+
+                        def compute_pv_eef_rms():
+                            """Compute unscaled EEF RMS for the pseudo-Voigt fit vs data when available.
+                            Returns np.inf if PV EEF not available.
+                            """
+                            try:
+                                if fit_profile_pct is None:
+                                    return np.inf
+                                from numpy import interp
+                                pv_eef_frac = np.asarray(fit_profile_pct) / 100.0
+                                model_eef_at_rfit = interp(r_fit, r_arcsec, pv_eef_frac)
+                                ref = eef_data if 'eef_data' in locals() else (eef_data_p4 if 'eef_data_p4' in locals() else None)
+                                if ref is None:
+                                    return np.inf
+                                res = model_eef_at_rfit - ref
+                                return float(np.sqrt(np.mean(res**2))) if res.size else np.inf
+                            except Exception:
+                                return np.inf
+
+                        # Use shared multi-start helper for EEF-only Pearson4 fitting
+                        try:
+                            def pearson4_resid_vec(v):
+                                return residual_p4_params(vec_to_params(v))
+                            # reduce attempts and max evals for speed; coarse EEF grid used inside residuals
+                            # increase Pearson4 EEF-only multi-starts and per-start budget
+                            best_params, last_res_p4 = multi_start_least_squares(pearson4_resid_vec, p0_vec, lb, ub, attempts=36, rng_seed=4321, max_nfev=120000, loss='soft_l1', f_scale=1e-4)
+                            try:
+                                print(f"DEBUG: pearson4 multi-start result best_params={best_params}, last_res_cost={None if last_res_p4 is None else getattr(last_res_p4,'cost',None)}")
+                            except Exception:
+                                pass
+                            # Inspect optimizer result and accept only if residuals look reasonable
+                            accepted_p4 = False
+                            rms_p4 = np.inf
+                            try:
+                                if last_res_p4 is not None and hasattr(last_res_p4, 'fun'):
+                                    fun = np.asarray(last_res_p4.fun, dtype=float)
+                                    rms_p4 = float(np.sqrt(np.mean(fun**2))) if fun.size else np.inf
+                                    fun_min = float(np.nanmin(fun)) if fun.size else np.nan
+                                    fun_max = float(np.nanmax(fun)) if fun.size else np.nan
+                                    fun_std = float(np.nanstd(fun)) if fun.size else np.nan
+                                    print(f"DEBUG: pearson4 residuals stats: rms={rms_p4:.3g}, min={fun_min:.3g}, max={fun_max:.3g}, std={fun_std:.3g}")
+                            except Exception:
+                                pass
+                            # Threshold for accepting EEF-only Pearson4 fit (empirical)
+                            try:
+                                # Make EEF-only Pearson4 acceptance more stringent
+                                # Lowering threshold further to reduce false positives
+                                # Make EEF-only Pearson4 acceptance more stringent
+                                # Lowering threshold further to reduce false positives
+                                threshold_rms = 1.0
+                                if best_params is not None and np.isfinite(rms_p4) and rms_p4 < threshold_rms:
+                                    accepted_p4 = True
+                            except Exception:
+                                accepted_p4 = False
+                            if accepted_p4:
+                                # Only accept this EEF-only Pearson4 result if it improves
+                                # the EEF match relative to the pseudo-Voigt fit.
+                                try:
+                                    p4_eef_rms = compute_p4_eef_rms_from_vec(best_params)
+                                    pv_eef_rms = compute_pv_eef_rms()
+                                except Exception:
+                                    p4_eef_rms = np.inf
+                                    pv_eef_rms = np.inf
+                                if np.isfinite(p4_eef_rms) and np.isfinite(pv_eef_rms):
+                                    better = (p4_eef_rms <= 3.0 * pv_eef_rms)
+                                else:
+                                    # if PV not available, fall back to original criterion
+                                    better = True
+                                if better:
+                                    class SimpleResult:
+                                        pass
+                                    pearson4_result = SimpleResult()
+                                    pearson4_result.params = vec_to_params(best_params)
+                                    try:
+                                        print(f"DEBUG: pearson4_result params set from best_params: {pearson4_result.params}")
+                                    except Exception:
+                                        pass
+                                else:
+                                    pearson4_result = None
+                                    try:
+                                        print(f"DEBUG: pearson4 fit rejected because PV EEF is closer (p4_rms={p4_eef_rms:.3g}, pv_rms={pv_eef_rms:.3g})")
+                                    except Exception:
+                                        pass
+                            else:
+                                pearson4_result = None
+                                try:
+                                    print(f"DEBUG: pearson4 fit rejected (rms={rms_p4}); pearson4_result set to None")
+                                except Exception:
+                                    pass
+                            # Fallback: if EEF-only fit failed, try a combined EEF + intensity objective
+                            if pearson4_result is None:
+                                try:
+                                    print("DEBUG: attempting combined EEF+intensity Pearson4 fit (fallback)")
+                                    intensity_weight_scale_p4 = 0.25
+                                    from numpy import interp
+                                    def pearson4_resid_comb_vec(v):
+                                        try:
+                                            pd = vec_to_params(v)
+                                            # Evaluate EEF on a coarse grid for speed
+                                            try:
+                                                rg = r_arcsec_coarse
+                                            except NameError:
+                                                rg = r_arcsec
+                                            model_full = pearson4_model.eval(params=pd, x=rg)
+                                            model_full = np.maximum(model_full, 0.0)
+                                            dr_rg = float(rg[1] - rg[0]) if rg.size > 1 else dr_arcsec_p4
+                                            radial_model = 2.0 * np.pi * rg * model_full * dr_rg
+                                            tot_model = np.sum(radial_model)
+                                            if tot_model <= 0 or not np.isfinite(tot_model):
+                                                # return large penalty vector for both parts
+                                                return np.ones((eef_data_p4.size + r_fit_sub.size,), dtype=float) * 1e6
+                                            eef_model = np.cumsum(radial_model) / tot_model
+                                            model_at_rfit = interp(r_fit, rg, eef_model)
+                                            # Normalize EEF residuals by typical EEF variation
+                                            try:
+                                                eef_scale = float(np.maximum(1e-3, np.nanstd(eef_data_p4)))
+                                            except Exception:
+                                                eef_scale = 1.0
+                                            eef_weight_norm = 1.0
+                                            eef_res = (model_at_rfit - eef_data_p4) / eef_scale * eef_weight_norm
+                                            # intensity residuals on data sample points (log space)
+                                            # use subsampled points for intensity residuals during multi-starts
+                                            model_rfit_vals_sub = pearson4_model.eval(params=pd, x=r_fit_sub)
+                                            model_rfit_vals_sub = np.maximum(model_rfit_vals_sub, floor)
+                                            # normalize log-int residuals by their typical std to smooth objective
+                                            try:
+                                                int_ref = np.log(I_fit_sub + floor)
+                                                int_scale = float(np.maximum(1e-3, np.nanstd(int_ref)))
+                                            except Exception:
+                                                int_scale = 1.0
+                                            int_res_sub = (np.log(model_rfit_vals_sub + floor) - np.log(I_fit_sub + floor)) / int_scale * (intensity_weight_scale_p4 * 2.0)
+                                            return np.concatenate([eef_res, int_res_sub])
+                                        except Exception:
+                                            return np.ones((eef_data_p4.size + r_fit_sub.size,), dtype=float) * 1e6
+
+                                    try:
+                                        # use fewer starts and fewer function evaluations for the combined fit
+                                        # increase combined-fit multi-starts and per-start budget
+                                        best_params2, last_res2 = multi_start_least_squares(pearson4_resid_comb_vec, p0_vec, lb, ub, attempts=36, rng_seed=9999, loss='soft_l1', f_scale=1e-4, max_nfev=120000)
+                                    except Exception:
+                                        best_params2, last_res2 = None, None
+                                    try:
+                                        print(f"DEBUG: combined-fit best_params2={best_params2}, last_res2_cost={None if last_res2 is None else getattr(last_res2,'cost',None)}")
+                                    except Exception:
+                                        pass
+                                    accepted2 = False
+                                    rms2 = np.inf
+                                    try:
+                                        # Re-evaluate fitted model on data points to compute
+                                        # meaningful unscaled EEF and intensity diagnostics.
+                                        if best_params2 is not None:
+                                            pd2 = vec_to_params(best_params2)
+                                            # full model on r_arcsec
+                                            model_full2 = pearson4_model.eval(params=pd2, x=r_arcsec)
+                                            model_full2 = np.maximum(model_full2, 0.0)
+                                            radial_model2 = 2.0 * np.pi * r_arcsec * model_full2 * dr_arcsec_p4
+                                            tot_model2 = np.sum(radial_model2)
+                                            # data total for comparison
+                                            tot_data = np.sum(radial_energy_data_p4)
+                                            if tot_model2 <= 0 or not np.isfinite(tot_model2):
+                                                raise ValueError('invalid total model energy')
+                                            eef_model2 = np.cumsum(radial_model2) / tot_model2
+                                            from numpy import interp
+                                            model_eef_at_rfit = interp(r_fit, r_arcsec, eef_model2)
+                                            # unscaled EEF residuals (fraction)
+                                            eef_res_unscaled = (model_eef_at_rfit - eef_data_p4)
+                                            eef_rms_unscaled = float(np.sqrt(np.mean(eef_res_unscaled**2))) if eef_res_unscaled.size else np.inf
+                                            # intensity residuals (log-space) on r_fit
+                                            model_rfit_vals2 = pearson4_model.eval(params=pd2, x=r_fit)
+                                            model_rfit_vals2 = np.maximum(model_rfit_vals2, floor)
+                                            int_res_unscaled = (np.log(model_rfit_vals2 + floor) - np.log(I_fit + floor))
+                                            int_rms_unscaled = float(np.sqrt(np.mean(int_res_unscaled**2))) if int_res_unscaled.size else np.inf
+                                            # combined rms (on optimizer fun vector) for bookkeeping
+                                            if last_res2 is not None and hasattr(last_res2, 'fun'):
+                                                fun2 = np.asarray(last_res2.fun, dtype=float)
+                                                rms2 = float(np.sqrt(np.mean(fun2**2))) if fun2.size else np.inf
+                                            else:
+                                                rms2 = np.inf
+                                            try:
+                                                print(f"DEBUG: combined residuals rms(raw)={rms2:.3g}, eef_rms={eef_rms_unscaled:.3g}, int_rms={int_rms_unscaled:.3g}, tot_model2={tot_model2:.3g}, tot_data={tot_data:.3g}")
+                                            except Exception:
+                                                pass
+                                            # acceptance criteria: relax thresholds slightly to improve
+                                            # practical convergence. Also accept if one metric is
+                                            # borderline but others are very good.
+                                            eef_rms_thresh = 0.08
+                                            int_rms_thresh = 1.0
+                                            tot_ratio = (tot_model2 / tot_data) if (tot_data > 0 and np.isfinite(tot_data)) else np.nan
+                                            if (np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < eef_rms_thresh and
+                                                np.isfinite(int_rms_unscaled) and int_rms_unscaled < int_rms_thresh and
+                                                np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
+                                                accepted2 = True
+                                            else:
+                                                # allow a looser acceptance when intensity fit is excellent
+                                                if (np.isfinite(int_rms_unscaled) and int_rms_unscaled < 0.5 and
+                                                    np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < 0.12 and
+                                                    np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
+                                                    accepted2 = True
+                                    except Exception:
+                                        accepted2 = False
+                                    if accepted2:
+                                        # Require that combined-fit Pearson4 gives a better EEF
+                                        # match than the pseudo-Voigt before accepting.
+                                        try:
+                                            pv_eef_rms = compute_pv_eef_rms()
+                                        except Exception:
+                                            pv_eef_rms = np.inf
+                                        try:
+                                            p4_eef_rms = float(eef_rms_unscaled) if np.isfinite(eef_rms_unscaled) else compute_p4_eef_rms_from_vec(best_params2)
+                                        except Exception:
+                                            p4_eef_rms = np.inf
+                                        if np.isfinite(p4_eef_rms) and np.isfinite(pv_eef_rms):
+                                            better = (p4_eef_rms <= 3.0 * pv_eef_rms)
+                                        else:
+                                            better = True
+                                        if better:
+                                            class SimpleResult2:
+                                                pass
+                                            pearson4_result = SimpleResult2()
+                                            pearson4_result.params = vec_to_params(best_params2)
+                                            try:
+                                                print(f"DEBUG: pearson4_result set from combined-fit best_params2: {pearson4_result.params}")
+                                            except Exception:
+                                                pass
+                                        else:
+                                            try:
+                                                print(f"DEBUG: combined Pearson4 fit rejected because PV EEF is closer (p4_rms={p4_eef_rms:.3g}, pv_rms={pv_eef_rms:.3g})")
+                                            except Exception:
+                                                pass
+                                    else:
+                                        try:
+                                            print(f"DEBUG: combined Pearson4 fit rejected (rms2={rms2}, accepted2={accepted2})")
+                                        except Exception:
+                                            pass
+                                        # Try a slower, global optimizer (differential_evolution) as a final attempt
+                                        try:
+                                            from scipy.optimize import differential_evolution
+                                            # Bounds as list of tuples for differential_evolution
+                                            bounds_de = []
+                                            for i in range(lb.size):
+                                                try:
+                                                    bounds_de.append((float(lb[i]), float(ub[i])))
+                                                except Exception:
+                                                    bounds_de.append((float(-1e6), float(1e6)))
+
+                                            def scalar_obj(v):
+                                                try:
+                                                    vec = np.asarray(v, dtype=float)
+                                                    funv = np.asarray(pearson4_resid_comb_vec(vec), dtype=float)
+                                                    return float(np.sqrt(np.mean(funv**2)))
+                                                except Exception:
+                                                    return 1e12
+
+                                            try:
+                                                # increase DE budget (up to ~3x slower) for more thorough search
+                                                de_res = differential_evolution(scalar_obj, bounds_de, maxiter=240, popsize=45, tol=1e-6, seed=2026, polish=True)
+                                                cand = de_res.x
+                                                funvec = np.asarray(pearson4_resid_comb_vec(cand), dtype=float)
+                                                rms_de = float(np.sqrt(np.mean(funvec**2))) if funvec.size else np.inf
+                                                try:
+                                                    print(f"DEBUG: differential_evolution rms={rms_de:.3g}, fun={de_res.fun if hasattr(de_res,'fun') else None}")
+                                                except Exception:
+                                                    pass
+                                                # Re-evaluate acceptance using same unscaled diagnostics as earlier
+                                                try:
+                                                    pd2 = vec_to_params(cand)
+                                                    model_full2 = pearson4_model.eval(params=pd2, x=r_arcsec)
+                                                    model_full2 = np.maximum(model_full2, 0.0)
+                                                    radial_model2 = 2.0 * np.pi * r_arcsec * model_full2 * dr_arcsec_p4
+                                                    tot_model2 = np.sum(radial_model2)
+                                                    tot_data = np.sum(radial_energy_data_p4)
+                                                    if tot_model2 > 0 and np.isfinite(tot_model2):
+                                                        eef_model2 = np.cumsum(radial_model2) / tot_model2
+                                                        from numpy import interp
+                                                        model_eef_at_rfit = interp(r_fit, r_arcsec, eef_model2)
+                                                        eef_res_unscaled = (model_eef_at_rfit - eef_data_p4)
+                                                        eef_rms_unscaled = float(np.sqrt(np.mean(eef_res_unscaled**2))) if eef_res_unscaled.size else np.inf
+                                                        model_rfit_vals2 = pearson4_model.eval(params=pd2, x=r_fit)
+                                                        model_rfit_vals2 = np.maximum(model_rfit_vals2, floor)
+                                                        int_res_unscaled = (np.log(model_rfit_vals2 + floor) - np.log(I_fit + floor))
+                                                        int_rms_unscaled = float(np.sqrt(np.mean(int_res_unscaled**2))) if int_res_unscaled.size else np.inf
+                                                        tot_ratio = (tot_model2 / tot_data) if (tot_data > 0 and np.isfinite(tot_data)) else np.nan
+                                                        # Apply same relaxed acceptance logic as before
+                                                        eef_rms_thresh = 0.08
+                                                        int_rms_thresh = 1.0
+                                                        if (np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < eef_rms_thresh and
+                                                            np.isfinite(int_rms_unscaled) and int_rms_unscaled < int_rms_thresh and
+                                                            np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
+                                                            accepted2 = True
+                                                        else:
+                                                            if (np.isfinite(int_rms_unscaled) and int_rms_unscaled < 0.5 and
+                                                                np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < 0.12 and
+                                                                np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
+                                                                accepted2 = True
+                                                except Exception:
+                                                    accepted2 = False
+                                                if accepted2:
+                                                    # Before accepting DE candidate, ensure EEF is improved
+                                                    try:
+                                                        pv_eef_rms = compute_pv_eef_rms()
+                                                    except Exception:
+                                                        pv_eef_rms = np.inf
+                                                    try:
+                                                        p4_eef_rms = compute_p4_eef_rms_from_vec(cand)
+                                                    except Exception:
+                                                        p4_eef_rms = np.inf
+                                                    if np.isfinite(p4_eef_rms) and np.isfinite(pv_eef_rms):
+                                                        better = (p4_eef_rms <= 3.0 * pv_eef_rms)
+                                                    else:
+                                                        better = True
+                                                    if better:
+                                                        class SimpleResultDE:
+                                                            pass
+                                                        pearson4_result = SimpleResultDE()
+                                                        pearson4_result.params = vec_to_params(cand)
+                                                        try:
+                                                            print(f"DEBUG: pearson4_result set from differential_evolution cand: {pearson4_result.params}")
+                                                        except Exception:
+                                                            pass
+                                                    else:
+                                                        try:
+                                                            print(f"DEBUG: DE Pearson4 candidate rejected because PV EEF is closer (p4_rms={p4_eef_rms:.3g}, pv_rms={pv_eef_rms:.3g})")
+                                                        except Exception:
+                                                            pass
+                                            except Exception:
+                                                pass
+                                        except Exception:
+                                            pass
+                                    # If combined multi-start failed, fall back to the quick lmfit
+                                    # intensity-only fit when available and reasonably close.
+                                    try:
+                                        # Only accept quick intensity-only lmfit as a fallback
+                                        # if it provides an excellent intensity match.
+                                        if pearson4_result is None and 'quick_fit' in locals() and quick_fit is not None and hasattr(quick_fit, 'params'):
+                                            try:
+                                                model_rfit_q = pearson4_model.eval(params={k: float(v.value) for k, v in quick_fit.params.items() if hasattr(v, 'value')}, x=r_fit)
+                                                model_rfit_q = np.maximum(model_rfit_q, floor)
+                                                int_q_res = (np.log(model_rfit_q + floor) - np.log(I_fit + floor))
+                                                int_q_rms = float(np.sqrt(np.mean(int_q_res**2))) if int_q_res.size else np.inf
+                                                # tighten quick-fit fallback threshold to avoid showing
+                                                # Pearson4 when only an intensity fit (not EEF) exists
+                                                if np.isfinite(int_q_rms) and int_q_rms < 0.5:
+                                                    # also ensure quick_fit yields better EEF than PV
+                                                    try:
+                                                        # extract params into vector
+                                                        qp = quick_fit.params
+                                                        amp_q = float(qp['amplitude'].value) if 'amplitude' in qp else float(np.nanmax(I_fit) if I_fit.size else 1.0)
+                                                        cen_q = float(qp['center'].value) if 'center' in qp else float(r_fit[np.nanargmax(I_fit)]) if (r_fit.size and np.any(np.isfinite(I_fit))) else 0.0
+                                                        sig_q = float(qp['sigma'].value) if 'sigma' in qp else max(1e-3, float(Gamma_c_fit))
+                                                        exp_q = float(qp['expon'].value) if 'expon' in qp else 1.5
+                                                        skew_q = float(qp['skew'].value) if 'skew' in qp else 0.0
+                                                        p4_eef_rms_q = compute_p4_eef_rms_from_vec([amp_q, cen_q, sig_q, exp_q, skew_q])
+                                                    except Exception:
+                                                        p4_eef_rms_q = np.inf
+                                                    try:
+                                                        pv_eef_rms = compute_pv_eef_rms()
+                                                    except Exception:
+                                                        pv_eef_rms = np.inf
+                                                    if np.isfinite(p4_eef_rms_q) and np.isfinite(pv_eef_rms):
+                                                        better_q = (p4_eef_rms_q < pv_eef_rms)
+                                                    else:
+                                                        better_q = True
+                                                    if better_q:
+                                                        pearson4_result = quick_fit
+                                                        try:
+                                                            print(f"DEBUG: accepting quick lmfit intensity fit as fallback (int_rms={int_q_rms:.3g})")
+                                                        except Exception:
+                                                            pass
+                                                    else:
+                                                        try:
+                                                            print(f"DEBUG: quick lmfit fallback rejected because PV EEF is closer (p4_rms={p4_eef_rms_q:.3g}, pv_rms={pv_eef_rms:.3g})")
+                                                        except Exception:
+                                                            pass
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                    
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pearson4_result = None
+                    else:
+                        # fallback: use lmfit fit on intensity but keep previous result handling
                         try:
                             pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
                         except Exception:
                             pearson4_result = None
-                else:
-                    try:
-                        pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
-                    except Exception:
-                        pearson4_result = None
+                except Exception:
+                    pearson4_result = None
                 
                 # Generate Pearson4 diagnostic plot and compute EEF profile
                 try:
-                    # Use fitted params when available, otherwise fall back to initial guess
-                    pearson4_used_params_final = pearson4_result.params if (pearson4_result is not None and hasattr(pearson4_result, 'params')) else params
-                    rplot_p4 = np.linspace(0.0, float(r_arcsec.max()), 1000)
-                    Ifit_p4 = pearson4_model.eval(pearson4_used_params_final, x=rplot_p4)
+                    # Only use Pearson4 results if an accepted fit exists; do not
+                    # plot or evaluate the initial guess when no accepted fit.
+                    pearson4_used_params_final = pearson4_result.params if (pearson4_result is not None and hasattr(pearson4_result, 'params')) else None
+                    if pearson4_used_params_final is not None:
+                        rplot_p4 = np.linspace(0.0, float(r_arcsec.max()), 1000)
+                        Ifit_p4 = pearson4_model.eval(pearson4_used_params_final, x=rplot_p4)
 
-                    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+                        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-                    # Left: intensity fit
-                    axes[0].plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
-                    axes[0].plot(rplot_p4, Ifit_p4, 'b-', lw=2, label='Pearson4')
-                    axes[0].set_xlabel('Radius [arcsec]')
-                    axes[0].set_ylabel('Mean intensity')
-                    axes[0].set_yscale('log')
-                    if np.any(I_profile > 0):
-                        lower = np.nanmin(I_profile[I_profile > 0])
-                        axes[0].set_ylim(bottom=max(lower * 0.1, 1e-12))
-                    axes[0].legend()
-                    axes[0].grid(True, which='both', linestyle='--', alpha=0.4)
-                    axes[0].set_title('Pearson4 Intensity Fit (log scale)')
+                        # Left: intensity fit
+                        axes[0].plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
+                        axes[0].plot(rplot_p4, Ifit_p4, 'b-', lw=2, label='Pearson4')
+                        axes[0].set_xlabel('Radius [arcsec]')
+                        axes[0].set_ylabel('Mean intensity')
+                        axes[0].set_yscale('log')
+                        if np.any(I_profile > 0):
+                            lower = np.nanmin(I_profile[I_profile > 0])
+                            axes[0].set_ylim(bottom=max(lower * 0.1, 1e-12))
+                        axes[0].legend()
+                        axes[0].grid(True, which='both', linestyle='--', alpha=0.4)
+                        axes[0].set_title('Pearson4 Intensity Fit (log scale)')
 
-                    # Right: residuals (log residuals evaluated on r_fit)
-                    Ifit_p4_rfit = pearson4_model.eval(pearson4_used_params_final, x=r_fit)
-                    residuals = np.log(Ifit_p4_rfit + floor) - np.log(I_fit + floor)
-                    axes[1].plot(r_fit, residuals, 'ro', ms=4)
-                    axes[1].axhline(0, color='k', linestyle='--', linewidth=1)
-                    axes[1].set_xlabel('Radius [arcsec]')
-                    axes[1].set_ylabel('Log residual')
-                    axes[1].grid(True, which='both', linestyle='--', alpha=0.4)
-                    axes[1].set_title('Pearson4 Fit Quality')
+                        # Right: residuals (log residuals evaluated on r_fit)
+                        Ifit_p4_rfit = pearson4_model.eval(pearson4_used_params_final, x=r_fit)
+                        residuals = np.log(Ifit_p4_rfit + floor) - np.log(I_fit + floor)
+                        axes[1].plot(r_fit, residuals, 'ro', ms=4)
+                        axes[1].axhline(0, color='k', linestyle='--', linewidth=1)
+                        axes[1].set_xlabel('Radius [arcsec]')
+                        axes[1].set_ylabel('Log residual')
+                        axes[1].grid(True, which='both', linestyle='--', alpha=0.4)
+                        axes[1].set_title('Pearson4 Fit Quality')
 
-                    plt.tight_layout()
-                    # Do not save the standalone Pearson4 diagnostic figure (user request)
-                    try:
-                        pass
-                    except Exception:
-                        pass
-                    plt.close()
+                        plt.tight_layout()
+                        # Do not save the standalone Pearson4 diagnostic figure (user request)
+                        try:
+                            pass
+                        except Exception:
+                            pass
+                        plt.close()
 
-                    # Compute EEF profile for Pearson4 using the chosen params
-                    I_fit_model_p4 = pearson4_model.eval(pearson4_used_params_final, x=r_arcsec)
-                    I_fit_model_p4 = np.maximum(I_fit_model_p4, 0.0)
-                    radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
-                    total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
-                    if total_fit_energy_p4 > 0 and np.isfinite(total_fit_energy_p4):
-                        fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
-                        pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
-                        pearson4_profile_diam = 2.0 * r_arcsec
+                        # Compute EEF profile for Pearson4 using the chosen params
+                        I_fit_model_p4 = pearson4_model.eval(pearson4_used_params_final, x=r_arcsec)
+                        I_fit_model_p4 = np.maximum(I_fit_model_p4, 0.0)
+                        radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
+                        total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
+                        if total_fit_energy_p4 > 0 and np.isfinite(total_fit_energy_p4):
+                            fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
+                            pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
+                            pearson4_profile_diam = 2.0 * r_arcsec
+                        else:
+                            pearson4_profile_pct = None
+                            pearson4_profile_diam = None
                     else:
+                        # No accepted Pearson4 fit: ensure nothing plotted and no profile
                         pearson4_profile_pct = None
                         pearson4_profile_diam = None
                 except Exception as e:
@@ -3265,31 +3886,16 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     if 'eef_data' in locals() and eef_data is not None:
                         if have_least_squares:
                             try:
-                                best_score = np.inf
-                                best_vec = np.array(x0k)
-                                rng = np.random.default_rng(1234)
                                 try:
                                     print(f"King fit: initial x0k={x0k}, lbk={lbk}, ubk={ubk}")
                                 except Exception:
                                     pass
-                                last_resk = None
-                                for attempt in range(6):
-                                    pert = np.array(x0k) * (1.0 + rng.normal(0.0, 0.12, size=4))
-                                    pert = np.maximum(lbk, np.minimum(ubk, pert))
-                                    last_resk = least_squares(resid_king, pert, bounds=(lbk, ubk), loss='soft_l1', f_scale=1.0, max_nfev=20000)
-                                    score = float(np.sqrt(np.mean((last_resk.fun)**2))) if hasattr(last_resk, 'fun') else np.inf
-                                    try:
-                                        print(f"  attempt {attempt}: start={pert}, score={score}, success={getattr(last_resk,'success',None)}")
-                                    except Exception:
-                                        pass
-                                    if np.isfinite(score) and score < best_score:
-                                        best_score = score
-                                        best_vec = last_resk.x
-                                try:
-                                    print(f"King fit chosen best_score={best_score}, best_vec={best_vec}")
-                                except Exception:
-                                    pass
-                                I0_k, rc_k, alpha_k, b_k = best_vec.tolist()
+                                # increase King-fit starts and budget to improve robustness
+                                best_vec, last_resk = multi_start_least_squares(resid_king, x0k, lbk, ubk, attempts=24, rng_seed=1234, loss='soft_l1', f_scale=1.0, max_nfev=80000)
+                                if best_vec is not None:
+                                    I0_k, rc_k, alpha_k, b_k = best_vec.tolist()
+                                else:
+                                    I0_k, rc_k, alpha_k, b_k = x0k
                             except Exception:
                                 I0_k, rc_k, alpha_k, b_k = x0k
                         else:
@@ -3474,6 +4080,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 ax_eef = axes[1, 0]
                 ax_eef_res = axes[1, 1]
 
+                # Determine whether Pearson4 was accepted (only then show its traces)
+                try:
+                    pearson4_ok = (pearson4_result is not None)
+                except Exception:
+                    pearson4_ok = False
+
                 # Top-left: intensities
                 # define linewidths for combined figure: thin for dashed fits, thicker for solid/reference
                 _combined_thin_lw = 1.0
@@ -3484,7 +4096,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     line_pv_comb.set_dashes([6, 2])
                 except Exception:
                     pass
-                if Ifit_p4_plot is not None:
+                if pearson4_ok and Ifit_p4_plot is not None:
                     ax_int.plot(rplot, Ifit_p4_plot, color='orange', linestyle='--', lw=_combined_thin_lw, label=label_p4)
                 if Ifit_king_plot is not None:
                     ax_int.plot(rplot, Ifit_king_plot, color='purple', linestyle='--', lw=_combined_thin_lw, label=label_king)
@@ -3494,24 +4106,83 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 ax_int.legend(fontsize=9)
                 ax_int.grid(True, which='both', linestyle='--', alpha=0.4)
 
-                # Top-right: intensity residuals + EEF residuals (as before)
-                if res_int_pv is not None:
-                    ax_res.plot(r_fit, res_int_pv, color='red', linestyle='--', lw=_combined_thin_lw, label='Intensity residual: Data - Pseudo-Voigt (log)')
-                if res_int_p4 is not None:
-                    ax_res.plot(r_fit, res_int_p4, color='orange', linestyle='--', lw=_combined_thin_lw, label='Intensity residual: Data - Pearson4 (log)')
-                if res_int_king is not None:
-                    ax_res.plot(r_fit, res_int_king, color='purple', linestyle='--', lw=_combined_thin_lw, label=f'Intensity residual: Data - {label_king} (log)')
-                if res_eef_pv is not None:
-                    ax_res.plot(r_fit, res_eef_pv, color='red', linestyle='--', lw=_combined_thin_lw, label='EEF residual: PV - Data (pct)')
-                if res_eef_p4 is not None:
-                    ax_res.plot(r_fit, res_eef_p4, color='orange', linestyle='--', lw=_combined_thin_lw, label='EEF residual: P4 - Data (pct)')
-                if 'res_eef_king' in locals() and res_eef_king is not None:
-                    ax_res.plot(r_fit, res_eef_king, color='purple', linestyle='--', lw=_combined_thin_lw, label='EEF residual: King - Data (pct)')
-                ax_res.axhline(0.0, color='k', linestyle='--', linewidth=1)
+                # Top-right: intensity residuals (left y-axis, percent) and
+                # EEF residuals (right y-axis, linear percent). Convert intensity
+                # residuals to percent so all curves share the same units.
                 ax_res.set_xlabel('Radius [arcsec]')
-                ax_res.set_ylabel('Residual')
-                ax_res.legend(fontsize=9)
+                ax_res.set_ylabel('Residual (%)')
+                # Twin axis for EEF residuals (percentage, linear)
+                ax_res_eef = ax_res.twinx()
+                ax_res_eef.set_ylabel('EEF residual (pct)')
+
+                # Convert log/int residuals to percent relative to data
+                eps_local = floor if ('floor' in locals() or 'floor' in globals()) else 1e-12
+                try:
+                    if res_int_pv is not None and 'I_fit' in locals():
+                        # res_int_pv was log(model) - log(data); prefer to use the
+                        # linear model values already computed on r_fit (model_pv_rfit)
+                        try:
+                            if 'model_pv_rfit' in locals() and model_pv_rfit is not None:
+                                res_int_pv_pct = 100.0 * (model_pv_rfit - I_fit) / (I_fit + eps_local)
+                            else:
+                                # Fall back: convert log-residual to approximate percent using exp(delta)-1
+                                res_int_pv_pct = 100.0 * (np.exp(res_int_pv) - 1.0)
+                        except Exception:
+                            res_int_pv_pct = np.full_like(r_fit, np.nan)
+                    else:
+                        res_int_pv_pct = np.full_like(r_fit, np.nan)
+                except Exception:
+                    res_int_pv_pct = np.full_like(r_fit, np.nan)
+                try:
+                    if pearson4_ok and res_int_p4 is not None:
+                        res_int_p4_pct = 100.0 * (np.exp(res_int_p4) - 1.0)
+                    else:
+                        res_int_p4_pct = np.full_like(r_fit, np.nan)
+                except Exception:
+                    res_int_p4_pct = np.full_like(r_fit, np.nan)
+                try:
+                    if res_int_king is not None:
+                        res_int_king_pct = 100.0 * (np.exp(res_int_king) - 1.0)
+                    else:
+                        res_int_king_pct = np.full_like(r_fit, np.nan)
+                except Exception:
+                    res_int_king_pct = np.full_like(r_fit, np.nan)
+
+                # Plot intensity residuals on the left (percent)
+                if res_int_pv_pct is not None:
+                    ax_res.plot(r_fit, res_int_pv_pct, color='red', linestyle='--', lw=_combined_thin_lw, label='Intensity residual: Data - Pseudo-Voigt (%)')
+                if pearson4_ok and res_int_p4_pct is not None:
+                    ax_res.plot(r_fit, res_int_p4_pct, color='orange', linestyle='--', lw=_combined_thin_lw * 1.6, marker='o', markersize=3, markevery=50, label='Intensity residual: Data - Pearson4 (%)')
+                if res_int_king_pct is not None:
+                    ax_res.plot(r_fit, res_int_king_pct, color='purple', linestyle='--', lw=_combined_thin_lw * 1.6, marker='s', markersize=3, markevery=50, label=f'Intensity residual: Data - {label_king} (%)')
+                ax_res.axhline(0.0, color='k', linestyle='--', linewidth=1)
                 ax_res.grid(True, which='both', linestyle='--', alpha=0.4)
+
+                # Plot EEF residuals on the right (linear scale)
+                handles_res, labels_res = [], []
+                if res_eef_pv is not None:
+                    h1, = ax_res_eef.plot(r_fit, res_eef_pv, color='red', linestyle='--', lw=_combined_thin_lw, label='EEF residual: PV - Data (pct)')
+                    handles_res.append(h1); labels_res.append('EEF residual: PV - Data (pct)')
+                if res_eef_p4 is not None:
+                    h2, = ax_res_eef.plot(r_fit, res_eef_p4, color='orange', linestyle='--', lw=_combined_thin_lw * 1.6, marker='o', markersize=3, markevery=50, label='EEF residual: P4 - Data (pct)')
+                    handles_res.append(h2); labels_res.append('EEF residual: P4 - Data (pct)')
+                if 'res_eef_king' in locals() and res_eef_king is not None:
+                    h3, = ax_res_eef.plot(r_fit, res_eef_king, color='purple', linestyle='--', lw=_combined_thin_lw * 1.6, marker='s', markersize=3, markevery=50, label='EEF residual: King - Data (pct)')
+                    handles_res.append(h3); labels_res.append('EEF residual: King - Data (pct)')
+
+                # Combine legends from both axes (intensity residuals on left, EEF residuals on right)
+                try:
+                    handles_l, labels_l = ax_res.get_legend_handles_labels()
+                    handles_r, labels_r = ax_res_eef.get_legend_handles_labels()
+                    all_handles = handles_l + handles_r
+                    all_labels = labels_l + labels_r
+                    if all_handles:
+                        ax_res.legend(all_handles, all_labels, fontsize=9)
+                except Exception:
+                    try:
+                        ax_res.legend()
+                    except Exception:
+                        pass
 
                 # Bottom-left: EEF curves (aggregated PSF and fitted models)
                 # Flip axes: diameter on X, encircled energy (%) on Y. Plot aggregated PSF as black dots.
@@ -3522,6 +4193,39 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 label_p4 = 'Pearson4 radial fit'
                 label_king = 'King radial fit'
                 try:
+                    # Ensure Pearson4 EEF is available: if it wasn't computed earlier
+                    # but we do have a fit result, compute it here so the combined
+                    # figure always shows the Pearson4 EEF when possible.
+                    if (pearson4_profile_pct is None or pearson4_profile_diam is None) and (pearson4_result is not None) and hasattr(pearson4_result, 'params'):
+                        try:
+                            p_params_plot = pearson4_result.params
+                            rplot_local = np.linspace(0.0, float(r_arcsec.max()), 1000)
+                            # compute model on r_arcsec for EEF
+                            p_vals = pearson4_model.eval(p_params_plot, x=r_arcsec)
+                            p_vals = np.maximum(p_vals, 0.0)
+                            dr_local = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
+                            radial_p = 2.0 * np.pi * r_arcsec * p_vals * dr_local
+                            tot_p = np.sum(radial_p)
+                            if tot_p > 0 and np.isfinite(tot_p):
+                                pearson4_profile_pct = 100.0 * np.cumsum(radial_p) / tot_p
+                                pearson4_profile_diam = 2.0 * r_arcsec
+                                # also provide Ifit_p4_plot for intensity panel if missing
+                                try:
+                                    Ifit_p4_plot = pearson4_model.eval(p_params_plot, x=rplot_local)
+                                except Exception:
+                                    Ifit_p4_plot = None
+                        except Exception:
+                            pearson4_profile_pct = None
+                            pearson4_profile_diam = None
+
+                    # Debug: report whether Pearson4 fit/result was used to compute the EEF
+                    try:
+                        present = (pearson4_result is not None and hasattr(pearson4_result, 'params'))
+                        computed = (pearson4_profile_pct is not None and pearson4_profile_diam is not None)
+                        print(f"DEBUG: pearson4_result present={present}, pearson4_profile computed={computed}")
+                    except Exception:
+                        pass
+
                     if profile_pct is not None and profile_diam is not None and len(profile_pct) and len(profile_diam):
                         pct_arr = np.asarray(profile_pct, dtype=float)
                         diam_arr = np.asarray(profile_diam, dtype=float)
@@ -3575,8 +4279,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                                         pass
                         except Exception:
                             pass
-                    # Pearson4
-                    if pearson4_profile_pct is not None and pearson4_profile_diam is not None:
+                    # Pearson4: only plot if a Pearson4 fit/result was accepted
+                    try:
+                        pearson4_ok = (pearson4_result is not None)
+                    except Exception:
+                        pearson4_ok = False
+                    if pearson4_ok and pearson4_profile_pct is not None and pearson4_profile_diam is not None:
                         p4_pct = np.asarray(pearson4_profile_pct, dtype=float)
                         p4_diam = np.asarray(pearson4_profile_diam, dtype=float)
                         mask = p4_pct <= 95.0
@@ -3664,14 +4372,15 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                         line_pv_res2.set_dashes([6, 2])
                     except Exception:
                         pass
-                if res_eef_p4_plot is not None:
-                    ax_eef_res.plot(r_fit, (-res_eef_p4_plot) * 100.0, color='orange', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_p4} (pct)')
-                elif res_eef_p4 is not None:
-                    ax_eef_res.plot(r_fit, (-res_eef_p4), color='orange', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_p4} (pct)')
+                if pearson4_ok:
+                    if res_eef_p4_plot is not None:
+                        ax_eef_res.plot(r_fit, (-res_eef_p4_plot) * 100.0, color='orange', linestyle='--', lw=_combined_thin_lw * 1.6, marker='o', markersize=3, markevery=50, label=f'EEF residual: Data - {label_p4} (pct)')
+                    elif res_eef_p4 is not None:
+                        ax_eef_res.plot(r_fit, (-res_eef_p4), color='orange', linestyle='--', lw=_combined_thin_lw * 1.6, marker='o', markersize=3, markevery=50, label=f'EEF residual: Data - {label_p4} (pct)')
                 if res_eef_king_plot is not None:
-                    ax_eef_res.plot(r_fit, (-res_eef_king_plot) * 100.0, color='purple', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_king} (pct)')
+                    ax_eef_res.plot(r_fit, (-res_eef_king_plot) * 100.0, color='purple', linestyle='--', lw=_combined_thin_lw * 1.6, marker='s', markersize=3, markevery=50, label=f'EEF residual: Data - {label_king} (pct)')
                 elif 'res_eef_king' in locals() and res_eef_king is not None:
-                    ax_eef_res.plot(r_fit, (-res_eef_king), color='purple', linestyle='--', lw=_combined_thin_lw, label=f'EEF residual: Data - {label_king} (pct)')
+                    ax_eef_res.plot(r_fit, (-res_eef_king), color='purple', linestyle='--', lw=_combined_thin_lw * 1.6, marker='s', markersize=3, markevery=50, label=f'EEF residual: Data - {label_king} (pct)')
                 ax_eef_res.axhline(0.0, color='k', linestyle='--', linewidth=1)
                 ax_eef_res.set_xlabel('Radius [arcsec]')
                 ax_eef_res.set_ylabel('EEF residual (pct)')
@@ -5031,13 +5740,29 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         except Exception:
             pv_eef = np.full_like(diam_grid, np.nan)
 
-        # Pearson4 EEF on grid
+        # Pearson4 EEF on grid - ONLY compute if an accepted pearson4_result exists
         try:
-            if 'pearson4_model' in locals() and p4_params_plot is not None:
-                p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
-                p4_I = np.maximum(p4_I, 0.0)
-                p4_eef = compute_eef_pct_from_I(p4_I, rgrid)
-                p4_eef[p4_eef > 95.0] = np.nan
+            try:
+                pearson4_ok = ('pearson4_result' in locals() and pearson4_result is not None and hasattr(pearson4_result, 'params'))
+            except Exception:
+                pearson4_ok = False
+            if pearson4_ok and 'pearson4_model' in locals():
+                try:
+                    # Prefer using the accepted fit params only
+                    p4_params_plot = pearson4_result.params
+                    # Convert lmfit Parameters to plain dict if necessary
+                    try:
+                        import lmfit as _lm
+                        if isinstance(p4_params_plot, _lm.parameter.Parameters):
+                            p4_params_plot = {k: v.value for k, v in p4_params_plot.items()}
+                    except Exception:
+                        pass
+                    p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                    p4_I = np.maximum(p4_I, 0.0)
+                    p4_eef = compute_eef_pct_from_I(p4_I, rgrid)
+                    p4_eef[p4_eef > 95.0] = np.nan
+                except Exception:
+                    p4_eef = np.full_like(diam_grid, np.nan)
             else:
                 p4_eef = np.full_like(diam_grid, np.nan)
         except Exception:
@@ -5054,6 +5779,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 k_eef = np.full_like(diam_grid, np.nan)
         except Exception:
             k_eef = np.full_like(diam_grid, np.nan)
+
+        # Make a canonical name used later in plotting code
+        try:
+            if 'k_eef' in locals() and k_eef is not None:
+                king_eef_pct_plot = k_eef
+        except Exception:
+            pass
 
         # Build DataFrame for sheet1: one column per curve (index = diameter)
         df_eef = _pd.DataFrame({'diameter_arcsec': diam_grid, 'EEF_aggregated_pct': agg_pct_on_grid,
@@ -5227,16 +5959,103 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 p4_I
             except NameError:
                 try:
-                    if 'pearson4_model' in locals() and ('p4_params_plot' in locals() and p4_params_plot is not None):
-                        p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                    # Prefer Pearson4 parameters obtained from the EEF-only fit (pearson4_result.params)
+                    p4_params_for_plot = None
+                    try:
+                        if 'pearson4_result' in locals() and pearson4_result is not None and hasattr(pearson4_result, 'params'):
+                            p4_params_for_plot = pearson4_result.params
+                    except Exception:
+                        p4_params_for_plot = None
+                    # If lmfit.Parameters object provided, convert to simple dict of values
+                    try:
+                        import lmfit
+                        if p4_params_for_plot is not None and isinstance(p4_params_for_plot, lmfit.parameter.Parameters):
+                            # Convert Parameters to dict of numeric values
+                            p4_params_for_plot = {k: v.value for k, v in p4_params_for_plot.items()}
+                    except Exception:
+                        # lmfit may not be installed or conversion not needed
+                        pass
+                    if 'pearson4_model' in locals() and (p4_params_for_plot is not None):
+                        try:
+                            p4_I = pearson4_model.eval(p4_params_for_plot, x=rgrid)
+                        except Exception:
+                            p4_I = np.full_like(rgrid, np.nan)
+                    elif 'pearson4_model' in locals() and ('p4_params_plot' in locals() and p4_params_plot is not None):
+                        try:
+                            p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                        except Exception:
+                            p4_I = np.full_like(rgrid, np.nan)
                     else:
+                        # No intensity-based fallback: only plot Pearson4 if EEF-fit params exist
                         p4_I = np.full_like(rgrid, np.nan)
                 except Exception:
                     p4_I = np.full_like(rgrid, np.nan)
 
-            # Residuals for intensity
+            # Residuals for intensity (linear space on rgrid)
             resid_pv = I_on_rgrid - pv_I
             resid_p4 = I_on_rgrid - p4_I
+
+            # Prepare King intensity model sampled on rgrid so residuals can be
+            # plotted consistently with PV/Pearson4. Prefer already-computed
+            # `k_I` (on rgrid), else use `Ifit_king_plot` (usually on `rplot`),
+            # else try to evaluate `king_profile` using fitted params if available.
+            king_model_on_rgrid = None
+            try:
+                if 'k_I' in locals() and k_I is not None and np.any(np.isfinite(k_I)):
+                    king_model_on_rgrid = np.asarray(k_I, dtype=float)
+                elif 'Ifit_king_plot' in locals() and Ifit_king_plot is not None:
+                    try:
+                        x_ifit = rplot if 'rplot' in locals() else r_arcsec
+                    except Exception:
+                        x_ifit = r_arcsec
+                    king_model_on_rgrid = np.interp(rgrid, x_ifit, Ifit_king_plot)
+                elif 'I0_k' in locals() and 'rc_k' in locals() and 'alpha_k' in locals():
+                    try:
+                        king_model_on_rgrid = king_profile(rgrid, I0_k, rc_k, alpha_k, b_k if 'b_k' in locals() else 0.0)
+                    except Exception:
+                        king_model_on_rgrid = None
+            except Exception:
+                king_model_on_rgrid = None
+
+            if king_model_on_rgrid is None:
+                king_model_on_rgrid = np.full_like(rgrid, np.nan)
+
+            # King residuals (linear) consistent with PV/Pearson4 residuals
+            resid_king_linear = I_on_rgrid - king_model_on_rgrid
+            # Also compute delta = king_model - aggregated data and log-residuals
+            try:
+                delta_king = king_model_on_rgrid - I_on_rgrid
+                # log residuals (use same floor as elsewhere)
+                king_log_resid = None
+                try:
+                    king_log_resid = np.log(king_model_on_rgrid + floor) - np.log(I_on_rgrid + floor)
+                except Exception:
+                    king_log_resid = np.full_like(rgrid, np.nan)
+                # Print concise diagnostics
+                try:
+                    mask = np.isfinite(delta_king)
+                    nfin = int(np.sum(mask))
+                    dmin = float(np.nanmin(delta_king[mask])) if nfin else float('nan')
+                    dmax = float(np.nanmax(delta_king[mask])) if nfin else float('nan')
+                    drmse = float(np.sqrt(np.nanmean((delta_king[mask])**2))) if nfin else float('nan')
+                    print(f"KING DELTA: finite={nfin}, min={dmin:.3g}, max={dmax:.3g}, rmse={drmse:.3g}")
+                except Exception:
+                    pass
+                # Save numeric table for inspection
+                try:
+                    os.makedirs('Figures', exist_ok=True)
+                    import csv
+                    csv_path = os.path.join('Figures', 'king_residuals.csv')
+                    with open(csv_path, 'w', newline='') as _f:
+                        w = csv.writer(_f)
+                        w.writerow(['radius_arcsec', 'I_aggregated', 'king_model', 'delta', 'king_log_resid'])
+                        for rr, ia, km, dk, klr in zip(rgrid.tolist(), I_on_rgrid.tolist(), king_model_on_rgrid.tolist(), delta_king.tolist(), (king_log_resid.tolist() if hasattr(king_log_resid, 'tolist') else [None]*len(rgrid))):
+                            w.writerow([rr, ia, km, dk, klr])
+                    print('Wrote King residuals CSV to', csv_path)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
             # EEF residuals (agg_pct_on_grid vs models)
             try:
@@ -5247,40 +6066,310 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 eef_resid_p4 = agg_pct_on_grid - p4_eef
             except Exception:
                 eef_resid_p4 = np.full_like(diam_grid, np.nan)
+            try:
+                # King EEF residuals (Data - King fit) — ensure variable exists for plotting
+                eef_resid_king = agg_pct_on_grid - k_eef
+            except Exception:
+                eef_resid_king = np.full_like(diam_grid, np.nan)
 
             # Create 2x2 figure
             figp = _plt.figure(figsize=(12, 8))
             ax1p = figp.add_subplot(2, 2, 1)
-            ax1p.plot(rgrid, I_on_rgrid, 'k.', markersize=3, label='Observed (radial)')
-            ax1p.plot(rgrid, pv_I, color='red', linestyle='--', label='PV fit')
-            ax1p.plot(rgrid, p4_I, color='orange', linestyle=':', label='Pearson4 fit')
+            # Aggregated data in black dots
+            ax1p.plot(rgrid, I_on_rgrid, 'k.', markersize=3, label='Aggregated PSF (data)', zorder=12)
+            # Fit curves: dashed and thinner
+            _perf_lw = 1.0
+            line_pv, = ax1p.plot(rgrid, pv_I, color='red', linestyle='--', lw=_perf_lw, label='Modified pseudo-Voigt', zorder=5)
+            # Only plot Pearson4 intensity curve if an accepted fit exists
+            try:
+                pearson4_ok_plot = ('pearson4_result' in locals() and pearson4_result is not None and hasattr(pearson4_result, 'params'))
+            except Exception:
+                pearson4_ok_plot = False
+            if pearson4_ok_plot and np.any(np.isfinite(p4_I)):
+                line_p4, = ax1p.plot(rgrid, p4_I, color='orange', linestyle='--', lw=_perf_lw, label='Pearson4 fit', zorder=5)
+            try:
+                line_pv.set_dashes([6, 2])
+                line_p4.set_dashes([6, 2])
+            except Exception:
+                pass
+            # If King fit available from EEF optimization, prefer that over intensity fallback
+            try:
+                if 'Ifit_king_plot' in locals() and Ifit_king_plot is not None:
+                    line_k, = ax1p.plot(rgrid, Ifit_king_plot, color='purple', linestyle='--', lw=_perf_lw, label='King fit', zorder=5)
+                    try:
+                        line_k.set_dashes([6, 2])
+                    except Exception:
+                        pass
+                elif 'king_I' in locals():
+                    line_k, = ax1p.plot(rgrid, king_I, color='purple', linestyle='--', lw=_perf_lw, label='King fit', zorder=5)
+                    try:
+                        line_k.set_dashes([6, 2])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             ax1p.set_xlabel('Radius [arcsec]')
-            ax1p.set_ylabel('Intensity (arb)')
-            ax1p.legend(fontsize=8)
+            ax1p.set_ylabel('Mean intensity')
+            # Use logarithmic scale for intensity plots
+            try:
+                ax1p.set_yscale('log')
+            except Exception:
+                pass
+            ax1p.grid(True, which='both', linestyle='--', alpha=0.35)
+            # Build legend proxies conditionally (include Pearson4 only if plotted)
+            try:
+                from matplotlib.lines import Line2D
+                pv_proxy = Line2D([0], [0], color='red', linestyle='--', lw=_perf_lw)
+                k_proxy = Line2D([0], [0], color='purple', linestyle='--', lw=_perf_lw)
+                entries = [_plt.Line2D([], [], color='k', marker='.', linestyle='None', ms=3), pv_proxy]
+                labels = ['Aggregated PSF (data)', 'Modified pseudo-Voigt']
+                try:
+                    if pearson4_ok_plot and np.any(np.isfinite(p4_I)):
+                        from matplotlib.lines import Line2D as _L2
+                        p4_proxy = _L2([0], [0], color='orange', linestyle='--', lw=_perf_lw)
+                        entries.append(p4_proxy)
+                        labels.append('Pearson4 fit')
+                except Exception:
+                    pass
+                try:
+                    if ('Ifit_king_plot' in locals() and Ifit_king_plot is not None) or ('king_I' in locals() and king_I is not None) or ('k_I' in locals() and k_I is not None):
+                        entries.append(k_proxy)
+                        labels.append('King fit')
+                except Exception:
+                    pass
+                ax1p.legend(entries, labels, fontsize=8)
+            except Exception:
+                try:
+                    ax1p.legend(fontsize=8)
+                except Exception:
+                    pass
 
             ax2p = figp.add_subplot(2, 2, 3)
-            ax2p.plot(rgrid, resid_pv, color='red', label='obs - PV')
-            ax2p.plot(rgrid, resid_p4, color='orange', label='obs - P4')
-            ax2p.axhline(0, color='gray', linewidth=0.8)
+            # Residuals: plot all intensity residuals as percent on the same y-axis
             ax2p.set_xlabel('Radius [arcsec]')
-            ax2p.set_ylabel('Residual (arb)')
-            ax2p.legend(fontsize=8)
+            ax2p.set_ylabel('Residual (%)')
+            # Avoid division by zero by using the common floor value used elsewhere
+            eps = floor if ('floor' in locals() or 'floor' in globals()) else 1e-12
+            try:
+                resid_pv_pct = 100.0 * (resid_pv) / (I_on_rgrid + eps)
+            except Exception:
+                resid_pv_pct = np.full_like(rgrid, np.nan)
+            try:
+                resid_p4_pct = 100.0 * (resid_p4) / (I_on_rgrid + eps)
+            except Exception:
+                resid_p4_pct = np.full_like(rgrid, np.nan)
+            try:
+                resid_king_pct = 100.0 * (resid_king_linear) / (I_on_rgrid + eps) if ('resid_king_linear' in locals() and resid_king_linear is not None) else np.full_like(rgrid, np.nan)
+            except Exception:
+                resid_king_pct = np.full_like(rgrid, np.nan)
+
+            # Plot percent residuals on the same axis so they share y-limits/scaling
+            try:
+                lrpv, = ax2p.plot(rgrid, resid_pv_pct, color='red', linestyle='--', lw=_perf_lw, label='Intensity residual: Data - Modified pseudo-Voigt (%)')
+            except Exception:
+                lrpv = None
+            # Only plot Pearson4 intensity residual if an accepted Pearson4 fit exists
+            try:
+                if pearson4_ok_plot and np.any(np.isfinite(p4_I)):
+                    lrp4, = ax2p.plot(rgrid, resid_p4_pct, color='orange', linestyle='--', lw=_perf_lw * 1.6, marker='o', markersize=3, markevery=40, label='Intensity residual: Data - Pearson4 fit (%)')
+                else:
+                    lrp4 = None
+            except Exception:
+                lrp4 = None
+            try:
+                if lrpv is not None:
+                    lrpv.set_dashes([6, 2])
+                if lrp4 is not None:
+                    lrp4.set_dashes([6, 2])
+            except Exception:
+                pass
+            # If King residuals exist, plot them too (as percent to match others)
+            try:
+                # Build a king residual on the rgrid if possible (prefer res_int_king)
+                resid_king_plot = None
+                if 'res_int_king' in locals() and res_int_king is not None:
+                    try:
+                        resid_king_plot = np.interp(rgrid, r_fit, res_int_king, left=np.nan, right=np.nan)
+                    except Exception:
+                        resid_king_plot = None
+                if resid_king_plot is None:
+                    if 'Ifit_king_plot' in locals() and Ifit_king_plot is not None:
+                        try:
+                            x_ifit = rplot if 'rplot' in locals() else r_arcsec
+                        except Exception:
+                            x_ifit = r_arcsec
+                        try:
+                            resid_king_plot = I_on_rgrid - np.interp(rgrid, x_ifit, Ifit_king_plot)
+                        except Exception:
+                            resid_king_plot = None
+                    elif 'king_I' in locals() and king_I is not None:
+                        resid_king_plot = I_on_rgrid - king_I
+
+                # Convert any available king residuals to percent to match the other traces
+                try:
+                    if resid_king_plot is not None and np.any(np.isfinite(resid_king_plot)):
+                        resid_king_plot_pct = 100.0 * resid_king_plot / (I_on_rgrid + eps)
+                    elif 'resid_king_linear' in locals() and resid_king_linear is not None and np.any(np.isfinite(resid_king_linear)):
+                        resid_king_plot_pct = 100.0 * resid_king_linear / (I_on_rgrid + eps)
+                    else:
+                        resid_king_plot_pct = np.full_like(rgrid, np.nan)
+                except Exception:
+                    resid_king_plot_pct = np.full_like(rgrid, np.nan)
+
+                if resid_king_plot_pct is not None and np.any(np.isfinite(resid_king_plot_pct)):
+                    lrk, = ax2p.plot(
+                        rgrid,
+                        resid_king_plot_pct,
+                        color='purple',
+                        linestyle='--',
+                        lw=_perf_lw * 1.6,
+                        alpha=0.95,
+                        zorder=15,
+                        label='Intensity residual: Data - King fit (%)'
+                    )
+                    try:
+                        lrk.set_dashes([6, 2])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            ax2p.axhline(0, color='gray', linewidth=0.8)
+            ax2p.grid(True, which='both', linestyle='--', alpha=0.35)
+            try:
+                from matplotlib.lines import Line2D
+                pv_proxy = Line2D([0], [0], color='red', linestyle='--', lw=_perf_lw)
+                k_proxy = Line2D([0], [0], color='purple', linestyle='--', lw=_perf_lw)
+                entries = [pv_proxy]
+                labels = ['Intensity residual: Data - Modified pseudo-Voigt (%)']
+                try:
+                    if pearson4_ok_plot and np.any(np.isfinite(p4_I)):
+                        from matplotlib.lines import Line2D as _L2
+                        p4_proxy = _L2([0], [0], color='orange', linestyle='--', lw=_perf_lw)
+                        entries.append(p4_proxy)
+                        labels.append('Intensity residual: Data - Pearson4 fit (%)')
+                except Exception:
+                    pass
+                try:
+                    if ('resid_king_plot' in locals() and resid_king_plot is not None and np.any(np.isfinite(resid_king_plot))) or ('resid_king_linear' in locals() and resid_king_linear is not None and np.any(np.isfinite(resid_king_linear))):
+                        entries.append(k_proxy)
+                        labels.append('Intensity residual: Data - King fit (%)')
+                except Exception:
+                    pass
+                if entries:
+                    ax2p.legend(entries, labels, fontsize=8)
+            except Exception:
+                try:
+                    ax2p.legend(fontsize=8)
+                except Exception:
+                    pass
 
             ax3p = figp.add_subplot(2, 2, 2)
-            ax3p.plot(diam_grid, agg_pct_on_grid, color='blue', label='Aggregated EEF')
-            ax3p.plot(diam_grid, pv_eef, color='red', linestyle='--', label='PV EEF')
-            ax3p.plot(diam_grid, p4_eef, color='orange', linestyle=':', label='Pearson4 EEF')
+            ax3p.plot(diam_grid, agg_pct_on_grid, color='k', marker='.', linestyle='None', ms=4, label='Aggregated PSF (data)', zorder=12)
+            lpv_eef, = ax3p.plot(diam_grid, pv_eef, color='red', linestyle='--', lw=_perf_lw, label='Modified pseudo-Voigt')
+            lp4_eef = None
+            try:
+                if np.any(np.isfinite(p4_eef)):
+                    lp4_eef, = ax3p.plot(diam_grid, p4_eef, color='orange', linestyle='--', lw=_perf_lw, label='Pearson4 fit')
+            except Exception:
+                lp4_eef = None
+            try:
+                lpv_eef.set_dashes([6, 2])
+                if lp4_eef is not None:
+                    lp4_eef.set_dashes([6, 2])
+            except Exception:
+                pass
+            # King EEF if available
+            try:
+                if 'king_eef_pct_plot' in locals():
+                    lk_eef, = ax3p.plot(diam_grid, king_eef_pct_plot, color='purple', linestyle='--', lw=_perf_lw, label='King fit')
+                    try:
+                        lk_eef.set_dashes([6, 2])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            ax3p.grid(True, which='both', linestyle='--', alpha=0.35)
+            ax3p.set_xlabel('Diameter [arcsec]')
+            ax3p.set_ylabel('Encircled energy (%)')
+            try:
+                from matplotlib.lines import Line2D
+                pv_proxy = Line2D([0], [0], color='red', linestyle='--', lw=_perf_lw)
+                k_proxy = Line2D([0], [0], color='purple', linestyle='--', lw=_perf_lw)
+                entries = [_plt.Line2D([], [], color='k', marker='.', linestyle='None', ms=4), pv_proxy]
+                labels = ['Aggregated PSF (data)', 'Modified pseudo-Voigt']
+                if lp4_eef is not None:
+                    p4_proxy = Line2D([0], [0], color='orange', linestyle='--', lw=_perf_lw)
+                    entries.append(p4_proxy)
+                    labels.append('Pearson4 fit')
+                try:
+                    if 'king_eef_pct_plot' in locals():
+                        entries.append(k_proxy)
+                        labels.append('King fit')
+                except Exception:
+                    pass
+                ax3p.legend(entries, labels, fontsize=8)
+            except Exception:
+                try:
+                    ax3p.legend(fontsize=8)
+                except Exception:
+                    pass
             ax3p.set_xlabel('Diameter [arcsec]')
             ax3p.set_ylabel('EEF (%)')
-            ax3p.legend(fontsize=8)
 
             ax4p = figp.add_subplot(2, 2, 4)
-            ax4p.plot(diam_grid, eef_resid_pv, color='red', label='agg - PV')
-            ax4p.plot(diam_grid, eef_resid_p4, color='orange', label='agg - P4')
+            lrpv_eef, = ax4p.plot(diam_grid, eef_resid_pv, color='red', linestyle='--', lw=_perf_lw, label='EEF residual: Data - Modified pseudo-Voigt (pct)')
+            lrp4_eef = None
+            try:
+                if np.any(np.isfinite(eef_resid_p4)):
+                    lrp4_eef, = ax4p.plot(diam_grid, eef_resid_p4, color='orange', linestyle='--', lw=_perf_lw, label='EEF residual: Data - Pearson4 fit (pct)')
+            except Exception:
+                lrp4_eef = None
+            try:
+                lrpv_eef.set_dashes([6, 2])
+                if lrp4_eef is not None:
+                    lrp4_eef.set_dashes([6, 2])
+            except Exception:
+                pass
+            try:
+                if 'eef_resid_king' in locals():
+                    lrk_eef, = ax4p.plot(diam_grid, eef_resid_king, color='purple', linestyle='--', lw=_perf_lw, label='EEF residual: Data - King fit (pct)')
+                    try:
+                        lrk_eef.set_dashes([6, 2])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             ax4p.axhline(0, color='gray', linewidth=0.8)
+            ax4p.grid(True, which='both', linestyle='--', alpha=0.35)
             ax4p.set_xlabel('Diameter [arcsec]')
             ax4p.set_ylabel('EEF residual (pct)')
-            ax4p.legend(fontsize=8)
+            try:
+                from matplotlib.lines import Line2D
+                pv_proxy = Line2D([0], [0], color='red', linestyle='--', lw=_perf_lw)
+                k_proxy = Line2D([0], [0], color='purple', linestyle='--', lw=_perf_lw)
+                entries = [pv_proxy]
+                labels = ['EEF residual: Data - Modified pseudo-Voigt (pct)']
+                try:
+                    if lrp4_eef is not None:
+                        from matplotlib.lines import Line2D as _L2
+                        p4_proxy = _L2([0], [0], color='orange', linestyle='--', lw=_perf_lw)
+                        entries.append(p4_proxy)
+                        labels.append('EEF residual: Data - Pearson4 fit (pct)')
+                except Exception:
+                    pass
+                try:
+                    if 'eef_resid_king' in locals() and np.any(np.isfinite(eef_resid_king)):
+                        entries.append(k_proxy)
+                        labels.append('EEF residual: Data - King fit (pct)')
+                except Exception:
+                    pass
+                if entries:
+                    ax4p.legend(entries, labels, fontsize=8)
+            except Exception:
+                try:
+                    ax4p.legend(fontsize=8)
+                except Exception:
+                    pass
 
             figp.tight_layout()
             # Save timestamped and canonical copies into CustomPSFs and Figures

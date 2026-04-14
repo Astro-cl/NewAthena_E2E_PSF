@@ -139,13 +139,202 @@ The repository includes a small sensitivity-run template and driver under the `s
    combobox opens the list and allows immediate mouse selection without
    requiring Enter; MM Configuration checkboxes now toggle reliably when
    clicked, improving single-MM selection.
-- Tooling: added `compute_aeff_values.py` — a helper script to compute
-   and cache A_eff lookup/formula results into numeric columns so workbooks
-   can be used without Excel formula evaluation. See `compute_aeff_values.py`
-   for usage.
+ - Tooling: added `tools/compute_aeff_values.py` — a helper script to compute
+    and cache A_eff lookup/formula results into numeric columns so workbooks
+    can be used without Excel formula evaluation. See `tools/compute_aeff_values.py`
+    for usage.
 - Repo hygiene: removed large generated distribution/figure files from the
    repository index and added `.gitignore` entries to avoid accidental
    commits of generated artifacts.
+
+### Release v7 (2026-04-14)
+
+This release collects the repository reorganization, test refactor, and
+documentation improvements implemented since **Release v6**. The
+section below documents the representative commits, the exact fitting
+formulas used by the codebase, the export options exposed to users, and
+recommended release actions.
+
+Representative commit summary (since v6)
+
+- Remove agent scaffolding and debug helpers: deleted the M365 copilot
+   scaffold and transient top-level debug scripts introduced by earlier
+   automated tooling.
+- Move utilities to `tools/`: relocated helper scripts (`compute_aeff_values.py`,
+   `inspect_openpyxl.py`, `check_lookup_table.py`, `metrics_numba.py`, and
+   friends) into `tools/` and preserved archival copies under
+   `scripts/legacy/`.
+- Tests reorganization: grouped tests by concern under `tests/` folders
+   (metrics, vignetting, io, gui, integration, plots, distributions) and
+   updated imports to use package-style imports (e.g., `tools.*`). The
+   local test run reported 42 passed, 4 warnings (curve-fit related).
+- Documentation updates: `README.md`, `DOCS_GUI.md` and
+   `DOCS_SUMMARY.md` updated to reflect layout changes, updated usage
+   examples, and new references to `tools/compute_aeff_values.py`.
+- Module docstrings: added top-level documentation strings to
+   `main.py` and `optimize_mm_rows.py` to clarify public APIs and
+   expected behaviors for headless/CI use.
+
+Fitting formulas and parameter descriptions
+
+The following summarizes the analytic forms implemented in
+`distributions_rotated.py` and the parameters exposed in the public
+APIs.
+
+1) Rotated 2D Gaussian (`gaussian_2d_rotated`)
+
+    Let (x,y) be evaluation coordinates and (μ_x, μ_y) the center. For
+    principal standard deviations σ_x, σ_y and rotation angle θ (radians
+    unless `degrees=True`):
+
+       dx = x - μ_x
+       dy = y - μ_y
+       th = θ
+       c = cos(th); s = sin(th)
+       invsx2 = 1/σ_x^2; invsy2 = 1/σ_y^2
+       a = c^2*invsx2 + s^2*invsy2
+       b = s*c*(invsx2 - invsy2)
+       ccoef = s^2*invsx2 + c^2*invsy2
+
+    Exponent: E = -0.5 * (a*dx^2 + 2*b*dx*dy + ccoef*dy^2)
+
+    Output: amplitude * coeff * exp(E), where coeff = 1/(2π σ_x σ_y)
+    if `normalize=True`, else coeff = 1.
+
+    Parameters:
+    - `mux`, `muy`: center (meters)
+    - `sigmax`, `sigmay`: principal sigmas (meters)
+    - `theta`: rotation angle (radians or degrees)
+    - `amplitude`: multiplicative amplitude
+    - `normalize`: produce unit-integral PDF before amplitude
+
+2) Fitting models: Modified Pseudo-Voigt, Pearson Type IV, King
+
+    The codebase supports three primary fitting profiles used across
+    analysis and plotting: a modified separable Pseudo‑Voigt, Pearson
+    Type IV (Pearson4), and a King/Moffat-style core+wing model. These
+    are implemented to support analytic evaluation on rotated grids and
+    to be compatible with discrete PSF matrix resampling.
+
+    A) Modified separable Pseudo-Voigt (azimuthal × radial)
+
+       - Each axis uses a 1D pseudo-Voigt: PV(u; σ, α) = (1 - α)*G(u; σ) + α*L(u; σ)
+          where G(u; σ) = (1/√(2π)) exp(-u^2/2) and L(u; σ) = (1/π) * 1/(1+u^2).
+       - The 2D shape is formed by PV_azi(azi_rot/σ_azi) * PV_rad(rad_rot/σ_rad)
+          evaluated in the rotated principal-axis frame (consistent rotation
+          convention with the Gaussian implementation).
+       - `alpha` may be specified per-axis (`alphaazi`, `alpharad`) or a
+          single `eta` mixing parameter may be used as fallback.
+       - `normalize=True` divides by (σ_azi * σ_rad) to account for the
+          normalization change of variables.
+
+    B) Pearson Type IV (Pearson4)
+
+       - The 1D Pearson4 unnormalized profile used in fits is:
+
+             P(u) ∝ (1 + (u/σ)^2)^{-m} * exp(ν * atan(u/σ)),  with u = x - μ
+
+       - Parameters: `μ` (center), `σ` (scale), `m` (tail-shape > 0), and
+          `ν` (skew/asymmetry). ν = 0 gives a symmetric tail.
+       - In 2D the implementation uses separable azimuthal/radial forms or
+          a radial-only fit depending on the target data; normalization is
+          computed numerically when required.
+
+    C) King / Moffat-like profile
+
+       - Radial form: K(r) = A * (1 + (r/α)^2)^{-β}, where r is radial
+          distance, `α` is core scale and `β` controls wing steepness.
+       - Parameters: `A` (amplitude), `α` (core scale), `β` (wing exponent).
+       - Supports rotationally symmetric 2D evaluation; normalization
+          computed analytically when possible or numerically otherwise.
+
+3) Rotation and units
+
+      - Rotation conventions are consistent across `gaussian_2d_rotated`,
+          `pseudo_voigt_2d_rotated` and `eval_psf_matrix_rotated` so that
+          analytic and discrete PSF evaluations align.
+      - Public APIs use meters; the loader converts arcsec using the
+          historical factor 1 arcsec = 12 * π / 180 / 3600 meters. Tests
+          and callers must either provide meters or rely on loader
+          conversions.
+
+Additional fitted models
+
+4) Pearson Type IV (Pearson4)
+
+      The repository includes an implementation of a Pearson Type IV
+      fit used to capture peaked, asymmetric shapes with heavy tails. The
+      Pearson4 form used in fit helpers follows a numerically-stable
+      parameterization where the unnormalized 1D profile is:
+
+         P(u) ∝ (1 + (u/σ)^2)^{-m} * exp(ν * atan(u/σ))
+
+      with u = x - μ. Parameters:
+      - `μ`: center (meters)
+      - `σ`: scale (meters)
+      - `m`: tail-shape (>0)
+      - `ν`: skew/asymmetry (0 = symmetric)
+
+      The 2D usage in the code is either separable (azimuthal × radial)
+      or radial-only depending on the fit target; normalization constants
+      are computed numerically when required.
+
+5) King profile (Moffat/King-like core+wings)
+
+      A King/Moffat-like profile is available for fits that require a
+      flat core with power-law wings. The standard radial form is:
+
+         K(r) = A * (1 + (r/α)^2)^{-β}
+
+      where r is radial distance, `α` is core scale and `β` the wing
+      exponent. Parameters:
+      - `A`: amplitude (flux)
+      - `α`: core scale (meters)
+      - `β`: wing exponent (>1)
+
+      The implementation supports radial fits and rotationally symmetric
+      2D evaluation; normalization is optional and computed analytically
+      or numerically as appropriate.
+
+Export behavior and available formats
+
+GUI (`gui_distributions.py`):
+- `Preview / Export` → `Save as new file` evaluates standard A_eff
+   presets per‑MM and writes numeric A_eff to column B of the `A_eff`
+   sheet; column C is cleared for adjusted values. When
+   `Apply vignetting factors when exporting` is enabled the selected
+   vignette column is copied into the exported workbook. Parsed preset
+   energy tokens (e.g., `1 keV`) are written into vignetting `C2`.
+- Plot context-menu exports:
+   - PSF PNG (high-resolution)
+   - Encircled Energy (EEF) PNG
+   - EEF CSV (written to `CustomPSFs/` as `E2E_EEF_YYYYMMDD_HHMMSS.csv`)
+   - Fit parameters CSV (aggregated fit coefficients)
+   - FITS output for PSF matrices where applicable
+
+CLI (`main.py`):
+- Legacy behavior preserved: adjusted/derived A_eff values are recorded
+   in column C by default for headless CLI runs. Use `--output` to save
+   figures and `--no-gui` for headless execution. CLI accepts Excel and
+   CSV inputs (including the multisheet CSV convention used by the
+   sensitivity runner).
+
+Tools:
+- `tools/compute_aeff_values.py` — compute and cache A_eff lookup
+   results (evaluate VLOOKUP/formula-derived columns) and write numeric
+   A_eff into the `A_eff` sheet for downstream pipelines that lack
+   Excel formula evaluation.
+
+Testing / validation
+- Local pytest: 42 passed, 4 warnings (curve-fit). The reorganized
+   test suite is arranged by domain for easier maintenance and CI
+   diagnostics.
+
+Release actions recommended
+- Create an annotated tag `v7.0.0` and attach a short changelog using
+   the summary above. This will produce a traceable release marker for
+   CI and package consumers.
+
 
 Verification & notes:
 
@@ -352,6 +541,23 @@ For detailed documentation, see:
 - **GUI application:** [gui_distributions.py](gui_distributions.py)
 - **Distribution utilities:** [distributions_rotated.py](distributions_rotated.py)
 - **Row optimizer & helpers:** [optimize_mm_rows.py](optimize_mm_rows.py)
+
+### Module reference
+
+- `main.py`: Command-line entrypoints and Excel I/O helpers. Implements
+   robust readers for `MM_PSF` and `A_eff` tables, spreadsheet-preserving
+   export paths, PSF parameter conversion (arcsec→meters), vignetting
+   application, and the headless plot/export options used in CI and
+   batch sensitivity runs. Key helper groups: workbook parsing,
+   distribution sampling, vignetting evaluation, MM configuration join
+   logic (MM#↔Position), and figure export utilities.
+
+- `gui_distributions.py`: Tkinter GUI for interactive generation and
+   exporting of per-MM distributions. Loads standard presets from the
+   workbook, allows per-data-type distribution editing (A_eff, MM_PSF,
+   Alignment, Thermal, Gravity), previews sampled tables, and performs
+   export with optional vignetting copy. Use `tools/compute_aeff_values.py`
+   to prepare numeric A_eff workbooks for headless pipelines.
 
 ## Directory Structure
 

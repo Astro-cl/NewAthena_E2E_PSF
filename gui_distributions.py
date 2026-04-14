@@ -197,6 +197,15 @@ def apply_macos_input_fixes(root: tk.Tk) -> None:
 
 
 def generate_values(dist, a, b, count):
+    """Sample `count` values from a distribution spec.
+
+    Parameters
+    - dist: distribution type string ('fixed', 'gaussian', 'gamma', 'uniform')
+    - a, b: distribution parameters (mean/scale or bounds depending on type)
+    - count: number of samples to draw
+
+    Returns a NumPy array of length `count`.
+    """
     count = int(count)
     if dist == 'fixed':
         # Return array of fixed value (a parameter)
@@ -290,6 +299,14 @@ def generate_data_from_distributions(params, num_mm, data_type_config):
 
 
 class ExtendedGUI:
+    """Main GUI application class for interactive generation and export.
+
+    Responsibilities:
+    - Load Excel workbooks and extract MM configuration and standard presets
+      (A_eff, MM_PSF, Alignment, Thermal, Gravity offload).
+    - Provide per-data-type distribution editors and sampling controls.
+    - Preview generated tables and export updated workbooks or plots.
+    """
     def __init__(self, root):
         self.root = root
         root.title('MM Configuration Generator GUI')

@@ -12,7 +12,7 @@ This document provides a quick reference to the core modules and their purposes.
 | [gui_distributions.py](gui_distributions.py) | Tkinter-based GUI to load Excel workbooks, choose standard distributions, apply presets and export updated workbooks |
 | [distributions_rotated.py](distributions_rotated.py) | Low-level rotated 2D distribution implementations (Gaussian, pseudo-Voigt) and helpers to evaluate PSF matrices |
 | [optimize_mm_rows.py](optimize_mm_rows.py) | Utilities to reorder and optimize MM row layouts |
-| `scripts/` | Helper scripts for export and diagnostics |
+| `tools/` | Helper scripts and utilities (moved from top-level); legacy/debug copies retained under `scripts/legacy/` |
 
 ## Documentation Files
 
