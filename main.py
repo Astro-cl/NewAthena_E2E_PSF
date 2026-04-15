@@ -7252,24 +7252,30 @@ if __name__ == '__main__':
                             fit_map = {}
                             eef80 = None
                             eef90 = None
-                        # Compute Aeff loss comparing column C sums (modified vs original)
+                        # Compute Aeff loss as 1 - SUM(C2:C601)/SUM(B2:B601) on the input file's A_eff sheet
                         try:
                             sum_orig = None
                             sum_mod = None
                             try:
-                                df_a_orig = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
-                                if df_a_orig.shape[1] > 2:
-                                    sum_orig = pd.to_numeric(df_a_orig.iloc[:, 2], errors='coerce').fillna(0.0).sum()
+                                df_a = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
+                                # Use rows 2..601 (1-based) -> iloc[1:601]
+                                if df_a.shape[0] >= 2 and df_a.shape[1] > 1:
+                                    # Column B is index 1, column C is index 2
+                                    try:
+                                        sum_b = pd.to_numeric(df_a.iloc[1:601, 1], errors='coerce').fillna(0.0).sum()
+                                    except Exception:
+                                        sum_b = pd.to_numeric(df_a.iloc[1:, 1], errors='coerce').fillna(0.0).sum()
+                                    try:
+                                        sum_c = pd.to_numeric(df_a.iloc[1:601, 2], errors='coerce').fillna(0.0).sum()
+                                    except Exception:
+                                        sum_c = pd.to_numeric(df_a.iloc[1:, 2], errors='coerce').fillna(0.0).sum()
+                                    sum_orig = float(sum_b)
+                                    sum_mod = float(sum_c)
                             except Exception:
                                 sum_orig = None
-                            try:
-                                df_a_mod = pd.read_excel(new_path, sheet_name='A_eff', engine='openpyxl', header=None)
-                                if df_a_mod.shape[1] > 2:
-                                    sum_mod = pd.to_numeric(df_a_mod.iloc[:, 2], errors='coerce').fillna(0.0).sum()
-                            except Exception:
                                 sum_mod = None
                             if sum_orig is not None and sum_mod is not None and sum_orig != 0:
-                                aeff_loss = 1.0 - (float(sum_mod) / float(sum_orig))
+                                aeff_loss = 1.0 - (sum_mod / sum_orig)
                             else:
                                 aeff_loss = None
                         except Exception:
