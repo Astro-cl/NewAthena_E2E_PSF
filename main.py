@@ -6911,6 +6911,10 @@ if __name__ == '__main__':
         export_batch_dir = os.path.join(exports_root, f"Export_{src_stem}_{batch_ts}")
         os.makedirs(export_batch_dir, exist_ok=True)
 
+        # Prepare aggregated results collector
+        aggregated_rows = []
+        agg_columns = None
+
         for rid, crow in combos.iterrows():
             try:
                 prefix = str(crow.iat[1]).strip()
@@ -7024,6 +7028,16 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Failed to modify workbook {new_path}: {e}")
                 continue
+
+            # Compute HEW/EEF metrics for this modified workbook (no plotting)
+            metrics = {}
+            try:
+                try:
+                    metrics = compute_hew_eef_metrics(new_path, sheet=args.sheet if hasattr(args, 'sheet') else 'MM_PSF', normalize=getattr(args, 'normalize', True), fast=True)
+                except Exception:
+                    metrics = compute_hew_eef_metrics(new_path)
+            except Exception as e:
+                print(f"Warning: failed to compute HEW/EEF metrics for {new_basename}: {e}")
 
             # Run this script on the modified workbook with --export-package
             try:
@@ -7144,6 +7158,81 @@ if __name__ == '__main__':
                                     except Exception:
                                         pass
                         print(f"Created package from export folder: {zip_target}")
+                        # Remove the package folder now that a zip archive exists
+                        try:
+                            if 'pkg_path' in locals() and os.path.isdir(pkg_path):
+                                shutil.rmtree(pkg_path)
+                                print(f"Removed intermediate package folder: {pkg_path}")
+                        except Exception as e:
+                            print(f"Warning: failed to remove package folder {pkg_path}: {e}")
+                        # Extract fit parameters and EEF curves if available and append aggregated row
+                        try:
+                            fit_map = {}
+                            eef80 = None
+                            eef90 = None
+                            if 'pkg_path' in locals() and os.path.isdir(pkg_path):
+                                fp = os.path.join(pkg_path, 'EEF_fittingparams.xlsx')
+                                if os.path.exists(fp):
+                                    try:
+                                        df_fit = pd.read_excel(fp, sheet_name='Fit_parameters', engine='openpyxl')
+                                        if 'parameter' in df_fit.columns and 'value' in df_fit.columns:
+                                            fit_map = dict(zip(df_fit['parameter'].astype(str), df_fit['value']))
+                                    except Exception:
+                                        fit_map = {}
+                                    try:
+                                        df_eef = pd.read_excel(fp, sheet_name='EEF_curves', engine='openpyxl')
+                                        if 'diameter_arcsec' in df_eef.columns and 'EEF_aggregated_pct' in df_eef.columns:
+                                            pct = pd.to_numeric(df_eef['EEF_aggregated_pct'], errors='coerce').to_numpy()
+                                            diam = pd.to_numeric(df_eef['diameter_arcsec'], errors='coerce').to_numpy()
+                                            order = np.argsort(pct)
+                                            pct_s = pct[order]
+                                            diam_s = diam[order]
+                                            if np.nanmin(pct_s) <= 80.0 <= np.nanmax(pct_s):
+                                                eef80 = float(np.interp(80.0, pct_s, diam_s))
+                                            if np.nanmin(pct_s) <= 90.0 <= np.nanmax(pct_s):
+                                                eef90 = float(np.interp(90.0, pct_s, diam_s))
+                                    except Exception:
+                                        eef80 = None
+                                        eef90 = None
+                        except Exception:
+                            fit_map = {}
+                            eef80 = None
+                            eef90 = None
+                        # Build aggregated row (include offaxis [arcmin], energy [keV], defocus [mm])
+                        try:
+                            row = {
+                                'configuration_number': int(rid) + 1,
+                                'configuration_name': prefix,
+                                'offaxis_arcmin': offaxis_val,
+                                'energy_keV': energy_val,
+                                'defocus_mm': defocus_val,
+                                'HEW_00_arcsec': metrics.get('hew_origin_arcsec') if isinstance(metrics, dict) else None,
+                                'HEW_min_arcsec': metrics.get('hew_best_arcsec') if isinstance(metrics, dict) else None,
+                                'EEF80_min_arcsec': eef80 if eef80 is not None else None,
+                                'EEF90_min_arcsec': eef90 if eef90 is not None else (metrics.get('eef90_best_arcsec') if isinstance(metrics, dict) else None),
+                            }
+                        except Exception:
+                            row = {'configuration_number': int(rid) + 1, 'configuration_name': prefix, 'offaxis_arcmin': offaxis_val, 'energy_keV': energy_val, 'defocus_mm': defocus_val}
+                        pv_keys = ['Modified_PV_Amplitude_A', 'Modified_PV_Gamma_c_arcsec', 'Modified_PV_Gamma_w_arcsec', 'Modified_PV_eta', 'Modified_PV_beta', 'Modified_PV_scalar']
+                        for k in pv_keys:
+                            row[k] = fit_map.get(k) if isinstance(fit_map, dict) else None
+                        p4_keys = ['Pearson4_Amplitude', 'Pearson4_Center_arcsec', 'Pearson4_Sigma_arcsec', 'Pearson4_Exponent_m', 'Pearson4_Skew_nu']
+                        for k in p4_keys:
+                            row[k] = fit_map.get(k) if isinstance(fit_map, dict) else None
+                        king_keys = ['King_I0', 'King_rc_arcsec', 'King_alpha', 'King_b']
+                        for k in king_keys:
+                            row[k] = fit_map.get(k) if isinstance(fit_map, dict) else None
+                        row['King_extra'] = None
+                        aggregated_rows.append(row)
+                        # Write/update aggregated Excel immediately in the export folder
+                        try:
+                            df_agg_now = pd.DataFrame(aggregated_rows)
+                            out_agg_now = os.path.join(export_batch_dir, f"Aggregated_results_{src_stem}.xlsx")
+                            with pd.ExcelWriter(out_agg_now, engine='openpyxl') as writer:
+                                df_agg_now.to_excel(writer, sheet_name='Aggregated', index=False)
+                            print(f"Updated aggregated results: {out_agg_now}")
+                        except Exception as e:
+                            print(f"Warning: failed to update aggregated Excel after {prefix}: {e}")
                     except Exception as e:
                         print(f"Failed to create package archive: {e}")
                 else:
@@ -7155,6 +7244,32 @@ if __name__ == '__main__':
                     print(f"Created fallback package (workbook only): {zip_target}")
             except Exception as e:
                 print(f"Failed to create package for {prefix}: {e}")
+
+        # Write aggregated results workbook and copy the combinations file + input workbook into the export folder
+        try:
+            if aggregated_rows:
+                try:
+                    df_agg = pd.DataFrame(aggregated_rows)
+                    out_agg = os.path.join(export_batch_dir, f"Aggregated_results_{src_stem}.xlsx")
+                    with pd.ExcelWriter(out_agg, engine='openpyxl') as writer:
+                        df_agg.to_excel(writer, sheet_name='Aggregated', index=False)
+                    print(f"Wrote aggregated results to {out_agg}")
+                except Exception as e:
+                    print(f"Failed to write aggregated results Excel: {e}")
+            # Copy combinations file used to run the batch into the export folder
+            try:
+                if os.path.exists(comb_path):
+                    shutil.copy2(comb_path, os.path.join(export_batch_dir, os.path.basename(comb_path)))
+            except Exception as e:
+                print(f"Failed to copy combinations file into export folder: {e}")
+            # Copy the original input workbook used as source for the batch
+            try:
+                if os.path.exists(args.file):
+                    shutil.copy2(args.file, os.path.join(export_batch_dir, os.path.basename(args.file)))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Completed batch processing
         sys.exit(0)
