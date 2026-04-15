@@ -7258,17 +7258,10 @@ if __name__ == '__main__':
                             sum_mod = None
                             try:
                                 df_a = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
-                                # Use rows 2..601 (1-based) -> iloc[1:601]
-                                if df_a.shape[0] >= 2 and df_a.shape[1] > 1:
-                                    # Column B is index 1, column C is index 2
-                                    try:
-                                        sum_b = pd.to_numeric(df_a.iloc[1:601, 1], errors='coerce').fillna(0.0).sum()
-                                    except Exception:
-                                        sum_b = pd.to_numeric(df_a.iloc[1:, 1], errors='coerce').fillna(0.0).sum()
-                                    try:
-                                        sum_c = pd.to_numeric(df_a.iloc[1:601, 2], errors='coerce').fillna(0.0).sum()
-                                    except Exception:
-                                        sum_c = pd.to_numeric(df_a.iloc[1:, 2], errors='coerce').fillna(0.0).sum()
+                                # Sum all rows from row 2 onward (iloc[1:]) for columns B (index 1) and C (index 2).
+                                if df_a.shape[0] >= 2 and df_a.shape[1] > 2:
+                                    sum_b = pd.to_numeric(df_a.iloc[1:, 1], errors='coerce').fillna(0.0).sum()
+                                    sum_c = pd.to_numeric(df_a.iloc[1:, 2], errors='coerce').fillna(0.0).sum()
                                     sum_orig = float(sum_b)
                                     sum_mod = float(sum_c)
                             except Exception:
