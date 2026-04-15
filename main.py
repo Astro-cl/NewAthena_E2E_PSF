@@ -3134,19 +3134,25 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
 
             # ========== PEARSON4 FITTING ==========
             # Fit Pearson4 model using lmfit to also optimize intensity + EEF
-            pearson4_result = None
-            pearson4_profile_pct = None
-            pearson4_profile_diam = None
-            try:
-                from lmfit.models import Pearson4Model
-                from lmfit import Parameters
-                print("DEBUG: lmfit imported successfully for Pearson4 fitting")
-                
-                # Create Pearson4 model
-                pearson4_model = Pearson4Model()
-                
-                # Initial guess from pseudo-Voigt peak parameters
-                params = pearson4_model.guess(I_fit, x=r_fit)
+            # In quick/coarse mode skip Pearson4 fitting to save time
+            if quick_mode:
+                pearson4_result = None
+                pearson4_profile_pct = None
+                pearson4_profile_diam = None
+            else:
+                pearson4_result = None
+                pearson4_profile_pct = None
+                pearson4_profile_diam = None
+                try:
+                    from lmfit.models import Pearson4Model
+                    from lmfit import Parameters
+                    print("DEBUG: lmfit imported successfully for Pearson4 fitting")
+
+                    # Create Pearson4 model
+                    pearson4_model = Pearson4Model()
+
+                    # Initial guess from pseudo-Voigt peak parameters
+                    params = pearson4_model.guess(I_fit, x=r_fit)
                 try:
                     print(f"DEBUG: pearson4 initial guess amp={params['amplitude'].value}, center={params['center'].value}, sigma={params['sigma'].value}, expon={params['expon'].value}, skew={params['skew'].value}")
                 except Exception:
