@@ -2525,15 +2525,18 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Close any existing matplotlib figures to prevent accumulation
     plt.close('all')
 
-    # Reduce grid resolution in fast mode
+    """ # Reduce grid resolution in fast mode
     if fast:
         # Aggressive defaults for interactive speed (target: <5s without optimization)
-        nx = min(nx, 320)
-        ny = min(ny, 240)
+        nx = min(nx, 2062)
+        ny = min(ny, 2062)
     else:
-        # Keep slow mode bounded (still more accurate than fast, but not unbounded)
-        nx = min(nx, 420)
-        ny = min(ny, 340)
+        # Keep slow mode bounded (still more accurate than fast, but not unbounded, this value is known from previous iterations of the optical design)
+        nx = 2062
+        ny = 2062 """
+
+    nx = 2062
+    ny = 2062
 
     # fast=True now means "quick" for both plain and comparison plots.
     quick_mode = bool(fast)
@@ -4778,7 +4781,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     min_y = df['muy'].min() - margin_factor * df['sigmay'].max()
     max_y = df['muy'].max() + margin_factor * df['sigmay'].max()
 
-    if max_radius and max_radius > 0:
+    """ if max_radius and max_radius > 0:
         xlim = (
             min(min_x, center_x - 1.1 * max_radius, -1.1 * (radius_50_00 or 0.0)),
             max(max_x, center_x + 1.1 * max_radius,  1.1 * (radius_50_00 or 0.0)),
@@ -4789,7 +4792,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         )
     else:
         xlim = (min_x, max_x)
-        ylim = (min_y, max_y)
+        ylim = (min_y, max_y) """
+
+    xlim = (-0.015, 0.015)
+    ylim = (-0.015, 0.015)
 
     x = np.linspace(xlim[0], xlim[1], nx)
     y = np.linspace(ylim[0], ylim[1], ny)
@@ -6463,7 +6469,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         # Pixel scales
         pix_m_x = float(x[1] - x[0]) if x.size > 1 else 0.0
         pix_m_y = float(y[1] - y[0]) if y.size > 1 else 0.0
-        m_to_arcsec_local = (180.0 / np.pi) * 3600.0
+        m_to_arcsec_local = (180.0 / (12.0 * np.pi)) * 3600.0
         pix_as_x = pix_m_x * m_to_arcsec_local
         pix_as_y = pix_m_y * m_to_arcsec_local
         cdelt1 = pix_as_x / 3600.0
@@ -6792,7 +6798,7 @@ if __name__ == '__main__':
         '--mode',
         type=str,
         choices=['coarse', 'fine', 'extra-fine'],
-        default='coarse',
+        default='fine',
         help='Runtime mode: coarse, fine, or extra-fine. Controls plotting + optimization speed/accuracy.'
     )
     parser.add_argument('--optimize', action='store_true', default=False, help='Enable MM position optimization (uses --mode for speed/accuracy).')
@@ -7158,46 +7164,115 @@ if __name__ == '__main__':
                                     except Exception:
                                         pass
                         print(f"Created package from export folder: {zip_target}")
-                        # Remove the package folder now that a zip archive exists
-                        try:
-                            if 'pkg_path' in locals() and os.path.isdir(pkg_path):
-                                shutil.rmtree(pkg_path)
-                                print(f"Removed intermediate package folder: {pkg_path}")
-                        except Exception as e:
-                            print(f"Warning: failed to remove package folder {pkg_path}: {e}")
                         # Extract fit parameters and EEF curves if available and append aggregated row
                         try:
                             fit_map = {}
                             eef80 = None
                             eef90 = None
+                            # Look for the standardized EEF_fittingparams workbook first,
+                            # then fallback to common original names inside the package folder.
+                            candidate_files = []
                             if 'pkg_path' in locals() and os.path.isdir(pkg_path):
-                                fp = os.path.join(pkg_path, 'EEF_fittingparams.xlsx')
-                                if os.path.exists(fp):
-                                    try:
-                                        df_fit = pd.read_excel(fp, sheet_name='Fit_parameters', engine='openpyxl')
+                                candidate_files.append(os.path.join(pkg_path, 'EEF_fittingparams.xlsx'))
+                                # search for common patterns (renamed or original)
+                                candidate_files.extend(glob.glob(os.path.join(pkg_path, 'E2E_EEF_and_fitparams_*.xlsx')))
+                                candidate_files.extend(glob.glob(os.path.join(pkg_path, 'CustomPSFs', 'E2E_EEF_and_fitparams_*.xlsx')))
+                                candidate_files.extend(glob.glob(os.path.join(pkg_path, '**', 'E2E_EEF_and_fitparams_*.xlsx'), recursive=True))
+                            # Try each candidate until one yields a Fit_parameters sheet
+                            found_fp = None
+                            for cand in candidate_files:
+                                try:
+                                    if not os.path.exists(cand):
+                                        continue
+                                    # Try to read Fit_parameters sheet
+                                    df_fit = pd.read_excel(cand, sheet_name='Fit_parameters', engine='openpyxl')
+                                    if 'parameter' in df_fit.columns and 'value' in df_fit.columns:
+                                        fit_map = dict(zip(df_fit['parameter'].astype(str), df_fit['value']))
+                                        found_fp = cand
+                                        break
+                                except Exception:
+                                    continue
+                            # If not found on filesystem, try inside the zip archive
+                            if found_fp is None and os.path.exists(zip_target):
+                                try:
+                                    with zipfile.ZipFile(zip_target, 'r') as zf:
+                                        for name in zf.namelist():
+                                            lname = name.lower()
+                                            if 'e2e_eef_and_fitparams' in lname or 'eef_fittingparams' in lname:
+                                                # extract to temp and attempt to read
+                                                tf = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(name)[1])
+                                                tf.close()
+                                                try:
+                                                    with open(tf.name, 'wb') as out_f:
+                                                        out_f.write(zf.read(name))
+                                                    df_fit = pd.read_excel(tf.name, sheet_name='Fit_parameters', engine='openpyxl')
+                                                    if 'parameter' in df_fit.columns and 'value' in df_fit.columns:
+                                                        fit_map = dict(zip(df_fit['parameter'].astype(str), df_fit['value']))
+                                                        found_fp = tf.name
+                                                        break
+                                                except Exception:
+                                                    try:
+                                                        os.remove(tf.name)
+                                                    except Exception:
+                                                        pass
+                                except Exception:
+                                    pass
+                            # If no Fit_parameters was discovered inside the package/zip,
+                            # try reading it directly from the modified workbook copy (`new_path`).
+                            if not fit_map:
+                                try:
+                                    if new_path and os.path.exists(new_path):
+                                        df_fit = pd.read_excel(new_path, sheet_name='Fit_parameters', engine='openpyxl')
                                         if 'parameter' in df_fit.columns and 'value' in df_fit.columns:
                                             fit_map = dict(zip(df_fit['parameter'].astype(str), df_fit['value']))
-                                    except Exception:
-                                        fit_map = {}
-                                    try:
-                                        df_eef = pd.read_excel(fp, sheet_name='EEF_curves', engine='openpyxl')
-                                        if 'diameter_arcsec' in df_eef.columns and 'EEF_aggregated_pct' in df_eef.columns:
-                                            pct = pd.to_numeric(df_eef['EEF_aggregated_pct'], errors='coerce').to_numpy()
-                                            diam = pd.to_numeric(df_eef['diameter_arcsec'], errors='coerce').to_numpy()
-                                            order = np.argsort(pct)
-                                            pct_s = pct[order]
-                                            diam_s = diam[order]
-                                            if np.nanmin(pct_s) <= 80.0 <= np.nanmax(pct_s):
-                                                eef80 = float(np.interp(80.0, pct_s, diam_s))
-                                            if np.nanmin(pct_s) <= 90.0 <= np.nanmax(pct_s):
-                                                eef90 = float(np.interp(90.0, pct_s, diam_s))
-                                    except Exception:
-                                        eef80 = None
-                                        eef90 = None
+                                            found_fp = new_path
+                                except Exception:
+                                    # keep fit_map empty on failure
+                                    pass
+                            # If we found a workbook, also try to read EEF_curves from it
+                            if found_fp:
+                                try:
+                                    df_eef = pd.read_excel(found_fp, sheet_name='EEF_curves', engine='openpyxl')
+                                    if 'diameter_arcsec' in df_eef.columns and 'EEF_aggregated_pct' in df_eef.columns:
+                                        pct = pd.to_numeric(df_eef['EEF_aggregated_pct'], errors='coerce').to_numpy()
+                                        diam = pd.to_numeric(df_eef['diameter_arcsec'], errors='coerce').to_numpy()
+                                        order = np.argsort(pct)
+                                        pct_s = pct[order]
+                                        diam_s = diam[order]
+                                        if np.nanmin(pct_s) <= 80.0 <= np.nanmax(pct_s):
+                                            eef80 = float(np.interp(80.0, pct_s, diam_s))
+                                        if np.nanmin(pct_s) <= 90.0 <= np.nanmax(pct_s):
+                                            eef90 = float(np.interp(90.0, pct_s, diam_s))
+                                except Exception:
+                                    eef80 = None
+                                    eef90 = None
                         except Exception:
                             fit_map = {}
                             eef80 = None
                             eef90 = None
+                        # Compute Aeff loss comparing column C sums (modified vs original)
+                        try:
+                            sum_orig = None
+                            sum_mod = None
+                            try:
+                                df_a_orig = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
+                                if df_a_orig.shape[1] > 2:
+                                    sum_orig = pd.to_numeric(df_a_orig.iloc[:, 2], errors='coerce').fillna(0.0).sum()
+                            except Exception:
+                                sum_orig = None
+                            try:
+                                df_a_mod = pd.read_excel(new_path, sheet_name='A_eff', engine='openpyxl', header=None)
+                                if df_a_mod.shape[1] > 2:
+                                    sum_mod = pd.to_numeric(df_a_mod.iloc[:, 2], errors='coerce').fillna(0.0).sum()
+                            except Exception:
+                                sum_mod = None
+                            if sum_orig is not None and sum_mod is not None and sum_orig != 0:
+                                aeff_loss = 1.0 - (float(sum_mod) / float(sum_orig))
+                            else:
+                                aeff_loss = None
+                        except Exception:
+                            aeff_loss = None
+
                         # Build aggregated row (include offaxis [arcmin], energy [keV], defocus [mm])
                         try:
                             row = {
@@ -7206,13 +7281,14 @@ if __name__ == '__main__':
                                 'offaxis_arcmin': offaxis_val,
                                 'energy_keV': energy_val,
                                 'defocus_mm': defocus_val,
+                                'Aeff_loss': aeff_loss,
                                 'HEW_00_arcsec': metrics.get('hew_origin_arcsec') if isinstance(metrics, dict) else None,
                                 'HEW_min_arcsec': metrics.get('hew_best_arcsec') if isinstance(metrics, dict) else None,
                                 'EEF80_min_arcsec': eef80 if eef80 is not None else None,
                                 'EEF90_min_arcsec': eef90 if eef90 is not None else (metrics.get('eef90_best_arcsec') if isinstance(metrics, dict) else None),
                             }
                         except Exception:
-                            row = {'configuration_number': int(rid) + 1, 'configuration_name': prefix, 'offaxis_arcmin': offaxis_val, 'energy_keV': energy_val, 'defocus_mm': defocus_val}
+                            row = {'configuration_number': int(rid) + 1, 'configuration_name': prefix, 'offaxis_arcmin': offaxis_val, 'energy_keV': energy_val, 'defocus_mm': defocus_val, 'Aeff_loss': aeff_loss}
                         pv_keys = ['Modified_PV_Amplitude_A', 'Modified_PV_Gamma_c_arcsec', 'Modified_PV_Gamma_w_arcsec', 'Modified_PV_eta', 'Modified_PV_beta', 'Modified_PV_scalar']
                         for k in pv_keys:
                             row[k] = fit_map.get(k) if isinstance(fit_map, dict) else None
@@ -7233,6 +7309,13 @@ if __name__ == '__main__':
                             print(f"Updated aggregated results: {out_agg_now}")
                         except Exception as e:
                             print(f"Warning: failed to update aggregated Excel after {prefix}: {e}")
+                        # Now remove the package folder to avoid leaving duplicate artifacts
+                        try:
+                            if 'pkg_path' in locals() and os.path.isdir(pkg_path):
+                                shutil.rmtree(pkg_path)
+                                print(f"Removed intermediate package folder: {pkg_path}")
+                        except Exception as e:
+                            print(f"Warning: failed to remove package folder {pkg_path}: {e}")
                     except Exception as e:
                         print(f"Failed to create package archive: {e}")
                 else:
