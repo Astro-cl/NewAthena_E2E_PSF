@@ -3138,6 +3138,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             pearson4_profile_pct = None
             pearson4_profile_diam = None
             try:
+                if quick_mode:
+                    raise ImportError("quick mode: skip pearson4")
                 from lmfit.models import Pearson4Model
                 from lmfit import Parameters
                 print("DEBUG: lmfit imported successfully for Pearson4 fitting")
