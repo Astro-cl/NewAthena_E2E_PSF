@@ -6798,7 +6798,7 @@ if __name__ == '__main__':
         '--mode',
         type=str,
         choices=['coarse', 'fine', 'extra-fine'],
-        default='fine',
+        default='coarse',
         help='Runtime mode: coarse, fine, or extra-fine. Controls plotting + optimization speed/accuracy.'
     )
     parser.add_argument('--optimize', action='store_true', default=False, help='Enable MM position optimization (uses --mode for speed/accuracy).')
@@ -7530,6 +7530,8 @@ if __name__ == '__main__':
             normalize=args.normalize,
             output=args.output,
             fast=(args.mode == 'coarse'),
+            nx=(2062 if args.mode == 'fine' else None),
+            ny=(2062 if args.mode == 'fine' else None),
             title_suffix=plot_title_suffix,
             df_optimized=df_optimized,
             return_metrics_only=True,
@@ -7546,6 +7548,8 @@ if __name__ == '__main__':
         normalize=args.normalize,
         output=args.output,
         fast=(args.mode == 'coarse'),
+        nx=(2062 if args.mode == 'fine' else None),
+        ny=(2062 if args.mode == 'fine' else None),
         title_suffix=plot_title_suffix,
         df_optimized=df_optimized,
     )
