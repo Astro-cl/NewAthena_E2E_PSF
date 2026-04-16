@@ -436,6 +436,81 @@ Verification & notes:
    - Files are saved in `Distributions/` folder
    - Context menu (right-click) on plots: Export PSF / Encircled Energy / FITS / EEF CSV / Fit Parameters CSV. EEF CSV files are written to `CustomPSFs/` as `E2E_EEF_YYYYMMDD_HHMMSS.csv`.
 
+   ## Batch Processing & CLI (Headless)
+
+   This project supports headless batch processing for automated generation of PSF products, packaging, and aggregated summaries. Use the CLI `main.py` for single-run, single-config, or packaged exports. The important flags and workflows are described below.
+
+   Basic single-run examples
+
+   - Coarse (fast) export and package:
+
+   ```bash
+   python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode coarse
+   ```
+
+   - Fine (high-resolution) export and package — note: can be compute-heavy and may take significant time:
+
+   ```bash
+   python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
+   ```
+
+   - Run only a single mirror-module configuration index (useful for debugging):
+
+   ```bash
+   python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --single-config 1
+   ```
+
+   Background/long-run tips
+
+   - To run long fine-mode exports unattended, use `nohup` or a terminal multiplexer such as `screen` or `tmux`:
+
+   ```bash
+   nohup python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine &
+   # or
+   screen -S e2e_run
+   python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
+   # detach with Ctrl-A D
+   ```
+
+   - If your runs are CPU-heavy, consider running on a machine with more CPU cores or limiting the grid resolution in `main.py` for fine-mode if you need faster turnaround.
+
+   Export package contents and verification
+
+   - Packages are written to `Exports/<TIMESTAMP>/` and include the packaged workbook (used as the authoritative source when aggregating A_eff sums), Figures in `Figures/`, and FITS files in `CustomPSFs/`.
+   - The CLI prefers the workbook copied into the package when computing `Aeff_sum_orig` and `Aeff_sum_mod` so aggregated results match the packaged workbook.
+   - After a successful package export, verify:
+      - PNGs in `Figures/` (coarse = 320×320 px, fine = 2062×2062 px)
+      - FITS in `CustomPSFs/` (grid dimensions equal to the requested pixel size)
+      - Aggregated Excel `E2E_EEF_and_fitparams_*.xlsx` present in the package.
+
+   Repairing existing packages
+
+   If you have existing `Exports/` packages created before these fixes, use the included repair/diagnostic scripts at the repository root to inspect and patch packages:
+
+   - `.inspect_export.py` — inspect a package and list mismatches between packaged workbook and recorded aggregated sums.
+   - `.diagnose_aeff.py` — diagnostics to identify formula-only A_eff columns and missing cached values.
+   - `.patch_fitparams.py` — patch per-config `fitparams_aeffloss.xlsx` files inside packages when sums differ.
+   - `.patch_aggregated.py` — repair aggregated workbook rows that used the wrong source for A_eff sums.
+
+   Example: run the inspect script and, if needed, apply a patch (these are best run interactively to confirm changes):
+
+   ```bash
+   python3 .inspect_export.py Exports/20260416_124558
+   python3 .patch_fitparams.py Exports/20260416_124558 --dry-run
+   python3 .patch_fitparams.py Exports/20260416_124558
+   ```
+
+   Notes on formula evaluation
+
+   - Many input workbooks use Excel formulas (VLOOKUP/XLOOKUP or textual preset expressions). When Excel cached numeric values are missing, a best-effort internal evaluator attempts to resolve common patterns and populate numeric `A_eff` values during export.
+   - The helper script `tools/compute_aeff_values.py` can be used to precompute and write numeric `A_eff` columns into workbooks so downstream runs do not rely on formula evaluation logic.
+
+   Troubleshooting
+
+   - If an exported package's aggregated `Aeff_sum_mod` appears incorrect, re-run the inspect script and check whether the packaged workbook's `A_eff` sheet contains formulas without cached values. If so, use `tools/compute_aeff_values.py` or re-export from Excel to populate cached values.
+   - Fine-mode runs can be very long; if interrupted you can re-run the same command and the package writer will either pick up partial results or re-generate the package depending on the stage at interruption.
+
+
 ### Using Command Line
 
 ```bash

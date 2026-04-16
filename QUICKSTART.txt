@@ -129,4 +129,48 @@ Figures/        - Exported plots are saved here
 
 For full documentation, see README.md
 
+BATCH & HEADLESS
+-----------------
+The CLI `main.py` supports headless exports, packaging and single-config runs for batch workflows. Use these examples to run automated exports and to run long fine-mode evaluations.
+
+Examples
+
+- Coarse package export (fast):
+
+```bash
+python3 main.py --file Distributions/TestDistribution.xlsx --export-package --mode coarse
+```
+
+- Fine package export (high-resolution; may run for a long time):
+
+```bash
+python3 main.py --file Distributions/TestDistribution.xlsx --export-package --mode fine
+```
+
+- Single configuration export (debug):
+
+```bash
+python3 main.py --file Distributions/TestDistribution.xlsx --export-package --single-config 1
+```
+
+Running long jobs
+
+- Use `nohup`, `screen`, or `tmux` to keep runs alive when disconnected:
+
+```bash
+nohup python3 main.py --file Distributions/TestDistribution.xlsx --export-package --mode fine &
+```
+
+- For heavy runs, consider running on a machine with more CPU cores or reduce sampling resolution in `main.py` temporarily.
+
+Repairing existing Exports
+
+If you need to repair packages produced by older versions of the code, the repository includes small utilities at the project root to inspect and patch exports:
+
+- `.inspect_export.py` — list mismatches inside a package
+- `.diagnose_aeff.py` — identify formula-only A_eff columns
+- `.patch_fitparams.py` / `.patch_aggregated.py` — apply fixes to packaged fitparams and aggregated rows
+
+See `README.md` for more examples and verification steps.
+
 ================================================================================
