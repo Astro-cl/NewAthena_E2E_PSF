@@ -101,7 +101,6 @@ Input workbook requirements (for main.py):
 Optional runtime modes:
   python3 main.py -f Distributions/TestDistribution.xlsx --mode coarse
   python3 main.py -f Distributions/TestDistribution.xlsx --mode fine
-  python3 main.py -f Distributions/TestDistribution.xlsx --mode extra-fine
 
 Placement (writes *_placed.xlsx and overlays it):
   python3 main.py -f Distributions/TestDistribution.xlsx --placement cross

@@ -2274,16 +2274,13 @@ def optimize_rows(
     # Keep wall-time bounded.
     # Note: HEW evaluation is the expensive part, so we cap iterations.
     # Upper bound: work will stop early once the deadline hits.
-    if mode not in {"coarse", "fine", "extra-fine"}:
+    if mode not in {"coarse", "fine"}:
         raise ValueError(f"Unknown mode: {mode}")
 
     is_coarse = (mode == "coarse")
-    is_extra_fine = (mode == "extra-fine")
 
     if is_coarse:
         swaps_per_row = 160
-    elif is_extra_fine:
-        swaps_per_row = 1200
     else:
         swaps_per_row = 220
     seed = 42  # Fixed seed for reproducibility
@@ -2319,8 +2316,6 @@ def optimize_rows(
         row_values = [int(v) for v in row_counts.index.tolist()]
         if is_coarse:
             selected_rows = row_values[:2]
-        elif is_extra_fine:
-            selected_rows = row_values
         else:
             selected_rows = row_values[:6]
 
@@ -2412,9 +2407,6 @@ def optimize_rows(
                 if is_coarse:
                     stagnation_limit = 120
                     perturb_k = 6
-                elif is_extra_fine:
-                    stagnation_limit = 800
-                    perturb_k = 16
                 else:
                     stagnation_limit = 300
                     perturb_k = 10
@@ -2498,9 +2490,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["coarse", "fine", "extra-fine"],
+        choices=["coarse", "fine"],
         default="coarse",
-        help="Runtime mode: coarse, fine, or extra-fine. Controls optimization speed/accuracy.",
+        help="Runtime mode: coarse or fine. Controls optimization speed/accuracy.",
     )
     parser.add_argument(
         "--optimize",
@@ -2521,8 +2513,6 @@ if __name__ == "__main__":
         # Keep this aligned with main.py so users get consistent behavior.
         if args.mode == "coarse":
             time_budget_s = 18.0
-        elif args.mode == "extra-fine":
-            time_budget_s = 240.0
         else:
             time_budget_s = 45.0
         best_hew = optimize_rows(

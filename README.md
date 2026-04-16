@@ -651,7 +651,7 @@ python3 main.py [OPTIONS]
 - `--normalize`: Normalize PSF to unit integral
 - `--no-normalize`: Disable normalization
 - `--output FILE`: Save combined plot to file (in `Figures/` folder)
-- `--mode {coarse,fine,extra-fine}`: Runtime mode. Controls plotting + optimization speed/accuracy.
+- `--mode {coarse,fine}`: Runtime mode. Controls plotting + optimization speed/accuracy.
 
 Additional export and metadata options:
 
@@ -704,11 +704,6 @@ Keyboard shortcuts in the interactive window:
    python3 main.py -f Distributions/my_data.xlsx --mode fine
    ```
 
-5. **Extra-fine mode** (deeper optimization, up to ~5 minutes):
-   ```bash
-   python3 main.py -f Distributions/my_data.xlsx --mode extra-fine
-   ```
-
 6. **Save output figure**:
    ```bash
    python3 main.py -f Distributions/my_data.xlsx --output Figures/my_analysis.png
@@ -732,10 +727,7 @@ Keyboard shortcuts in the interactive window:
    python3 main.py -f Distributions/my_data.xlsx --mode fine --optimize
    ```
 
-10. **Optimize with extra-fine mode**:
-   ```bash
-   python3 main.py -f Distributions/my_data.xlsx --mode extra-fine --optimize
-   ```
+10. *(Note: `extra-fine` mode has been removed; use `--mode fine` for high-accuracy runs.)*
 
 11. **Optimize seeded by a placement**:
    ```bash
@@ -814,7 +806,7 @@ python3 main.py -f Distributions/input.xlsx --mode coarse --optimize
 ```
 
 **Options**:
-- `--mode {coarse,fine,extra-fine}`: Controls optimization budget and sampling density
+ - `--mode {coarse,fine}`: Controls optimization budget and sampling density
 - `--optimize`: Enable row-wise MM# assignment optimization
 
 **Output Files**:
@@ -1740,7 +1732,7 @@ mkdir -p Figures
 
 ### Runtime mode note
 
-The `--mode {coarse,fine,extra-fine}` flag trades speed vs sampling density for both plotting and optimization. Start with `coarse` to validate inputs and workflow, then switch to `fine` / `extra-fine` for final runs if needed.
+The `--mode {coarse,fine}` flag trades speed vs sampling density for both plotting and optimization. Start with `coarse` to validate inputs and workflow, then switch to `fine` for final runs if needed.
 
 ---
 

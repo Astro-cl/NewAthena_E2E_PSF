@@ -189,6 +189,253 @@ def load_aeff_weight_map_with_name(path: str) -> tuple[dict, str | None]:
         pass
     return mapping, col_name
 
+
+def _evaluate_vlookup_xlookup(formula: str, wb, current_ws, row: int):
+    """Best-effort evaluator for formulas of the form:
+    =VLOOKUP(_xlfn.XLOOKUP($A2,'MM configuration'!$D$2:$D$601,'MM configuration'!$C$2:$C$601),$S$24:$AA$38,7)
+
+    Returns a Python value or None on failure.
+    This evaluator understands XLOOKUP with literal ranges and VLOOKUP over a table
+    on the same sheet. It is intentionally narrow but handles the pattern observed
+    in the provided workbooks.
+    """
+    try:
+        import re
+        s = formula.strip()
+        if 'XLOOKUP' not in s.upper() or 'VLOOKUP' not in s.upper():
+            return None
+
+        def find_matching(s, start):
+            depth = 0
+            for i in range(start, len(s)):
+                if s[i] == '(':
+                    depth += 1
+                elif s[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            return -1
+
+        # locate XLOOKUP(...) span
+        xi = s.upper().find('XLOOKUP(')
+        if xi < 0:
+            return None
+        xstart = s.find('(', xi)
+        xend = find_matching(s, xstart)
+        if xend < 0:
+            return None
+        inner = s[xstart+1:xend]
+
+        # split top-level commas
+        def split_args(t):
+            out = []
+            cur = ''
+            depth = 0
+            inq = False
+            for ch in t:
+                if ch == "'":
+                    inq = not inq
+                if ch == '(' and not inq:
+                    depth += 1
+                if ch == ')' and not inq:
+                    depth -= 1
+                if ch == ',' and depth == 0 and not inq:
+                    out.append(cur.strip())
+                    cur = ''
+                else:
+                    cur += ch
+            if cur.strip():
+                out.append(cur.strip())
+            return out
+
+        xargs = split_args(inner)
+        if len(xargs) < 3:
+            return None
+        lookup_ref = xargs[0]
+        lookup_range = xargs[1]
+        return_range = xargs[2]
+
+        # After XLOOKUP closing, find VLOOKUP table args
+        rest = s[xend+1:]
+        # trim leading chars until '(' of VLOOKUP args
+        if rest.startswith(','):
+            rest = rest[1:]
+        # remove surrounding parens if present
+        if rest.endswith(')'):
+            rest = rest[:-1]
+        vparts = split_args(rest)
+        if len(vparts) < 2:
+            return None
+        table_range = vparts[0]
+        try:
+            col_index = int(re.search(r"(\d+)", vparts[1]).group(1))
+        except Exception:
+            return None
+
+        from openpyxl.utils import column_index_from_string
+        # resolve lookup_value from lookup_ref (e.g. $A2 or A2)
+        m = re.search(r"([A-Za-z]+)\$?(\d+)", lookup_ref)
+        if not m:
+            # if lookup_ref is a simple reference like $A2 without number,
+            # fall back to column A of current row
+            m = re.search(r"([A-Za-z]+)", lookup_ref)
+            if not m:
+                return None
+            col = column_index_from_string(m.group(1))
+            lookup_value = current_ws.cell(row=row, column=col).value
+        else:
+            col = column_index_from_string(m.group(1))
+            # Excel formulas often use row numbers that are relative; use current row
+            lookup_value = current_ws.cell(row=row, column=col).value
+
+        # parse sheet-range tokens like 'MM configuration'!$D$2:$D$601 or $S$24:$AA$38
+        def parse_sheet_range(token, default_sheet=None):
+            token = token.strip()
+            sheet = default_sheet
+            if '!' in token:
+                parts = token.split('!')
+                sheet = parts[0].strip().strip("'")
+                rng = parts[1]
+            else:
+                rng = token
+            m = re.search(r"\$?([A-Za-z]+)\$?(\d+):\$?([A-Za-z]+)\$?(\d+)", rng)
+            if not m:
+                return None
+            c1, r1, c2, r2 = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+            c1i = column_index_from_string(c1)
+            c2i = column_index_from_string(c2)
+            return sheet, c1i, r1, c2i, r2
+
+        # load lookup and return arrays
+        try:
+            l_sheet, l_c1, l_r1, l_c2, l_r2 = parse_sheet_range(lookup_range, default_sheet=current_ws.title)
+            r_sheet, r_c1, r_r1, r_c2, r_r2 = parse_sheet_range(return_range, default_sheet=current_ws.title)
+        except Exception:
+            return None
+        if l_sheet not in wb.sheetnames or r_sheet not in wb.sheetnames:
+            return None
+        lws = wb[l_sheet]
+        rws = wb[r_sheet]
+        # assume single-column ranges for lookup/return
+        lookup_vals = []
+        for rr in range(l_r1, l_r2+1):
+            lookup_vals.append(lws.cell(row=rr, column=l_c1).value)
+        return_vals = []
+        for rr in range(r_r1, r_r2+1):
+            return_vals.append(rws.cell(row=rr, column=r_c1).value)
+
+        # perform XLOOKUP-like exact match
+        match_index = None
+        for i, val in enumerate(lookup_vals):
+            try:
+                if val == lookup_value:
+                    match_index = i
+                    break
+                # attempt string/numeric equivalence
+                if val is not None and lookup_value is not None and str(val).strip() == str(lookup_value).strip():
+                    match_index = i
+                    break
+            except Exception:
+                continue
+        if match_index is None:
+            return None
+        xret = return_vals[match_index]
+
+        # parse table_range on current_ws (no sheet name in observed files)
+        try:
+            t_sheet, t_c1, t_r1, t_c2, t_r2 = parse_sheet_range(table_range, default_sheet=current_ws.title)
+        except Exception:
+            return None
+        if t_sheet not in wb.sheetnames:
+            return None
+        tws = wb[t_sheet]
+        # search first column of table_range for xret and return value from col_index
+        for rr in range(t_r1, t_r2+1):
+            cellv = tws.cell(row=rr, column=t_c1).value
+            try:
+                if cellv == xret or (cellv is not None and xret is not None and str(cellv).strip() == str(xret).strip()):
+                    # found row; get target column
+                    tgt_col = t_c1 + (col_index - 1)
+                    cell_obj = tws.cell(row=rr, column=tgt_col)
+                    cell_val = cell_obj.value
+                    # If the return cell itself contains a formula (e.g. =Y6*(100%-Y$5)/$S6),
+                    # try to evaluate simple arithmetic expressions by resolving cell
+                    # references from the same sheet or the current worksheet.
+                    try:
+                        if isinstance(cell_val, str) and cell_val.startswith('='):
+                            expr = cell_val.lstrip('=')
+                            # convert Excel percent syntax 100% -> 100/100
+                            expr = expr.replace('%', '/100')
+                            # Replace cell refs like $S$6 or Y6 with numeric values
+                            def _ref_repl(m):
+                                tok = m.group(0)
+                                # strip $ signs
+                                tok2 = tok.replace('$', '')
+                                import re as _re2
+                                mm = _re2.match(r'([A-Za-z]+)(\d+)', tok2)
+                                if not mm:
+                                    return '0'
+                                collet = mm.group(1)
+                                rownum = int(mm.group(2))
+                                from openpyxl.utils import column_index_from_string
+                                try:
+                                    coli = column_index_from_string(collet)
+                                except Exception:
+                                    return '0'
+                                # Try several sheet candidates: table sheet, current_ws
+                                val = None
+                                try:
+                                    val = tws.cell(row=rownum, column=coli).value
+                                except Exception:
+                                    val = None
+                                if val is None:
+                                    try:
+                                        val = current_ws.cell(row=rownum, column=coli).value
+                                    except Exception:
+                                        val = None
+                                # If value itself is a percent string like '100%', convert
+                                try:
+                                    if isinstance(val, str) and val.strip().endswith('%'):
+                                        return str(float(val.strip().rstrip('%'))/100.0)
+                                except Exception:
+                                    pass
+                                try:
+                                    if isinstance(val, (int, float)):
+                                        return str(float(val))
+                                except Exception:
+                                    pass
+                                # If referenced cell contains a formula, try to resolve recursively
+                                try:
+                                    if isinstance(val, str) and val.startswith('='):
+                                        # avoid deep recursion by limiting to this evaluator call
+                                        sub = val.lstrip('=')
+                                        sub = sub.replace('%', '/100')
+                                        sub2 = _re2.sub(_ref_repl, sub)
+                                        try:
+                                            return str(float(eval(sub2, { }, { })))
+                                        except Exception:
+                                            return '0'
+                                except Exception:
+                                    pass
+                                return '0'
+                            import re as __re
+                            expr2 = __re.sub(r"\$?[A-Za-z]{1,3}\$?\d+", _ref_repl, expr)
+                            try:
+                                # Evaluate arithmetic expression safely (no builtins)
+                                val_out = eval(expr2, { }, { })
+                                return val_out
+                            except Exception:
+                                # fallback to returning the raw cell string
+                                return cell_val
+                    except Exception:
+                        pass
+                    return cell_val
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
 def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics: bool | None = None, **kwargs) -> pd.DataFrame:
     """Load gaussian parameters from Excel.
 
@@ -2535,11 +2782,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         nx = 2062
         ny = 2062 """
 
-    nx = 2062
-    ny = 2062
-
-    # fast=True now means "quick" for both plain and comparison plots.
+    # fast=True now means "coarse"/quick plotting. If callers passed None
+    # for `nx`/`ny`, choose sizes based on mode: coarse=320, fine=2062.
     quick_mode = bool(fast)
+    if nx is None:
+        nx = 320 if quick_mode else 2062
+    if ny is None:
+        ny = 320 if quick_mode else 2062
     
     # Calculate the weighted center of mass directly from the Gaussian parameters
     # Normalize per-combo weights so they sum to 1 before computing centroids and sums.
@@ -2901,6 +3150,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     r_profile, cumulative_profile, total_energy = radial_profile(center_x, center_y, n_r=n_r_final, n_theta=n_theta_final, r_margin_factor=final_r_margin)
     frac_profile = cumulative_profile / total_energy if total_energy > 0 else cumulative_profile
     radius_50 = _radius_for_fraction(frac_profile, r_profile, target=0.5)
+    radius_80 = _radius_for_fraction(frac_profile, r_profile, target=0.8)
     radius_90 = _radius_for_fraction(frac_profile, r_profile, target=0.9)
 
     # --------------------------------------------------------
@@ -4819,10 +5069,72 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1 = plt.subplot(gs[0, :12])
     # Convert to microns for display (1 m = 1e6 µm)
     im = plt.imshow(Z, extent=[x.min()*1e6, x.max()*1e6, y.min()*1e6, y.max()*1e6], origin='lower', cmap='viridis', aspect='equal')
+    # Zoom to ~90% containment of the PSF for the display image (does not affect FITS export)
+    try:
+        # Compute radial distances in meters from the weighted center (center_x/center_y defined earlier)
+        cx = center_x if 'center_x' in locals() else 0.0
+        cy = center_y if 'center_y' in locals() else 0.0
+        # X,Y are in meters; Z contains summed flux per grid cell
+        r = np.hypot((X - cx), (Y - cy))
+        flat_idx = np.argsort(r.ravel())
+        zs = Z.ravel()[flat_idx]
+        rs = r.ravel()[flat_idx]
+        total = np.nansum(zs)
+        if total > 0:
+            cumsum = np.cumsum(np.nan_to_num(zs))
+            frac = cumsum / total
+            # find radius enclosing 90% (or fallback to max radius)
+            idx90 = np.searchsorted(frac, 0.90)
+            r90 = float(rs[idx90]) if idx90 < len(rs) else float(rs.max())
+            # add a small margin (5%) to ensure visual context
+            r_vis = r90 * 1.05
+            # Convert to microns for axis limits and cap at +/-1 mm (1000 µm)
+            r_vis_um = min(r_vis * 1e6, 1000.0)
+            ax1.set_xlim(-r_vis_um, r_vis_um)
+            ax1.set_ylim(-r_vis_um, r_vis_um)
+    except Exception:
+        pass
     # Smaller, tighter colorbar attached to ax1 to reduce horizontal crowding
     cbar = plt.colorbar(im, ax=ax1, label='counts', pad=0.02, fraction=0.046)
     ax1.set_xlabel('x [µm]')
     ax1.set_ylabel('y [µm]')
+    # Overlay a higher-resolution rendition of the zoomed area for display
+    try:
+        # Use the zoom limits if available (r_vis_um set above), otherwise use full extent
+        if 'r_vis_um' in locals():
+            x0_um, x1_um = -r_vis_um, r_vis_um
+            y0_um, y1_um = -r_vis_um, r_vis_um
+        else:
+            x0_um, x1_um = x.min()*1e6, x.max()*1e6
+            y0_um, y1_um = y.min()*1e6, y.max()*1e6
+
+        # Convert to meters for computation
+        x0_m, x1_m = x0_um * 1e-6, x1_um * 1e-6
+        y0_m, y1_m = y0_um * 1e-6, y1_um * 1e-6
+
+        # Original grid spacing
+        dx = x[1] - x[0]
+        dy = y[1] - y[0]
+
+        # Number of original samples across the zoom area
+        nx_zoom = max(8, int(round((x1_m - x0_m) / max(dx, 1e-12))))
+        ny_zoom = max(8, int(round((y1_m - y0_m) / max(dy, 1e-12))))
+
+        # Increase resolution by factor 12 for display only
+        factor = 12
+        nx_disp = int(np.clip(nx_zoom * factor, 32, 10000))
+        ny_disp = int(np.clip(ny_zoom * factor, 32, 10000))
+
+        # Build fine mesh and evaluate PSF only over zoom area (display-only)
+        x_disp = np.linspace(x0_m, x1_m, nx_disp)
+        y_disp = np.linspace(y0_m, y1_m, ny_disp)
+        Xd, Yd = np.meshgrid(x_disp, y_disp)
+        Zd = _sum_on_grid(Xd, Yd, normalize)
+
+        # Overlay the high-resolution image covering the current zoom limits (in µm)
+        ax1.imshow(Zd, extent=[x0_um, x1_um, y0_um, y1_um], origin='lower', cmap='viridis', aspect='equal', interpolation='nearest')
+    except Exception:
+        pass
     
     # Add secondary axes for arcsec. Use the same project convention as
     # `arcsec_to_m` (1 arcsec = 12*π/180/3600 m), therefore 1 m equals
@@ -4837,6 +5149,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Right axis for y in arcsec (immediately next to plot)
     ax1_right = ax1.secondary_yaxis('right', functions=(lambda um: um * um_to_arcsec, lambda arcsec: arcsec / um_to_arcsec))
     ax1_right.set_ylabel('y [arcsec]', rotation=270, va='bottom')
+    
     
     # Mark the minimum with a green cross and coordinates (label updated)
     plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='center for minimum HEW')
@@ -5033,6 +5346,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         fwhm_opt_y_arcsec = fwhm_y_m_opt * m_to_arcsec if fwhm_y_m_opt is not None else None
     hew_best_arcsec = 2 * radius_50 * m_to_arcsec if (radius_50 is not None and np.isfinite(radius_50)) else None
     hew_origin_arcsec = 2 * radius_50_00 * m_to_arcsec if (radius_50_00 is not None and np.isfinite(radius_50_00)) else None
+    eef80_arcsec = 2 * radius_80 * m_to_arcsec if (radius_80 is not None and np.isfinite(radius_80)) else None
     eef90_arcsec = 2 * radius_90 * m_to_arcsec if (radius_90 is not None and np.isfinite(radius_90)) else None
     eef90_origin_arcsec = 2 * radius_90_00 * m_to_arcsec if (radius_90_00 is not None and np.isfinite(radius_90_00)) else None
 
@@ -5041,6 +5355,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         return {
             'hew_origin_arcsec': hew_origin_arcsec,
             'hew_best_arcsec': hew_best_arcsec,
+            'eef80_best_arcsec': eef80_arcsec,
             'eef90_origin_arcsec': eef90_origin_arcsec,
             'eef90_best_arcsec': eef90_arcsec,
             'hew_x_arcsec': hew_base_x_arcsec,
@@ -5063,6 +5378,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             metrics_out = {
                 'hew_origin_arcsec': hew_origin_arcsec,
                 'hew_best_arcsec': hew_best_arcsec,
+                'eef80_best_arcsec': eef80_arcsec,
                 'eef90_origin_arcsec': eef90_origin_arcsec,
                 'eef90_best_arcsec': eef90_arcsec,
                 'hew_x_arcsec': hew_base_x_arcsec,
@@ -5581,25 +5897,86 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         final_filename = f"Figures/{filename}_{timestamp}.png"
         
         if include_colorbar:
-            # For PSF plot with colorbar, temporarily hide ax2 to avoid capturing it
-            ax2_visible = ax2.get_visible()
-            ax2.set_visible(False)
-            fig.canvas.draw()
-            
-            # Get bboxes and combine them
-            bbox1 = ax1.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted())
-            bbox2 = cbar.ax.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted())
-            
-            # Create combined bbox from left of ax1 to right of colorbar
-            from matplotlib.transforms import Bbox
-            combined_bbox = Bbox([[bbox1.x0, min(bbox1.y0, bbox2.y0)], 
-                                  [bbox2.x1, max(bbox1.y1, bbox2.y1)]])
-            
-            fig.savefig(final_filename, dpi=300, bbox_inches=combined_bbox.expanded(1.15, 1.15))
-            
-            # Restore ax2 visibility
-            ax2.set_visible(ax2_visible)
-            fig.canvas.draw_idle()
+            # For the E2E PSF image we need an exact pixel footprint that
+            # matches the FITS grid. Prefer to render only the PSF axis into
+            # a temporary figure sized to the desired pixel dimensions so the
+            # saved PNG has precise width/height in pixels.
+            try:
+                # Determine desired pixel dims based on runtime mode. Use the
+                # CLI `--mode` flag if present; otherwise fall back to Z.shape.
+                import sys as _sys
+                _main_args = getattr(_sys.modules.get('__main__'), 'args', None)
+                mode = getattr(_main_args, 'mode', None) if _main_args is not None else None
+                if mode == 'coarse':
+                    desired_px = desired_py = 320
+                elif mode == 'fine':
+                    desired_px = desired_py = 2062
+                # treat any unknown/legacy modes as 'fine' by default
+                else:
+                    if 'Z' in locals() and hasattr(Z, 'shape'):
+                        desired_py, desired_px = Z.shape[0], Z.shape[1]
+                    else:
+                        desired_px = desired_py = 320
+
+                # Grab the image data and properties from the existing axis
+                orig_im = None
+                try:
+                    if hasattr(ax1, 'get_images') and ax1.get_images():
+                        orig_im = ax1.get_images()[0]
+                except Exception:
+                    orig_im = None
+
+                if orig_im is None:
+                    # Fall back to coarse saving of the full figure if we
+                    # can't access the axis image object.
+                    ax2_visible = ax2.get_visible()
+                    ax2.set_visible(False)
+                    fig.canvas.draw()
+                    from matplotlib.transforms import Bbox
+                    bbox1 = ax1.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted())
+                    fig.savefig(final_filename, dpi=300, bbox_inches=bbox1.expanded(1.15, 1.15))
+                    ax2.set_visible(ax2_visible)
+                    fig.canvas.draw_idle()
+                else:
+                    # Create a temporary figure sized so that width* dpi_out = pixels
+                    dpi_out = 100
+                    w_in = desired_px / dpi_out
+                    h_in = desired_py / dpi_out
+                    import matplotlib.pyplot as _mpl
+                    fig2 = _mpl.figure(figsize=(w_in, h_in), dpi=dpi_out)
+                    ax_tmp = fig2.add_axes([0, 0, 1, 1])
+                    arr = orig_im.get_array()
+                    # Use the axis view limits (zoomed to 95% containment) as extent
+                    try:
+                        x0, x1 = ax.get_xlim()
+                        y0, y1 = ax.get_ylim()
+                        extent = (x0, x1, y0, y1)
+                    except Exception:
+                        extent = orig_im.get_extent() if hasattr(orig_im, 'get_extent') else None
+                    cmap = orig_im.get_cmap() if hasattr(orig_im, 'get_cmap') else None
+                    norm = orig_im.get_norm() if hasattr(orig_im, 'get_norm') else None
+                    interp = orig_im.get_interpolation() if hasattr(orig_im, 'get_interpolation') else 'nearest'
+                    if extent is not None:
+                        img = ax_tmp.imshow(arr, extent=extent, origin='lower', cmap=cmap, norm=norm, interpolation=interp)
+                    else:
+                        img = ax_tmp.imshow(arr, origin='lower', cmap=cmap, norm=norm, interpolation=interp)
+                    ax_tmp.set_axis_off()
+                    # Save the PSF image at exact pixel dimensions
+                    fig2.savefig(final_filename, dpi=dpi_out)
+                    _mpl.close(fig2)
+            except Exception:
+                # Any failure here should fall back to the previous combined save
+                try:
+                    ax2_visible = ax2.get_visible()
+                    ax2.set_visible(False)
+                    fig.canvas.draw()
+                    from matplotlib.transforms import Bbox
+                    bbox1 = ax1.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted())
+                    fig.savefig(final_filename, dpi=300, bbox_inches=bbox1.expanded(1.15, 1.15))
+                    ax2.set_visible(ax2_visible)
+                    fig.canvas.draw_idle()
+                except Exception:
+                    pass
         else:
             # For other plots, just save the axis
             extent = ax.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted())
@@ -6799,9 +7176,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['coarse', 'fine', 'extra-fine'],
+        choices=['coarse', 'fine'],
         default='coarse',
-        help='Runtime mode: coarse, fine, or extra-fine. Controls plotting + optimization speed/accuracy.'
+        help='Runtime mode: coarse or fine. Controls plotting + optimization speed/accuracy.'
     )
     parser.add_argument('--optimize', action='store_true', default=False, help='Enable MM position optimization (uses --mode for speed/accuracy).')
     # Compatibility alias (UK spelling)
@@ -6924,11 +7301,16 @@ if __name__ == '__main__':
         agg_columns = None
 
         for rid, crow in combos.iterrows():
+            # Read configuration prefix from column B; skip rows where it's missing/NaN
             try:
-                prefix = str(crow.iat[1]).strip()
+                raw_prefix = crow.iat[1]
             except Exception:
                 print(f"Skipping row {rid}: cannot read prefix in column B")
                 continue
+            if pd.isna(raw_prefix) or str(raw_prefix).strip() == '':
+                print(f"Skipping row {rid}: empty prefix in column B")
+                continue
+            prefix = str(raw_prefix).strip()
             try:
                 offaxis_val = float(crow.iat[2]) if not pd.isna(crow.iat[2]) else 0.0
             except Exception:
@@ -6941,6 +7323,41 @@ if __name__ == '__main__':
                 defocus_val = float(crow.iat[4]) if not pd.isna(crow.iat[4]) else 0.0
             except Exception:
                 defocus_val = 0.0
+
+            # Detect per-row run mode (fine/coarse). Support a named column
+            # ('mode', 'run_mode', 'plot_mode') or a positional 6th column.
+            run_mode = None
+            try:
+                # Named column search (case-insensitive)
+                for col in combos.columns:
+                    if str(col).strip().lower() in ('mode', 'run_mode', 'plot_mode'):
+                        val = crow.get(col)
+                        if not pd.isna(val):
+                            run_mode = str(val).strip().lower()
+                        break
+            except Exception:
+                run_mode = None
+            if run_mode is None:
+                try:
+                    # Positional fallback: column F (index 5)
+                    if len(crow) > 5:
+                        val = crow.iat[5]
+                        if not pd.isna(val):
+                            run_mode = str(val).strip().lower()
+                except Exception:
+                    run_mode = None
+
+            # Normalize synonyms and validate
+            if isinstance(run_mode, str):
+                if run_mode in ('fast', 'quick'):
+                    run_mode = 'coarse'
+                elif run_mode in ('slow', 'accurate', 'fine', 'extrafine'):
+                    run_mode = 'fine'
+                elif run_mode not in ('coarse', 'fine'):
+                    # Unknown token -> fall back to global default
+                    run_mode = getattr(args, 'mode', 'coarse')
+            else:
+                run_mode = getattr(args, 'mode', 'coarse')
 
             print(f"Processing configuration '{prefix}': offaxis={offaxis_val}, energy={energy_val}, defocus={defocus_val}")
 
@@ -7032,6 +7449,233 @@ if __name__ == '__main__':
                         except Exception:
                             pass
 
+                # Update A_eff column B based on per-energy mapping listed in
+                # columns D (energy) and E (source column) of the A_eff sheet.
+                # Supported E formats in column E: numeric column index (1-based),
+                # Excel column letter ('L'), or header name to match.
+                try:
+                    if 'A_eff' in wb.sheetnames:
+                        ws_a = wb['A_eff']
+                        # Try to open a data-only workbook to read cached formula results
+                        ws_a_values = None
+                        try:
+                            from openpyxl import load_workbook as _load_wb_vals
+                            wb_vals = _load_wb_vals(path, data_only=True)
+                            if 'A_eff' in wb_vals.sheetnames:
+                                ws_a_values = wb_vals['A_eff']
+                        except Exception:
+                            ws_a_values = None
+                        max_scan_row = min(ws_a.max_row or 0, 40)
+                        mapping = []
+                        from openpyxl.utils import column_index_from_string
+                        import re as _re
+                        for rr in range(1, max_scan_row + 1):
+                            try:
+                                cand_energy = ws_a.cell(row=rr, column=4).value
+                                cand_src = ws_a.cell(row=rr, column=5).value
+                            except Exception:
+                                continue
+                            if cand_energy is None or cand_src is None:
+                                continue
+                            # parse energy value (allow '1 keV' or numeric)
+                            e_val = None
+                            try:
+                                if isinstance(cand_energy, (int, float)):
+                                    e_val = float(cand_energy)
+                                else:
+                                    m = _re.search(r"(\d+(?:\.\d*)?)", str(cand_energy))
+                                    if m:
+                                        e_val = float(m.group(1))
+                            except Exception:
+                                e_val = None
+                            if e_val is None:
+                                continue
+                            # parse source column
+                            src_idx = None
+                            try:
+                                if isinstance(cand_src, (int, float)):
+                                    src_idx = int(float(cand_src))
+                                else:
+                                    s = str(cand_src).strip()
+                                    # if looks like a column letter
+                                    if _re.fullmatch(r"[A-Za-z]+", s):
+                                        try:
+                                            src_idx = column_index_from_string(s.upper())
+                                        except Exception:
+                                            src_idx = None
+                                    else:
+                                        # try extracting integer from string
+                                        m2 = _re.search(r"(\d+)", s)
+                                        if m2:
+                                            src_idx = int(m2.group(1))
+                            except Exception:
+                                src_idx = None
+                            # If still no numeric src_idx, try to find a header match
+                            if src_idx is None:
+                                try:
+                                    # scan header row for a column whose header matches cand_src
+                                    hdr = str(cand_src).strip().lower()
+                                    for ccol in range(1, (ws_a.max_column or 0) + 1):
+                                        try:
+                                            valh = ws_a.cell(row=1, column=ccol).value
+                                        except Exception:
+                                            valh = None
+                                        if valh is None:
+                                            continue
+                                        if str(valh).strip().lower() == hdr:
+                                            src_idx = ccol
+                                            break
+                                except Exception:
+                                    pass
+                            if src_idx is not None:
+                                mapping.append((e_val, src_idx))
+
+                        # Choose best mapping for this configuration's energy_val.
+                        # Validate candidate source columns actually contain numeric
+                        # per-MM weights before copying into column B.
+                        chosen_src = None
+                        try:
+                            if mapping:
+                                # compute numeric fraction for each candidate, prefer exact-energy
+                                mapping_sorted = sorted(mapping, key=lambda x: abs(x[0] - float(energy_val)))
+                                cand_info = []
+                                for e_val, cand_col in mapping_sorted:
+                                    try:
+                                        if cand_col == 2:
+                                            continue
+                                        max_r = ws_a.max_row or 0
+                                        numeric_count = 0
+                                        total_checked = 0
+                                        for check_r in range(2, min(max_r, 1000) + 1):
+                                            try:
+                                                mmcell = ws_a.cell(row=check_r, column=1).value
+                                            except Exception:
+                                                mmcell = None
+                                            try:
+                                                if mmcell is None:
+                                                    continue
+                                                _ = int(float(mmcell))
+                                            except Exception:
+                                                continue
+                                            try:
+                                                v = ws_a.cell(row=check_r, column=cand_col).value
+                                                # if cell contains a formula, try to read cached value from data_only workbook
+                                                if isinstance(v, str) and v.startswith('='):
+                                                    if ws_a_values is not None:
+                                                        try:
+                                                            v = ws_a_values.cell(row=check_r, column=cand_col).value
+                                                        except Exception:
+                                                            pass
+                                                    else:
+                                                        # attempt best-effort evaluator when no cached values available
+                                                        try:
+                                                            ev = _evaluate_vlookup_xlookup(v, wb, ws_a, check_r)
+                                                            if ev is not None:
+                                                                v = ev
+                                                        except Exception:
+                                                            pass
+                                                total_checked += 1
+                                                if v is None:
+                                                    continue
+                                                try:
+                                                    vv = float(v)
+                                                    if not (isinstance(vv, float) and (vv != vv)):
+                                                        numeric_count += 1
+                                                except Exception:
+                                                    pass
+                                            except Exception:
+                                                continue
+                                            except Exception:
+                                                continue
+                                        frac = (numeric_count / total_checked) if total_checked > 0 else 0.0
+                                        dist = abs(e_val - float(energy_val))
+                                        cand_info.append((e_val, cand_col, frac, dist))
+                                    except Exception:
+                                        continue
+
+                                # Prefer exact-energy matches (within tolerance) and pick highest frac
+                                exacts = [ci for ci in cand_info if abs(ci[0] - float(energy_val)) < 1e-8]
+                                if exacts:
+                                    # pick by highest fraction, tie-breaker smallest distance
+                                    exacts_sorted = sorted(exacts, key=lambda x: (-x[2], x[3]))
+                                    if exacts_sorted[0][2] > 0:
+                                        chosen_src = exacts_sorted[0][1]
+                                else:
+                                    # pick candidate with highest numeric fraction, use distance as tie-breaker
+                                    cand_sorted = sorted(cand_info, key=lambda x: (-x[2], x[3]))
+                                    if cand_sorted and cand_sorted[0][2] > 0:
+                                        chosen_src = cand_sorted[0][1]
+                        except Exception:
+                            chosen_src = None
+
+                        # If chosen_src found, copy its numeric values into column B (index=2).
+                        # For each MM row, prefer numeric value from chosen_src; if that
+                        # is not numeric, fall back to column 3 (adjusted A_eff) when numeric.
+                        if chosen_src is not None and chosen_src != 2:
+                            for row_idx in range(2, (ws_a.max_row or 0) + 1):
+                                try:
+                                    # ensure this row corresponds to an MM entry
+                                    mmcell = ws_a.cell(row=row_idx, column=1).value
+                                    try:
+                                        if mmcell is None:
+                                            continue
+                                        _ = int(float(mmcell))
+                                    except Exception:
+                                        continue
+
+                                    src_val = ws_a.cell(row=row_idx, column=chosen_src).value
+                                    # if it's a formula, try cached value
+                                    try:
+                                        if isinstance(src_val, str) and src_val.startswith('=') and ws_a_values is not None:
+                                            tmp = ws_a_values.cell(row=row_idx, column=chosen_src).value
+                                            if tmp is not None:
+                                                src_val = tmp
+                                    except Exception:
+                                        pass
+                                    # If value is a formula and no cached data available,
+                                    # attempt best-effort evaluation for common patterns.
+                                    try:
+                                        if isinstance(src_val, str) and src_val.startswith('='):
+                                            try:
+                                                evaluated = _evaluate_vlookup_xlookup(src_val, wb, ws_a, row_idx)
+                                                if evaluated is not None:
+                                                    src_val = evaluated
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                    write_val = None
+                                    try:
+                                        if src_val is not None:
+                                            write_val = float(src_val)
+                                    except Exception:
+                                        write_val = None
+                                    # If direct float failed, try to extract numeric substring (e.g. '0.2 keV')
+                                    if write_val is None and src_val is not None:
+                                        try:
+                                            import re as _re
+                                            m = _re.search(r"(-?\d+(?:\.\d+)?)", str(src_val))
+                                            if m:
+                                                write_val = float(m.group(1))
+                                        except Exception:
+                                            write_val = None
+
+                                    if write_val is None:
+                                        # fallback to adjusted column (C, index=3)
+                                        try:
+                                            alt = ws_a.cell(row=row_idx, column=3).value
+                                            if alt is not None:
+                                                write_val = float(alt)
+                                        except Exception:
+                                            write_val = None
+
+                                    if write_val is not None:
+                                        ws_a.cell(row=row_idx, column=2).value = write_val
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
+
                 wb.save(new_path)
             except Exception as e:
                 print(f"Failed to modify workbook {new_path}: {e}")
@@ -7041,15 +7685,20 @@ if __name__ == '__main__':
             metrics = {}
             try:
                 try:
-                    metrics = compute_hew_eef_metrics(new_path, sheet=args.sheet if hasattr(args, 'sheet') else 'MM_PSF', normalize=getattr(args, 'normalize', True), fast=True)
+                    metrics = compute_hew_eef_metrics(
+                        new_path,
+                        sheet=args.sheet if hasattr(args, 'sheet') else 'MM_PSF',
+                        normalize=getattr(args, 'normalize', True),
+                        fast=(run_mode == 'coarse')
+                    )
                 except Exception:
-                    metrics = compute_hew_eef_metrics(new_path)
+                    metrics = compute_hew_eef_metrics(new_path, fast=(run_mode == 'coarse'))
             except Exception as e:
                 print(f"Warning: failed to compute HEW/EEF metrics for {new_basename}: {e}")
 
             # Run this script on the modified workbook with --export-package
             try:
-                cmd = [sys.executable, os.path.abspath(__file__), '--file', new_path, '--export-package']
+                cmd = [sys.executable, os.path.abspath(__file__), '--file', new_path, '--export-package', '--mode', run_mode]
                 print('Running:', ' '.join(cmd))
 
                 # Record existing Exports subfolders so we can detect a new package
@@ -7143,7 +7792,92 @@ if __name__ == '__main__':
                             if os.path.exists(p):
                                 ordered.append(p)
 
-                            # Add ordered files first
+                            # Before creating the package, compute A_eff sums and write a fitparams_aeffloss workbook
+                            sum_orig = None
+                            sum_mod = None
+                            aeff_loss = None
+                            # Prefer computing both sums from the modified workbook (new_path)
+                            # - Aeff_sum_orig: sum of column B (index 1) in the modified A_eff sheet
+                            # - Aeff_sum_mod: sum of column C (index 2) in the modified A_eff sheet
+                            # If the modified workbook is not available or missing columns, fall back
+                            # to the original input workbook where appropriate.
+                            try:
+                                # Prefer the workbook actually stored in the package (safer when child run
+                                # copied/renamed files inside pkg_path). This is typically the input file
+                                # copied into the package dir with the same basename as args.file.
+                                file_in_pkg = None
+                                try:
+                                    inp_basename = os.path.basename(args.file)
+                                    cand = os.path.join(pkg_path, inp_basename)
+                                    if os.path.exists(cand):
+                                        file_in_pkg = cand
+                                except Exception:
+                                    file_in_pkg = None
+
+                                use_path = file_in_pkg or (new_path if (new_path and os.path.exists(new_path)) else None)
+                                if use_path is not None:
+                                    df_a_mod = pd.read_excel(use_path, sheet_name='A_eff', engine='openpyxl', header=None)
+                                    if df_a_mod.shape[0] >= 2 and df_a_mod.shape[1] > 1:
+                                        sum_orig = float(pd.to_numeric(df_a_mod.iloc[1:, 1], errors='coerce').fillna(0.0).sum())
+                                    if df_a_mod.shape[0] >= 2 and df_a_mod.shape[1] > 2:
+                                        sum_mod = float(pd.to_numeric(df_a_mod.iloc[1:, 2], errors='coerce').fillna(0.0).sum())
+                            except Exception:
+                                sum_orig = None
+                                sum_mod = None
+                            # If modified workbook didn't provide sum_orig, try original input file col B
+                            if sum_orig is None:
+                                try:
+                                    df_a_orig = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
+                                    if df_a_orig.shape[0] >= 2 and df_a_orig.shape[1] > 1:
+                                        sum_orig = float(pd.to_numeric(df_a_orig.iloc[1:, 1], errors='coerce').fillna(0.0).sum())
+                                except Exception:
+                                    sum_orig = None
+                            # If modified workbook didn't provide sum_mod, try original input file col C
+                            if sum_mod is None:
+                                try:
+                                    df_a_orig = df_a_orig if 'df_a_orig' in locals() else pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
+                                    if df_a_orig.shape[0] >= 2 and df_a_orig.shape[1] > 2:
+                                        sum_mod = float(pd.to_numeric(df_a_orig.iloc[1:, 2], errors='coerce').fillna(0.0).sum())
+                                except Exception:
+                                    sum_mod = None
+                            if sum_orig is not None and sum_mod is not None and sum_orig != 0:
+                                aeff_loss = 1.0 - (sum_mod / sum_orig)
+
+                            # write fitparams_aeffloss.xlsx inside the package dir (merge existing Fit_parameters if possible)
+                            try:
+                                target_fp = os.path.join(pkg_path, 'fitparams_aeffloss.xlsx')
+                                df_rows = []
+                                cand = os.path.join(pkg_path, 'EEF_fittingparams.xlsx')
+                                existing_fp = cand if os.path.exists(cand) else None
+                                if existing_fp is None:
+                                    for cand2 in glob.glob(os.path.join(pkg_path, 'E2E_EEF_and_fitparams_*.xlsx')):
+                                        existing_fp = cand2
+                                        break
+                                if existing_fp is not None:
+                                    try:
+                                        df_exist = pd.read_excel(existing_fp, sheet_name='Fit_parameters', engine='openpyxl')
+                                        if 'parameter' in df_exist.columns and 'value' in df_exist.columns:
+                                            for _, r in df_exist.iterrows():
+                                                df_rows.append({'parameter': str(r['parameter']), 'value': r['value']})
+                                    except Exception:
+                                        df_rows = []
+                                df_rows.append({'parameter': 'Aeff_sum_orig', 'value': sum_orig})
+                                df_rows.append({'parameter': 'Aeff_sum_mod', 'value': sum_mod})
+                                df_rows.append({'parameter': 'Aeff_loss', 'value': aeff_loss})
+                                try:
+                                    import pandas as _pd
+                                    _pd.DataFrame(df_rows).to_excel(target_fp, sheet_name='Fit_parameters', index=False)
+                                    if existing_fp is not None and os.path.exists(existing_fp):
+                                        try:
+                                            os.remove(existing_fp)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
+                            # Add ordered files first into the zip
                             added = set()
                             for fpath in ordered:
                                 arcname = os.path.basename(fpath)
@@ -7159,12 +7893,12 @@ if __name__ == '__main__':
                                     full = os.path.join(root, fname)
                                     if os.path.abspath(full) in added:
                                         continue
-                                    # compute archive name relative to pkg_path
                                     arcname = os.path.relpath(full, pkg_path)
                                     try:
                                         zf.write(full, arcname=arcname)
                                     except Exception:
                                         pass
+                        print(f"Created package from export folder: {zip_target}")
                         print(f"Created package from export folder: {zip_target}")
                         # Extract fit parameters and EEF curves if available and append aggregated row
                         try:
@@ -7176,6 +7910,8 @@ if __name__ == '__main__':
                             candidate_files = []
                             if 'pkg_path' in locals() and os.path.isdir(pkg_path):
                                 candidate_files.append(os.path.join(pkg_path, 'EEF_fittingparams.xlsx'))
+                                # include the aeff-loss fitparams file we write earlier
+                                candidate_files.append(os.path.join(pkg_path, 'fitparams_aeffloss.xlsx'))
                                 # search for common patterns (renamed or original)
                                 candidate_files.extend(glob.glob(os.path.join(pkg_path, 'E2E_EEF_and_fitparams_*.xlsx')))
                                 candidate_files.extend(glob.glob(os.path.join(pkg_path, 'CustomPSFs', 'E2E_EEF_and_fitparams_*.xlsx')))
@@ -7200,7 +7936,12 @@ if __name__ == '__main__':
                                     with zipfile.ZipFile(zip_target, 'r') as zf:
                                         for name in zf.namelist():
                                             lname = name.lower()
-                                            if 'e2e_eef_and_fitparams' in lname or 'eef_fittingparams' in lname:
+                                            # accept a variety of fitparams filenames including
+                                            # E2E_EEF_and_fitparams, EEF_fittingparams, and
+                                            # the fitparams_aeffloss workbook we generate.
+                                            if ('e2e_eef_and_fitparams' in lname or
+                                                'eef_fittingparams' in lname or
+                                                'fitparams' in lname):
                                                 # extract to temp and attempt to read
                                                 tf = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(name)[1])
                                                 tf.close()
@@ -7252,18 +7993,34 @@ if __name__ == '__main__':
                             fit_map = {}
                             eef80 = None
                             eef90 = None
-                        # Compute Aeff loss as 1 - SUM(C2:C601)/SUM(B2:B601) on the input file's A_eff sheet
+                        # Compute Aeff loss as 1 - SUM(C2:C601)/SUM(B2:B601) on the A_eff sheets.
+                        # Prefer the per-configuration modified workbook (`new_path`) for
+                        # both the baseline (column B) and adjusted (column C) sums when
+                        # available; fall back to the original input (`args.file`) only
+                        # when the modified workbook is not present.
                         try:
                             sum_orig = None
                             sum_mod = None
                             try:
-                                df_a = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
-                                # Sum all rows from row 2 onward (iloc[1:]) for columns B (index 1) and C (index 2).
-                                if df_a.shape[0] >= 2 and df_a.shape[1] > 2:
-                                    sum_b = pd.to_numeric(df_a.iloc[1:, 1], errors='coerce').fillna(0.0).sum()
-                                    sum_c = pd.to_numeric(df_a.iloc[1:, 2], errors='coerce').fillna(0.0).sum()
-                                    sum_orig = float(sum_b)
-                                    sum_mod = float(sum_c)
+                                use_path = None
+                                if 'new_path' in locals() and new_path and os.path.exists(new_path):
+                                    use_path = new_path
+                                # If the child run already created a package copy of the workbook
+                                # prefer that file if present in pkg_path
+                                try:
+                                    inp_basename = os.path.basename(args.file)
+                                    pkg_copy = os.path.join(pkg_path, inp_basename) if 'pkg_path' in locals() else None
+                                    if pkg_copy and os.path.exists(pkg_copy):
+                                        use_path = pkg_copy
+                                except Exception:
+                                    pass
+                                if use_path is None:
+                                    use_path = args.file
+                                df_a_use = pd.read_excel(use_path, sheet_name='A_eff', engine='openpyxl', header=None)
+                                if df_a_use.shape[0] >= 2 and df_a_use.shape[1] > 1:
+                                    sum_orig = float(pd.to_numeric(df_a_use.iloc[1:, 1], errors='coerce').fillna(0.0).sum())
+                                if df_a_use.shape[0] >= 2 and df_a_use.shape[1] > 2:
+                                    sum_mod = float(pd.to_numeric(df_a_use.iloc[1:, 2], errors='coerce').fillna(0.0).sum())
                             except Exception:
                                 sum_orig = None
                                 sum_mod = None
@@ -7274,22 +8031,108 @@ if __name__ == '__main__':
                         except Exception:
                             aeff_loss = None
 
+                        # Ensure A_eff sums are available for this row (compute fallbacks if needed)
+                        try:
+                            sum_orig_row = sum_orig if 'sum_orig' in locals() else None
+                            sum_mod_row = sum_mod if 'sum_mod' in locals() else None
+                            if sum_orig_row is None:
+                                try:
+                                    df_a_tmp = pd.read_excel(args.file, sheet_name='A_eff', engine='openpyxl', header=None)
+                                    if df_a_tmp.shape[0] >= 2 and df_a_tmp.shape[1] > 1:
+                                        sum_orig_row = float(pd.to_numeric(df_a_tmp.iloc[1:, 1], errors='coerce').fillna(0.0).sum())
+                                except Exception:
+                                    sum_orig_row = None
+                            if sum_mod_row is None:
+                                try:
+                                    if new_path and os.path.exists(new_path):
+                                        df_a_tmp2 = pd.read_excel(new_path, sheet_name='A_eff', engine='openpyxl', header=None)
+                                        if df_a_tmp2.shape[0] >= 2 and df_a_tmp2.shape[1] > 2:
+                                            sum_mod_row = float(pd.to_numeric(df_a_tmp2.iloc[1:, 2], errors='coerce').fillna(0.0).sum())
+                                except Exception:
+                                    sum_mod_row = None
+                            if sum_mod_row is None and sum_orig_row is not None:
+                                try:
+                                    if df_a_tmp.shape[1] > 2:
+                                        sum_mod_row = float(pd.to_numeric(df_a_tmp.iloc[1:, 2], errors='coerce').fillna(0.0).sum())
+                                except Exception:
+                                    pass
+                        except Exception:
+                            sum_orig_row = None
+                            sum_mod_row = None
+
                         # Build aggregated row (include offaxis [arcmin], energy [keV], defocus [mm])
                         try:
+                            # Determine EEF80/EEF90 values, preferring explicit EEF curves
+                            # extracted from the Fit/EFF workbook, then any fit_map keys,
+                            # and finally the computed metrics as a last resort.
+                            eef80_val = None
+                            eef90_val = None
+                            try:
+                                if eef80 is not None:
+                                    eef80_val = float(eef80)
+                            except Exception:
+                                eef80_val = None
+                            try:
+                                if eef90 is not None:
+                                    eef90_val = float(eef90)
+                            except Exception:
+                                eef90_val = None
+
+                            # Check fit_map for named EEF entries
+                            try:
+                                if not eef80_val and isinstance(fit_map, dict):
+                                    for key in ('EEF80_min_arcsec', 'EEF80_min', 'EEF80'):
+                                        if key in fit_map and fit_map.get(key) is not None:
+                                            try:
+                                                eef80_val = float(fit_map.get(key))
+                                                break
+                                            except Exception:
+                                                continue
+                                if not eef90_val and isinstance(fit_map, dict):
+                                    for key in ('EEF90_min_arcsec', 'EEF90_min', 'EEF90'):
+                                        if key in fit_map and fit_map.get(key) is not None:
+                                            try:
+                                                eef90_val = float(fit_map.get(key))
+                                                break
+                                            except Exception:
+                                                continue
+                            except Exception:
+                                pass
+
+                            # Final fallback to computed metrics
+                            try:
+                                if (eef80_val is None or eef80_val == 0) and isinstance(metrics, dict):
+                                    eef80_val = metrics.get('eef80_best_arcsec') or metrics.get('eef80') or eef80_val
+                                if (eef90_val is None or eef90_val == 0) and isinstance(metrics, dict):
+                                    eef90_val = metrics.get('eef90_best_arcsec') or metrics.get('eef90') or eef90_val
+                            except Exception:
+                                pass
+
                             row = {
                                 'configuration_number': int(rid) + 1,
                                 'configuration_name': prefix,
                                 'offaxis_arcmin': offaxis_val,
                                 'energy_keV': energy_val,
                                 'defocus_mm': defocus_val,
+                                'Aeff_sum_orig': sum_orig,
+                                'Aeff_sum_mod': sum_mod,
                                 'Aeff_loss': aeff_loss,
                                 'HEW_00_arcsec': metrics.get('hew_origin_arcsec') if isinstance(metrics, dict) else None,
                                 'HEW_min_arcsec': metrics.get('hew_best_arcsec') if isinstance(metrics, dict) else None,
-                                'EEF80_min_arcsec': eef80 if eef80 is not None else None,
-                                'EEF90_min_arcsec': eef90 if eef90 is not None else (metrics.get('eef90_best_arcsec') if isinstance(metrics, dict) else None),
+                                'EEF80_min_arcsec': eef80_val if eef80_val is not None else None,
+                                'EEF90_min_arcsec': eef90_val if eef90_val is not None else (metrics.get('eef90_best_arcsec') if isinstance(metrics, dict) else None),
                             }
                         except Exception:
-                            row = {'configuration_number': int(rid) + 1, 'configuration_name': prefix, 'offaxis_arcmin': offaxis_val, 'energy_keV': energy_val, 'defocus_mm': defocus_val, 'Aeff_loss': aeff_loss}
+                            row = {
+                                'configuration_number': int(rid) + 1,
+                                'configuration_name': prefix,
+                                'offaxis_arcmin': offaxis_val,
+                                'energy_keV': energy_val,
+                                'defocus_mm': defocus_val,
+                                'Aeff_sum_orig': sum_orig,
+                                'Aeff_sum_mod': sum_mod,
+                                'Aeff_loss': aeff_loss
+                            }
                         pv_keys = ['Modified_PV_Amplitude_A', 'Modified_PV_Gamma_c_arcsec', 'Modified_PV_Gamma_w_arcsec', 'Modified_PV_eta', 'Modified_PV_beta', 'Modified_PV_scalar']
                         for k in pv_keys:
                             row[k] = fit_map.get(k) if isinstance(fit_map, dict) else None
@@ -7304,6 +8147,39 @@ if __name__ == '__main__':
                         # Write/update aggregated Excel immediately in the export folder
                         try:
                             df_agg_now = pd.DataFrame(aggregated_rows)
+                            # Ensure Aeff_sum columns exist and populate current row
+                            try:
+                                if 'Aeff_sum_orig' not in df_agg_now.columns:
+                                    df_agg_now['Aeff_sum_orig'] = pd.NA
+                                if 'Aeff_sum_mod' not in df_agg_now.columns:
+                                    df_agg_now['Aeff_sum_mod'] = pd.NA
+                                # Ensure EEF columns exist
+                                if 'EEF80_min_arcsec' not in df_agg_now.columns:
+                                    df_agg_now['EEF80_min_arcsec'] = pd.NA
+                                if 'EEF90_min_arcsec' not in df_agg_now.columns:
+                                    df_agg_now['EEF90_min_arcsec'] = pd.NA
+                                # populate last appended row with computed sums if available
+                                last_idx = len(df_agg_now) - 1
+                                if last_idx >= 0:
+                                    try:
+                                        if 'sum_orig' in locals() and sum_orig is not None:
+                                            df_agg_now.at[last_idx, 'Aeff_sum_orig'] = sum_orig
+                                        if 'sum_mod' in locals() and sum_mod is not None:
+                                            df_agg_now.at[last_idx, 'Aeff_sum_mod'] = sum_mod
+                                            # populate EEF values if available in last aggregated_rows entry
+                                            try:
+                                                last_r = aggregated_rows[last_idx]
+                                                if isinstance(last_r, dict):
+                                                    if 'EEF80_min_arcsec' in last_r and last_r.get('EEF80_min_arcsec') is not None:
+                                                        df_agg_now.at[last_idx, 'EEF80_min_arcsec'] = last_r.get('EEF80_min_arcsec')
+                                                    if 'EEF90_min_arcsec' in last_r and last_r.get('EEF90_min_arcsec') is not None:
+                                                        df_agg_now.at[last_idx, 'EEF90_min_arcsec'] = last_r.get('EEF90_min_arcsec')
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                             out_agg_now = os.path.join(export_batch_dir, f"Aggregated_results_{src_stem}.xlsx")
                             with pd.ExcelWriter(out_agg_now, engine='openpyxl') as writer:
                                 df_agg_now.to_excel(writer, sheet_name='Aggregated', index=False)
@@ -7334,6 +8210,33 @@ if __name__ == '__main__':
             if aggregated_rows:
                 try:
                     df_agg = pd.DataFrame(aggregated_rows)
+                    # ensure Aeff sum columns exist and populate from aggregated_rows
+                    try:
+                        if 'Aeff_sum_orig' not in df_agg.columns:
+                            df_agg['Aeff_sum_orig'] = pd.NA
+                        if 'Aeff_sum_mod' not in df_agg.columns:
+                            df_agg['Aeff_sum_mod'] = pd.NA
+                        # ensure EEF columns exist
+                        if 'EEF80_min_arcsec' not in df_agg.columns:
+                            df_agg['EEF80_min_arcsec'] = pd.NA
+                        if 'EEF90_min_arcsec' not in df_agg.columns:
+                            df_agg['EEF90_min_arcsec'] = pd.NA
+                        for i, rdict in enumerate(aggregated_rows):
+                            try:
+                                if isinstance(rdict, dict):
+                                    if 'Aeff_sum_orig' in rdict:
+                                        df_agg.at[i, 'Aeff_sum_orig'] = rdict.get('Aeff_sum_orig')
+                                    if 'Aeff_sum_mod' in rdict:
+                                        df_agg.at[i, 'Aeff_sum_mod'] = rdict.get('Aeff_sum_mod')
+                                    # copy EEF values if present
+                                    if 'EEF80_min_arcsec' in rdict:
+                                        df_agg.at[i, 'EEF80_min_arcsec'] = rdict.get('EEF80_min_arcsec')
+                                    if 'EEF90_min_arcsec' in rdict:
+                                        df_agg.at[i, 'EEF90_min_arcsec'] = rdict.get('EEF90_min_arcsec')
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     out_agg = os.path.join(export_batch_dir, f"Aggregated_results_{src_stem}.xlsx")
                     with pd.ExcelWriter(out_agg, engine='openpyxl') as writer:
                         df_agg.to_excel(writer, sheet_name='Aggregated', index=False)
