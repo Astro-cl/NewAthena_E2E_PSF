@@ -53,7 +53,19 @@ A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of
 
 ## Quick Start
 
-### Using the GUI (Recommended)
+The **core engine** is `main.py` (CLI). It reads a fully-configured Excel workbook and produces PSF plots, metrics, and export packages. The **GUI** (`gui_distributions.py`) is a helper tool whose primary purpose is to build and populate that Excel workbook — once the file is ready, the CLI drives all analysis.
+
+### Using the Command Line
+
+```bash
+python3 main.py -f Distributions/your_file.xlsx
+```
+
+If `--output` is not passed, an interactive window opens with plot export shortcuts. If `--output` is passed, the figure is saved and the script exits without opening a window.
+
+### Using the GUI — to prepare the input file
+
+The GUI's main role is to configure and export the Excel workbook that `main.py` requires. Once the file is exported, hand it to the CLI for analysis.
 
 1. **Launch the GUI**:
    ```bash
@@ -79,17 +91,9 @@ A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of
 5. **Export Results**:
    - Go to the **Export** tab
    - Choose export mode (new file or update current)
-   - Click **"Export to Excel"**
+   - Click **"Export to Excel"** — this produces the workbook consumed by `main.py`
    - Files are saved in `Distributions/`
    - Right-click on plots for: Export PSF / Encircled Energy / FITS / EEF CSV / Fit Parameters CSV
-
-### Using the Command Line
-
-```bash
-python3 main.py -f Distributions/your_file.xlsx
-```
-
-If `--output` is not passed, an interactive window opens with plot export shortcuts. If `--output` is passed, the figure is saved and the script exits without opening a window.
 
 ---
 
@@ -124,9 +128,68 @@ If `--output` is not passed, an interactive window opens with plot export shortc
 
 ## Usage
 
-### GUI Application
+The typical workflow is: **GUI → export Excel → CLI**. The GUI builds the input workbook; the CLI reads it and performs all PSF analysis, metric calculation, and export packaging.
 
-The GUI provides a complete workflow for generating and managing MM PSF data. Launch with:
+### Command-Line Interface (CLI)
+
+```
+python3 main.py [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-f / --file` | Path to input Excel workbook |
+| `--mode {coarse,fine}` | Computation mode (default: coarse) |
+| `--output PATH` | Save combined figure to PATH and exit (no GUI window) |
+| `--normalize` | Normalize PSF for plot comparison |
+| `--export-package` | Package figures, FITS, and workbook into `Exports/<TIMESTAMP>/` |
+| `--single-config N` | Only run configuration index N (useful for debugging) |
+| `--optimize` | Enable row-wise MM# assignment optimization |
+| `--batch-combinations` | Automated multi-configuration batch run (v8) |
+| `--log-dz` | Log per-MM dz projections |
+
+**Examples:**
+
+```bash
+# Quick coarse analysis, interactive window
+python3 main.py -f Distributions/my_config.xlsx
+
+# Save figure directly, no window
+python3 main.py -f Distributions/my_config.xlsx --output Figures/result.png
+
+# Coarse export package
+python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode coarse
+
+# Fine-resolution export package (compute-intensive)
+python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
+
+# Debug: run only config index 1
+python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --single-config 1
+
+# Batch combinations (off-axis, energy, defocus permutations)
+python3 main.py --file Distributions/YourWorkbook.xlsx --batch-combinations --mode coarse
+
+# Optimize MM# row assignments
+python3 main.py -f Distributions/my_config.xlsx --optimize
+```
+
+**Background / unattended runs:**
+
+```bash
+nohup python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine &
+# or with screen:
+screen -S e2e_run
+python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
+# detach with Ctrl-A D
+```
+
+---
+
+### GUI Application — building the input workbook
+
+The GUI's primary purpose is to configure mirror-module PSF parameters and export them into the Excel workbook that `main.py` expects. It is **not** the analysis engine — once the workbook is ready, run the CLI. The GUI also provides a live PSF preview and right-click export shortcuts.
+
+Launch with:
 
 ```bash
 python3 gui_distributions.py
@@ -221,61 +284,6 @@ Each type uses the same fixed/gaussian/uniform parameter scheme. Click **"Genera
 **A_eff export behavior (GUI vs CLI):**
 - GUI export evaluates standard A_eff presets per-MM and writes numeric values into column B of the `A_eff` sheet; column C is cleared.
 - CLI (`main.py`) preserves legacy behavior: adjusted/derived A_eff is written to column C.
-
----
-
-### Command-Line Interface (CLI)
-
-```
-python3 main.py [options]
-```
-
-| Option | Description |
-|--------|-------------|
-| `-f / --file` | Path to input Excel workbook |
-| `--mode {coarse,fine}` | Computation mode (default: coarse) |
-| `--output PATH` | Save combined figure to PATH and exit (no GUI window) |
-| `--normalize` | Normalize PSF for plot comparison |
-| `--export-package` | Package figures, FITS, and workbook into `Exports/<TIMESTAMP>/` |
-| `--single-config N` | Only run configuration index N (useful for debugging) |
-| `--optimize` | Enable row-wise MM# assignment optimization |
-| `--batch-combinations` | Automated multi-configuration batch run (v8) |
-| `--log-dz` | Log per-MM dz projections |
-
-**Examples:**
-
-```bash
-# Quick coarse analysis, interactive window
-python3 main.py -f Distributions/my_config.xlsx
-
-# Save figure directly, no window
-python3 main.py -f Distributions/my_config.xlsx --output Figures/result.png
-
-# Coarse export package
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode coarse
-
-# Fine-resolution export package (compute-intensive)
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
-
-# Debug: run only config index 1
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --single-config 1
-
-# Batch combinations (off-axis, energy, defocus permutations)
-python3 main.py --file Distributions/YourWorkbook.xlsx --batch-combinations --mode coarse
-
-# Optimize MM# row assignments
-python3 main.py -f Distributions/my_config.xlsx --optimize
-```
-
-**Background / unattended runs:**
-
-```bash
-nohup python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine &
-# or with screen:
-screen -S e2e_run
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
-# detach with Ctrl-A D
-```
 
 ---
 
