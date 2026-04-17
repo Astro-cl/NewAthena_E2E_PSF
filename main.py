@@ -119,41 +119,6 @@ def parse_multisheet_csv(path_or_buffer):
             out[name] = df
 
     return out
-# Vignetting sheet name candidates (support legacy and new names)
-VIG_ROT_AZI_CANDIDATES = ('MM vignetting rotazi', 'Vignetting rotazi')
-VIG_ROT_RAD_CANDIDATES = ('MM vignetting rotrad', 'Vignetting rotrad')
-
-def _pick_sheet_for(path: str, candidates: tuple) -> str | None:
-    """Return the first candidate sheet name present in workbook at path.
-
-    If none found return None.
-    """
-    try:
-        from openpyxl import load_workbook as _lw
-        wb_tmp = _lw(path, read_only=True)
-        for s in candidates:
-            if s in wb_tmp.sheetnames:
-                try:
-                    wb_tmp.close()
-                except Exception:
-                    pass
-                return s
-        try:
-            wb_tmp.close()
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return None
-
-def _find_sheet_in_wb(wb, candidates: tuple) -> str | None:
-    try:
-        for s in candidates:
-            if s in wb.sheetnames:
-                return s
-    except Exception:
-        pass
-    return None
 def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
@@ -163,7 +128,7 @@ def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     """
     mapping = {}
     try:
-        kwargs = {"engine": "openpyxl", "header": None}
+            kwargs = {"engine": "openpyxl", "header": None, "dtype": str}
         if sheet is not None:
             kwargs["sheet_name"] = sheet
         else:
@@ -172,94 +137,28 @@ def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     except Exception:
         return mapping
 
-    ncols = raw.shape[1]
-    # Prefer B (index 1) and energy columns J..T (indices 9..19)
-    candidate_cols = [1]
-    candidate_cols.extend([i for i in range(9, min(20, ncols))])
-
-    # Pre-open workbook with data_only to resolve formula cells when needed
-    wb_data = None
-    ws_data = None
-    try:
-        from openpyxl import load_workbook as _lw
-        wb_data = _lw(path, data_only=True)
-        wsname = sheet if sheet is not None else 'A_eff'
-        if wsname in wb_data.sheetnames:
-            ws_data = wb_data[wsname]
-    except Exception:
-        wb_data = None
-        ws_data = None
-
+    # Expect first column = MM #, second column = A_eff base
     for rid in range(raw.shape[0]):
         try:
             mmv = raw.iat[rid, 0]
         except Exception:
             mmv = None
+        try:
+            aval = raw.iat[rid, 1]
+        except Exception:
+            aval = None
         if mmv is None:
             continue
         try:
             mm_int = int(float(mmv))
         except Exception:
-            # not a valid MM id row
             continue
-
-        aval = None
-        # Try preferred candidate columns first
-        for cidx in candidate_cols:
-            if cidx >= ncols:
-                continue
-            try:
-                v = raw.iat[rid, cidx]
-            except Exception:
-                v = None
-            if v is None:
-                continue
-            # If cell contains a formula string, try the evaluated value
-            if isinstance(v, str) and v.strip().startswith('=') and ws_data is not None:
-                try:
-                    ev = ws_data.cell(row=rid+1, column=cidx+1).value
-                    v = ev
-                except Exception:
-                    pass
-            try:
-                aval = float(v)
-                break
-            except Exception:
-                continue
-
-        # Fallback: scan all columns for any numeric value
-        if aval is None:
-            for cidx in range(1, ncols):
-                try:
-                    v = raw.iat[rid, cidx]
-                except Exception:
-                    v = None
-                if v is None:
-                    continue
-                if isinstance(v, str) and v.strip().startswith('=') and ws_data is not None:
-                    try:
-                        ev = ws_data.cell(row=rid+1, column=cidx+1).value
-                        v = ev
-                    except Exception:
-                        pass
-                try:
-                    aval = float(v)
-                    break
-                except Exception:
-                    continue
-
-        if aval is None:
-            # no numeric A_eff found for this MM -> treat as invalid input
-            wsname = sheet if sheet is not None else 'A_eff'
-            raise ValueError(f"Missing or invalid A_eff value for MM {mm_int} in sheet '{wsname}'")
-        mapping[mm_int] = float(aval)
-
-    try:
-        if wb_data is not None:
-            wb_data.close()
-    except Exception:
-        pass
-
+        try:
+            a_float = float(aval)
+        except Exception:
+            # Found a MM entry but its A_eff value is invalid -> raise
+            raise ValueError(f"Invalid A_eff value for MM #{mm_int}: {aval!r}")
+        mapping[mm_int] = a_float
     return mapping
 
 
@@ -272,7 +171,7 @@ def load_aeff_weight_map_with_name(path: str) -> tuple[dict, str | None]:
     mapping = load_aeff_weight_map(path)
     col_name = None
     try:
-        raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None)
+            raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None, dtype=str)
         # scan first few rows/cols for a string containing 'keV'
         import re
         for r in range(min(6, raw.shape[0])):
@@ -291,251 +190,8 @@ def load_aeff_weight_map_with_name(path: str) -> tuple[dict, str | None]:
     return mapping, col_name
 
 
-def _evaluate_vlookup_xlookup(formula: str, wb, current_ws, row: int):
-    """Best-effort evaluator for formulas of the form:
-    =VLOOKUP(_xlfn.XLOOKUP($A2,'MM configuration'!$D$2:$D$601,'MM configuration'!$C$2:$C$601),$S$24:$AA$38,7)
-
-    Returns a Python value or None on failure.
-    This evaluator understands XLOOKUP with literal ranges and VLOOKUP over a table
-    on the same sheet. It is intentionally narrow but handles the pattern observed
-    in the provided workbooks.
-    """
-    try:
-        import re
-        s = formula.strip()
-        if 'XLOOKUP' not in s.upper() or 'VLOOKUP' not in s.upper():
-            return None
-
-        def find_matching(s, start):
-            depth = 0
-            for i in range(start, len(s)):
-                if s[i] == '(':
-                    depth += 1
-                elif s[i] == ')':
-                    depth -= 1
-                    if depth == 0:
-                        return i
-            return -1
-
-        # locate XLOOKUP(...) span
-        xi = s.upper().find('XLOOKUP(')
-        if xi < 0:
-            return None
-        xstart = s.find('(', xi)
-        xend = find_matching(s, xstart)
-        if xend < 0:
-            return None
-        inner = s[xstart+1:xend]
-
-        # split top-level commas
-        def split_args(t):
-            out = []
-            cur = ''
-            depth = 0
-            inq = False
-            for ch in t:
-                if ch == "'":
-                    inq = not inq
-                if ch == '(' and not inq:
-                    depth += 1
-                if ch == ')' and not inq:
-                    depth -= 1
-                if ch == ',' and depth == 0 and not inq:
-                    out.append(cur.strip())
-                    cur = ''
-                else:
-                    cur += ch
-            if cur.strip():
-                out.append(cur.strip())
-            return out
-
-        xargs = split_args(inner)
-        if len(xargs) < 3:
-            return None
-        lookup_ref = xargs[0]
-        lookup_range = xargs[1]
-        return_range = xargs[2]
-
-        # After XLOOKUP closing, find VLOOKUP table args
-        rest = s[xend+1:]
-        # trim leading chars until '(' of VLOOKUP args
-        if rest.startswith(','):
-            rest = rest[1:]
-        # remove surrounding parens if present
-        if rest.endswith(')'):
-            rest = rest[:-1]
-        vparts = split_args(rest)
-        if len(vparts) < 2:
-            return None
-        table_range = vparts[0]
-        try:
-            col_index = int(re.search(r"(\d+)", vparts[1]).group(1))
-        except Exception:
-            return None
-
-        from openpyxl.utils import column_index_from_string
-        # resolve lookup_value from lookup_ref (e.g. $A2 or A2)
-        m = re.search(r"([A-Za-z]+)\$?(\d+)", lookup_ref)
-        if not m:
-            # if lookup_ref is a simple reference like $A2 without number,
-            # fall back to column A of current row
-            m = re.search(r"([A-Za-z]+)", lookup_ref)
-            if not m:
-                return None
-            col = column_index_from_string(m.group(1))
-            lookup_value = current_ws.cell(row=row, column=col).value
-        else:
-            col = column_index_from_string(m.group(1))
-            # Excel formulas often use row numbers that are relative; use current row
-            lookup_value = current_ws.cell(row=row, column=col).value
-
-        # parse sheet-range tokens like 'MM configuration'!$D$2:$D$601 or $S$24:$AA$38
-        def parse_sheet_range(token, default_sheet=None):
-            token = token.strip()
-            sheet = default_sheet
-            if '!' in token:
-                parts = token.split('!')
-                sheet = parts[0].strip().strip("'")
-                rng = parts[1]
-            else:
-                rng = token
-            m = re.search(r"\$?([A-Za-z]+)\$?(\d+):\$?([A-Za-z]+)\$?(\d+)", rng)
-            if not m:
-                return None
-            c1, r1, c2, r2 = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
-            c1i = column_index_from_string(c1)
-            c2i = column_index_from_string(c2)
-            return sheet, c1i, r1, c2i, r2
-
-        # load lookup and return arrays
-        try:
-            l_sheet, l_c1, l_r1, l_c2, l_r2 = parse_sheet_range(lookup_range, default_sheet=current_ws.title)
-            r_sheet, r_c1, r_r1, r_c2, r_r2 = parse_sheet_range(return_range, default_sheet=current_ws.title)
-        except Exception:
-            return None
-        if l_sheet not in wb.sheetnames or r_sheet not in wb.sheetnames:
-            return None
-        lws = wb[l_sheet]
-        rws = wb[r_sheet]
-        # assume single-column ranges for lookup/return
-        lookup_vals = []
-        for rr in range(l_r1, l_r2+1):
-            lookup_vals.append(lws.cell(row=rr, column=l_c1).value)
-        return_vals = []
-        for rr in range(r_r1, r_r2+1):
-            return_vals.append(rws.cell(row=rr, column=r_c1).value)
-
-        # perform XLOOKUP-like exact match
-        match_index = None
-        for i, val in enumerate(lookup_vals):
-            try:
-                if val == lookup_value:
-                    match_index = i
-                    break
-                # attempt string/numeric equivalence
-                if val is not None and lookup_value is not None and str(val).strip() == str(lookup_value).strip():
-                    match_index = i
-                    break
-            except Exception:
-                continue
-        if match_index is None:
-            return None
-        xret = return_vals[match_index]
-
-        # parse table_range on current_ws (no sheet name in observed files)
-        try:
-            t_sheet, t_c1, t_r1, t_c2, t_r2 = parse_sheet_range(table_range, default_sheet=current_ws.title)
-        except Exception:
-            return None
-        if t_sheet not in wb.sheetnames:
-            return None
-        tws = wb[t_sheet]
-        # search first column of table_range for xret and return value from col_index
-        for rr in range(t_r1, t_r2+1):
-            cellv = tws.cell(row=rr, column=t_c1).value
-            try:
-                if cellv == xret or (cellv is not None and xret is not None and str(cellv).strip() == str(xret).strip()):
-                    # found row; get target column
-                    tgt_col = t_c1 + (col_index - 1)
-                    cell_obj = tws.cell(row=rr, column=tgt_col)
-                    cell_val = cell_obj.value
-                    # If the return cell itself contains a formula (e.g. =Y6*(100%-Y$5)/$S6),
-                    # try to evaluate simple arithmetic expressions by resolving cell
-                    # references from the same sheet or the current worksheet.
-                    try:
-                        if isinstance(cell_val, str) and cell_val.startswith('='):
-                            expr = cell_val.lstrip('=')
-                            # convert Excel percent syntax 100% -> 100/100
-                            expr = expr.replace('%', '/100')
-                            # Replace cell refs like $S$6 or Y6 with numeric values
-                            def _ref_repl(m):
-                                tok = m.group(0)
-                                # strip $ signs
-                                tok2 = tok.replace('$', '')
-                                import re as _re2
-                                mm = _re2.match(r'([A-Za-z]+)(\d+)', tok2)
-                                if not mm:
-                                    return '0'
-                                collet = mm.group(1)
-                                rownum = int(mm.group(2))
-                                from openpyxl.utils import column_index_from_string
-                                try:
-                                    coli = column_index_from_string(collet)
-                                except Exception:
-                                    return '0'
-                                # Try several sheet candidates: table sheet, current_ws
-                                val = None
-                                try:
-                                    val = tws.cell(row=rownum, column=coli).value
-                                except Exception:
-                                    val = None
-                                if val is None:
-                                    try:
-                                        val = current_ws.cell(row=rownum, column=coli).value
-                                    except Exception:
-                                        val = None
-                                # If value itself is a percent string like '100%', convert
-                                try:
-                                    if isinstance(val, str) and val.strip().endswith('%'):
-                                        return str(float(val.strip().rstrip('%'))/100.0)
-                                except Exception:
-                                    pass
-                                try:
-                                    if isinstance(val, (int, float)):
-                                        return str(float(val))
-                                except Exception:
-                                    pass
-                                # If referenced cell contains a formula, try to resolve recursively
-                                try:
-                                    if isinstance(val, str) and val.startswith('='):
-                                        # avoid deep recursion by limiting to this evaluator call
-                                        sub = val.lstrip('=')
-                                        sub = sub.replace('%', '/100')
-                                        sub2 = _re2.sub(_ref_repl, sub)
-                                        try:
-                                            return str(float(eval(sub2, { }, { })))
-                                        except Exception:
-                                            return '0'
-                                except Exception:
-                                    pass
-                                return '0'
-                            import re as __re
-                            expr2 = __re.sub(r"\$?[A-Za-z]{1,3}\$?\d+", _ref_repl, expr)
-                            try:
-                                # Evaluate arithmetic expression safely (no builtins)
-                                val_out = eval(expr2, { }, { })
-                                return val_out
-                            except Exception:
-                                # fallback to returning the raw cell string
-                                return cell_val
-                    except Exception:
-                        pass
-                    return cell_val
-            except Exception:
-                continue
-    except Exception:
-        return None
-    return None
+# `_evaluate_vlookup_xlookup` removed: prefer `data_only` cached values
+# and do not attempt best-effort formula parsing/evaluation.
 
 def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics: bool | None = None, **kwargs) -> pd.DataFrame:
     """Load gaussian parameters from Excel.
@@ -594,7 +250,157 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         kwargs = {"engine": "openpyxl"}  # Use openpyxl engine for Excel files
         if sheet:
             kwargs["sheet_name"] = sheet  # Specify sheet if provided
-        df = pd.read_excel(path, **kwargs)  # Read the Excel file into a DataFrame
+
+        # Create a values-only copy of the workbook before reading. Prefer to
+        # use Excel via xlwings to perform an in-place paste-values (so cached
+        # results are materialized); if xlwings/Excel is unavailable, fall
+        # back to creating a values-only file from openpyxl's data_only read.
+        def make_values_only_copy(src_path: str) -> str:
+            src_path = str(src_path)
+            dest_fd, dest_path = tempfile.mkstemp(prefix='values_only_', suffix='.xlsx', dir=os.getcwd())
+            os.close(dest_fd)
+
+            def _has_uncached_formula(path: str) -> bool:
+                """Return True if workbook contains formula cells whose cached values are missing.
+
+                We consider a cell 'uncached' when it contains a formula (text starting
+                with '=') and the corresponding data_only value is None.
+                """
+                try:
+                    wb_f = load_workbook(path, data_only=False, read_only=True)
+                    wb_v = load_workbook(path, data_only=True, read_only=True)
+                except Exception:
+                    return False
+                try:
+                    for name in wb_f.sheetnames:
+                        wsf = wb_f[name]
+                        wsv = wb_v[name]
+                        for row in wsf.iter_rows():
+                            for cell in row:
+                                try:
+                                    val = cell.value
+                                except Exception:
+                                    val = None
+                                if isinstance(val, str) and val.startswith('='):
+                                    try:
+                                        v = wsv.cell(row=cell.row, column=cell.col_idx).value
+                                    except Exception:
+                                        v = None
+                                    if v is None:
+                                        try:
+                                            wb_f.close()
+                                            wb_v.close()
+                                        except Exception:
+                                            pass
+                                        return True
+                    try:
+                        wb_f.close()
+                        wb_v.close()
+                    except Exception:
+                        pass
+                    return False
+                except Exception:
+                    try:
+                        wb_f.close()
+                        wb_v.close()
+                    except Exception:
+                        pass
+                    return False
+
+            # Allow forcing xlwings paste-values via env var for batch runs
+            force_env = os.environ.get('FORCE_PASTE_VALUES', '')
+            need_xlwings = (force_env == '1') or _has_uncached_formula(src_path)
+
+            if need_xlwings:
+                try:
+                    import xlwings as xw
+                    try:
+                        app = xw.App(visible=False)
+                        wb_x = app.books.open(src_path)
+                        for sh in wb_x.sheets:
+                            sh.api.Cells.Copy()
+                            sh.api.Cells.PasteSpecial(-4163)  # xlPasteValues
+                        wb_x.api.SaveAs(dest_path)
+                        wb_x.close()
+                        app.quit()
+                        # xlwings paste-values should have removed formulas.
+                        # Do not overwrite the saved copy with the source's
+                        # cached values here (that can unintentionally wipe
+                        # data when the source cached values are missing).
+                        return dest_path
+                    except Exception:
+                        try:
+                            wb_x.close()
+                        except Exception:
+                            pass
+                        try:
+                            app.quit()
+                        except Exception:
+                            pass
+                except Exception:
+                    # xlwings not available or failed; fall through to fallback
+                    pass
+
+            # Fallback: read cached values with openpyxl and write to new file
+            try:
+                from openpyxl import load_workbook as _load_wb_vals, Workbook as _Workbook
+                wb_vals = _load_wb_vals(src_path, data_only=True)
+                new_wb = _Workbook()
+                default = new_wb.active
+                new_wb.remove(default)
+                for name in wb_vals.sheetnames:
+                    src = wb_vals[name]
+                    dest = new_wb.create_sheet(title=name)
+                    for r in src.iter_rows(values_only=True):
+                        dest.append(list(r))
+                new_wb.save(dest_path)
+                return dest_path
+            except Exception:
+                # Last resort: copy original file raw
+                shutil.copy2(src_path, dest_path)
+                return dest_path
+
+        values_only_path = None
+        try:
+            values_only_path = make_values_only_copy(path)
+            wb_vals = None
+            try:
+                from openpyxl import load_workbook as _load_wb_vals
+                wb_vals = _load_wb_vals(values_only_path, data_only=True)
+            except Exception:
+                wb_vals = None
+
+            if wb_vals is not None:
+                # choose target sheet: prefer provided `sheet`, else detect
+                target_sheet = None
+                if sheet and sheet in wb_vals.sheetnames:
+                    target_sheet = sheet
+                else:
+                    for sname in wb_vals.sheetnames:
+                        if sname.lower() == 'mm_psf':
+                            target_sheet = sname
+                            break
+                if target_sheet is None and wb_vals.sheetnames:
+                    target_sheet = wb_vals.sheetnames[0]
+
+                if target_sheet is not None:
+                    ws = wb_vals[target_sheet]
+                    rows = list(ws.values)
+                    if rows:
+                        header = [str(h) if h is not None else '' for h in rows[0]]
+                        data_rows = rows[1:]
+                        df = pd.DataFrame(data_rows, columns=header)
+                    else:
+                        df = pd.DataFrame()
+                else:
+                    df = pd.DataFrame()
+                print(f"INFO: Loaded workbook using values-only copy: {values_only_path}")
+            else:
+                df = pd.read_excel(path, **kwargs)
+        finally:
+            # Do NOT delete the values-only copy yet — mapping of D/E below
+            # may need to read it. We'll clean up after the mapping step.
+            pass
     required = ["m_rad [arcsec]","m_azi [arcsec]","sigma_rad [arcsec]","sigma_azi [arcsec]"]  # Required columns
 
     # If the sheet was read headerless (integer column names) and the first
@@ -607,6 +413,105 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             if any(r in first_row for r in [r for r in required]):
                 df.columns = first_row
                 df = df.iloc[1:].reset_index(drop=True)
+    except Exception:
+        pass
+    # Cleanup values-only temp copy if it was created earlier
+    try:
+        if 'values_only_path' in locals() and values_only_path and os.path.exists(values_only_path):
+            os.remove(values_only_path)
+    except Exception:
+        pass
+    # If this was an Excel input, prefer the workbook's evaluated cell values
+    # for columns D/E (sigma_rad, sigma_azi). This ensures any formulas in
+    # the sheet are resolved using the workbook's cached numeric results
+    # rather than relying on pandas' inference which can miss evaluated
+    # values when formulas are present.
+    try:
+        if not is_csv:
+            from openpyxl import load_workbook as _load_wb_vals
+            wb_vals = None
+            try:
+                wb_vals = _load_wb_vals(path, data_only=True)
+            except Exception:
+                wb_vals = None
+            if wb_vals is not None:
+                # find MM_PSF sheet case-insensitively
+                sheet_name = None
+                for s in wb_vals.sheetnames:
+                    if s.lower() == 'mm_psf':
+                        sheet_name = s
+                        break
+                if sheet_name is not None and 'MM #' in df.columns:
+                    ws_vals = wb_vals[sheet_name]
+                    sigma_map_rad = {}
+                    sigma_map_azi = {}
+                    # iterate rows, expect MM # in col A, sigma_rad in D (4), sigma_azi in E (5)
+                    for r in range(2, (ws_vals.max_row or 0) + 1):
+                        try:
+                            mmcell = ws_vals.cell(row=r, column=1).value
+                            if mmcell is None:
+                                continue
+                            try:
+                                mm_int = int(float(mmcell))
+                            except Exception:
+                                continue
+                            dval = ws_vals.cell(row=r, column=4).value
+                            eval_d = None
+                            if dval is not None:
+                                try:
+                                    eval_d = float(dval)
+                                except Exception:
+                                    # try to extract a numeric token
+                                    try:
+                                        import re as _re
+                                        m = _re.search(r"(-?\d+(?:\.\d+)?)", str(dval))
+                                        if m:
+                                            eval_d = float(m.group(1))
+                                    except Exception:
+                                        eval_d = None
+                            eval_e = None
+                            eval_e_raw = ws_vals.cell(row=r, column=5).value
+                            if eval_e_raw is not None:
+                                try:
+                                    eval_e = float(eval_e_raw)
+                                except Exception:
+                                    try:
+                                        import re as _re2
+                                        m2 = _re2.search(r"(-?\d+(?:\.\d+)?)", str(eval_e_raw))
+                                        if m2:
+                                            eval_e = float(m2.group(1))
+                                    except Exception:
+                                        eval_e = None
+                            if eval_d is not None:
+                                sigma_map_rad[mm_int] = eval_d
+                            if eval_e is not None:
+                                sigma_map_azi[mm_int] = eval_e
+                    # Apply maps to the DataFrame for matching MM # rows
+                    for idx in df.index:
+                        try:
+                            mmv = int(pd.to_numeric(df.at[idx, 'MM #'], errors='coerce'))
+                        except Exception:
+                            continue
+                        if mmv in sigma_map_rad:
+                            df.at[idx, 'sigma_rad [arcsec]'] = sigma_map_rad[mmv]
+                        if mmv in sigma_map_azi:
+                            df.at[idx, 'sigma_azi [arcsec]'] = sigma_map_azi[mmv]
+                    # If after attempting to map D/E values any required sigma cells
+                    # remain missing, fail loudly — the workbook must contain cached
+                    # numeric values for D/E. Ask user to re-save the Excel file with
+                    # recalculation so caches are stored.
+                    # Coerce to numeric and check for NaN or non-positive values
+                    rad_vals = pd.to_numeric(df.get('sigma_rad [arcsec]'), errors='coerce')
+                    azi_vals = pd.to_numeric(df.get('sigma_azi [arcsec]'), errors='coerce')
+                    missing_mask = rad_vals.isna() | azi_vals.isna() | (rad_vals <= 0.0) | (azi_vals <= 0.0)
+                    if missing_mask.any():
+                        missing_mms = df.loc[missing_mask, 'MM #'].head(20).tolist()
+                        raise ValueError(
+                            "Invalid or missing numeric values in MM_PSF columns D/E (sigma_rad/sigma_azi) for some MMs. "
+                            "These cells must contain positive numeric values (not formulas without cached results). "
+                            "Open the workbook in Excel, recalculate, and save so cached values are stored. "
+                            f"Examples: {missing_mms[:20]}"
+                        )
     except Exception:
         pass
     # polar vignetting handled later after A_eff/weight initialization
@@ -677,6 +582,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     # Historically this code used an extra factor of 12; preserve that
     # behavior to match prior outputs: 1 arcsec -> 12 * π / 180 / 3600.
     arcsec_to_m = 12 * np.pi / 180 / 3600
+    # Strict: do not promote alternate sigma columns; require D/E contain
+    # cached numeric values. If D/E are formulas without cached results,
+    # the loader will raise a clear error below instructing the user to
+    # re-open and save the workbook so Excel writes cached values.
+
     # Coerce to numeric to support placeholder strings like '-'
     for col in ['m_rad [arcsec]', 'm_azi [arcsec]', 'sigma_rad [arcsec]', 'sigma_azi [arcsec]']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -1073,12 +983,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # - Header-heavy workbooks often still contain the intended A->B mapping
         #   in the first two columns; we try that as a final fallback.
         try:
-            # Pick the appropriate rotazi sheet name (support new 'MM vignetting rotazi')
-            _sheet = _pick_sheet_for(path, VIG_ROT_AZI_CANDIDATES)
-            if _sheet is not None:
-                vdf_azi = pd.read_excel(path, sheet_name=_sheet, engine='openpyxl')
-            else:
-                vdf_azi = pd.DataFrame()
+            vdf_azi = pd.read_excel(path, sheet_name='Vignetting rotazi', engine='openpyxl')
             xs_azi = ys_azi = None
             ys_by_pos_azi = {}
             azi_mode = 'none'
@@ -1122,25 +1027,18 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # C2 fallback with openpyxl
                     from openpyxl import load_workbook
                     wb_tmp = load_workbook(path, data_only=True)
-                    try:
-                        for sname in (VIG_ROT_AZI_CANDIDATES + VIG_ROT_RAD_CANDIDATES):
-                            if sname in wb_tmp.sheetnames:
-                                ws_tmp = wb_tmp[sname]
-                                candidate = ws_tmp.cell(row=2, column=3).value
-                                if candidate is not None and not pd.isna(candidate):
-                                    try:
-                                        sel_energy = float(candidate)
-                                        sel_energy_from_vdf = True
-                                        print(f'VIG sel_energy from {sname} C2: {sel_energy}')
-                                        break
-                                    except:
-                                        pass
-                        
-                    finally:
-                        try:
-                            wb_tmp.close()
-                        except Exception:
-                            pass
+                    for sname in ['Vignetting rotazi', 'Vignetting rotrad']:
+                        if sname in wb_tmp.sheetnames:
+                            ws_tmp = wb_tmp[sname]
+                            candidate = ws_tmp.cell(row=2, column=3).value
+                            if candidate is not None and not pd.isna(candidate):
+                                try:
+                                    sel_energy = float(candidate)
+                                    sel_energy_from_vdf = True
+                                    print(f'VIG sel_energy from {sname} C2: {sel_energy}')
+                                    break
+                                except:
+                                    pass
             except Exception as e:
                 print(f'VIG sel_energy scan error: {e}')
             
@@ -1295,11 +1193,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # back to the single global curve. If neither is present we leave
         # the weight unchanged for that component.
         try:
-            _sheet = _pick_sheet_for(path, VIG_ROT_RAD_CANDIDATES)
-            if _sheet is not None:
-                vdf_rad = pd.read_excel(path, sheet_name=_sheet, engine='openpyxl')
-            else:
-                vdf_rad = pd.DataFrame()
+            vdf_rad = pd.read_excel(path, sheet_name='Vignetting rotrad', engine='openpyxl')
             xs_rad = ys_rad = None
             ys_by_pos_rad = {}
             rad_mode = 'none'
@@ -1414,18 +1308,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     from openpyxl import load_workbook
                     wb_tmp2 = load_workbook(path, data_only=True)
-                    try:
-                        sname2 = _find_sheet_in_wb(wb_tmp2, VIG_ROT_RAD_CANDIDATES)
-                        if sname2 is not None:
-                            ws_tmp2 = wb_tmp2[sname2]
-                            candidate = ws_tmp2.cell(row=2, column=3).value
-                        else:
-                            candidate = None
-                    finally:
-                        try:
-                            wb_tmp2.close()
-                        except Exception:
-                            pass
+                    if 'Vignetting rotrad' in wb_tmp2.sheetnames:
+                        ws_tmp2 = wb_tmp2['Vignetting rotrad']
+                        candidate = ws_tmp2.cell(row=2, column=3).value
+                    else:
+                        candidate = None
                 except Exception:
                     candidate = None
                 if candidate is not None and not (isinstance(candidate, float) and np.isnan(candidate)):
@@ -1881,13 +1768,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             if not final_vig_vals_azi and 'vig_vals_azi' in locals():
                 final_vig_vals_azi = dict(locals().get('vig_vals_azi', {}))
 
-            # VIGNETTE SHEETS: write col B and C1 only (support new MM vignetting names)
-            pairs = [
-                (VIG_ROT_AZI_CANDIDATES, final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
-                (VIG_ROT_RAD_CANDIDATES, final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
-            ]
-            for cand_tuple, vig_map in pairs:
-                sname = _find_sheet_in_wb(wb, cand_tuple) or cand_tuple[0]
+            # VIGNETTE SHEETS: write col B and C1 only
+            for sname, vig_map in (
+                ('Vignetting rotazi', final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
+                ('Vignetting rotrad', final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
+            ):
                 # Debug print of sample vig_map contents when requested
                 try:
                     if os.environ.get('VIG_DEBUG'):
@@ -2081,9 +1966,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 # Read vignette factors from workbook (column B of vignette sheets)
                 vig_rad_sheet = {}
                 vig_azi_sheet = {}
-                r_name = _find_sheet_in_wb(wb, VIG_ROT_RAD_CANDIDATES)
-                if r_name is not None:
-                    wsr = wb[r_name]
+                if 'Vignetting rotrad' in wb.sheetnames:
+                    wsr = wb['Vignetting rotrad']
                     for rr in range(1, wsr.max_row + 1):
                         a = wsr.cell(row=rr, column=1).value
                         b = wsr.cell(row=rr, column=2).value
@@ -2096,9 +1980,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 vig_rad_sheet[key] = float(b)
                             except Exception:
                                 pass
-                a_name = _find_sheet_in_wb(wb, VIG_ROT_AZI_CANDIDATES)
-                if a_name is not None:
-                    wsa = wb[a_name]
+                if 'Vignetting rotazi' in wb.sheetnames:
+                    wsa = wb['Vignetting rotazi']
                     for rr in range(1, wsa.max_row + 1):
                         a = wsa.cell(row=rr, column=1).value
                         b = wsa.cell(row=rr, column=2).value
@@ -2155,17 +2038,30 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 df.at[idx, 'aeff_vig_factor'] = np.nan
                         except Exception:
                             df.at[idx, 'aeff_vig_factor'] = np.nan
+                        # Enforce that aeff_base must be present and numeric for every MM row.
+                        if 'aeff_base' not in df.columns:
+                            raise ValueError("Missing required column 'aeff_base' in MM_PSF; A_eff column B must be present in the workbook.")
+                        if pd.isna(df.at[idx, 'aeff_base']):
+                            mm_missing = mmv
+                            raise ValueError(f"Missing A_eff base value for MM {mm_missing} (row index {idx}). A_eff column B must contain a numeric weight for every MM used.")
+                        base_val = float(df.at[idx, 'aeff_base'])
                         try:
-                            base_val = float(df.at[idx, 'aeff_base']) if 'aeff_base' in df.columns and not pd.isna(df.at[idx, 'aeff_base']) else 0.0
-                        except Exception:
-                            base_val = 0.0
-                        try:
-                            if combined is None or base_val == 0.0:
+                            if combined is None:
                                 df.at[idx, 'aeff_adjusted'] = 0.0
                             else:
                                 df.at[idx, 'aeff_adjusted'] = float(base_val) * float(combined)
+                            # Synchronize weight for this MM immediately so incremental
+                            # updates don't leave weight out-of-sync with aeff_adjusted.
+                            try:
+                                df.at[idx, 'weight'] = float(df.at[idx, 'aeff_adjusted'])
+                            except Exception:
+                                df.at[idx, 'weight'] = df.at[idx, 'aeff_adjusted']
                         except Exception:
                             df.at[idx, 'aeff_adjusted'] = 0.0
+                            try:
+                                df.at[idx, 'weight'] = 0.0
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
@@ -2187,9 +2083,17 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # write base if available in df
                     try:
                         base_row = df.loc[df['MM #'] == mmv]
-                        base_val = float(base_row['aeff_base'].iat[0]) if (not base_row.empty and 'aeff_base' in base_row.columns) else 0.0
+                        if not base_row.empty and 'aeff_base' in base_row.columns and not pd.isna(base_row['aeff_base'].iat[0]):
+                            base_val = float(base_row['aeff_base'].iat[0])
+                        else:
+                            # If this MM is present in the working DataFrame but has no aeff_base,
+                            # raise an error — aeff_base must be defined for any MM used in aggregation.
+                            if mmv in df['MM #'].values:
+                                raise ValueError(f"Missing A_eff base value for MM {mmv} encountered while writing A_eff sheet. A_eff column B must contain numeric weights for all MMs.")
+                            # Otherwise the A_eff sheet contains an MM not present in the current df; skip writing for that row.
+                            continue
                     except Exception:
-                        base_val = 0.0
+                        raise
 
                     # determine per-position factor from sheet
                     pos = mm_to_pos.get(mmv) if 'mm_to_pos' in locals() else None
@@ -2243,7 +2147,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             # Find rows in df matching this MM and update
                             mask = df['MM #'] == mmv
                             if 'aeff_adjusted' in df.columns:
-                                df.loc[mask, 'aeff_adjusted'] = float(cval) if cval is not None else 0.0
+                                val = float(cval) if cval is not None else 0.0
+                                df.loc[mask, 'aeff_adjusted'] = val
+                                try:
+                                    df.loc[mask, 'weight'] = val
+                                except Exception:
+                                    pass
                             # also update combined vig factor column if base present
                             if 'aeff_base' in df.columns and cval is not None:
                                 try:
@@ -2407,13 +2316,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # Also write these reconciled per-position factors back into
                     # the vignette sheets' column B so the workbook reflects the
                     # exact factors used to compute `aeff_adjusted`.
-                    pairs = [
-                        (VIG_ROT_AZI_CANDIDATES, vig_vals_azi),
-                        (VIG_ROT_RAD_CANDIDATES, vig_vals_rad),
-                    ]
-                    for cand_tuple, final_map in pairs:
-                        sname = _find_sheet_in_wb(wb, cand_tuple)
-                        if sname is None:
+                    for sname, final_map in (('Vignetting rotazi', vig_vals_azi), ('Vignetting rotrad', vig_vals_rad)):
+                        if sname not in wb.sheetnames:
                             continue
                         ws_w = wb[sname]
                         # build row map from column A (like earlier)
@@ -2468,9 +2372,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     vig_azi_sheet = {}
                     vig_rad_sheet = {}
-                    a_name = _find_sheet_in_wb(wb, VIG_ROT_AZI_CANDIDATES)
-                    if a_name is not None:
-                        wsa = wb[a_name]
+                    if 'Vignetting rotazi' in wb.sheetnames:
+                        wsa = wb['Vignetting rotazi']
                         for rr in range(1, wsa.max_row + 1):
                             a = wsa.cell(row=rr, column=1).value
                             b = wsa.cell(row=rr, column=2).value
@@ -2483,9 +2386,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                     vig_azi_sheet[key] = float(b)
                                 except Exception:
                                     pass
-                    r_name = _find_sheet_in_wb(wb, VIG_ROT_RAD_CANDIDATES)
-                    if r_name is not None:
-                        wsr = wb[r_name]
+                    if 'Vignetting rotrad' in wb.sheetnames:
+                        wsr = wb['Vignetting rotrad']
                         for rr in range(1, wsr.max_row + 1):
                             a = wsr.cell(row=rr, column=1).value
                             b = wsr.cell(row=rr, column=2).value
@@ -2570,7 +2472,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             try:
                                 mask = df['MM #'] == mmv
                                 if 'aeff_adjusted' in df.columns:
-                                    df.loc[mask, 'aeff_adjusted'] = float(cval) if cval is not None else 0.0
+                                    val = float(cval) if cval is not None else 0.0
+                                    df.loc[mask, 'aeff_adjusted'] = val
+                                    try:
+                                        df.loc[mask, 'weight'] = val
+                                    except Exception:
+                                        pass
                                 if 'aeff_base' in df.columns and cval is not None:
                                     base_vals = df.loc[mask, 'aeff_base']
                                     for i_idx in base_vals.index:
@@ -2734,6 +2641,20 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
     # Remember workbook path for resolving custom PSF file stems during plotting.
     df.attrs['workbook_path'] = path
+
+    # Final enforcement: ensure `weight` exactly matches `aeff_adjusted`
+    try:
+        if 'aeff_adjusted' in df.columns:
+            df['weight'] = pd.to_numeric(df['aeff_adjusted'], errors='coerce').fillna(0.0).astype(float)
+            # If any rows required coercion/correction, log a debug line with counts.
+            try:
+                mismatches = int((pd.to_numeric(df['aeff_adjusted'], errors='coerce').fillna(0.0).astype(float) != df['weight']).sum())
+                if mismatches:
+                    print(f"DEBUG: weight/a_eff mismatch corrected for {mismatches} rows; total weight sum={float(df['weight'].sum()):.6g}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     return df  # Return the loaded DataFrame
 
@@ -7435,15 +7356,17 @@ if __name__ == '__main__':
         aggregated_rows = []
         agg_columns = None
 
+        skipped_cannot_read = 0
+        skipped_empty_prefix = 0
         for rid, crow in combos.iterrows():
             # Read configuration prefix from column B; skip rows where it's missing/NaN
             try:
                 raw_prefix = crow.iat[1]
             except Exception:
-                print(f"Skipping row {rid}: cannot read prefix in column B")
+                skipped_cannot_read += 1
                 continue
             if pd.isna(raw_prefix) or str(raw_prefix).strip() == '':
-                print(f"Skipping row {rid}: empty prefix in column B")
+                skipped_empty_prefix += 1
                 continue
             prefix = str(raw_prefix).strip()
             try:
@@ -7576,7 +7499,7 @@ if __name__ == '__main__':
                             cell.value = cell_val + defocus_um
 
                 # Vignetting energy in C2 for both rotrad and rotazi
-                for sname in (VIG_ROT_RAD_CANDIDATES + VIG_ROT_AZI_CANDIDATES):
+                for sname in ('Vignetting rotrad', 'Vignetting rotazi'):
                     if sname in wb.sheetnames:
                         ws_v = wb[sname]
                         try:
@@ -7694,7 +7617,7 @@ if __name__ == '__main__':
                                                 continue
                                             try:
                                                 v = ws_a.cell(row=check_r, column=cand_col).value
-                                                # if cell contains a formula, try to read cached value from data_only workbook
+                                                # if cell contains a formula, prefer cached value from data_only workbook
                                                 if isinstance(v, str) and v.startswith('='):
                                                     if ws_a_values is not None:
                                                         try:
@@ -7702,13 +7625,8 @@ if __name__ == '__main__':
                                                         except Exception:
                                                             pass
                                                     else:
-                                                        # attempt best-effort evaluator when no cached values available
-                                                        try:
-                                                            ev = _evaluate_vlookup_xlookup(v, wb, ws_a, check_r)
-                                                            if ev is not None:
-                                                                v = ev
-                                                        except Exception:
-                                                            pass
+                                                        # No cached numeric value available; do not attempt heuristic evaluation
+                                                        v = None
                                                 total_checked += 1
                                                 if v is None:
                                                     continue
@@ -7765,20 +7683,12 @@ if __name__ == '__main__':
                                             tmp = ws_a_values.cell(row=row_idx, column=chosen_src).value
                                             if tmp is not None:
                                                 src_val = tmp
+                                        else:
+                                            # Do not evaluate formulas heuristically; treat as missing
+                                            if isinstance(src_val, str) and src_val.startswith('='):
+                                                src_val = None
                                     except Exception:
-                                        pass
-                                    # If value is a formula and no cached data available,
-                                    # attempt best-effort evaluation for common patterns.
-                                    try:
-                                        if isinstance(src_val, str) and src_val.startswith('='):
-                                            try:
-                                                evaluated = _evaluate_vlookup_xlookup(src_val, wb, ws_a, row_idx)
-                                                if evaluated is not None:
-                                                    src_val = evaluated
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
+                                        src_val = None
                                     write_val = None
                                     try:
                                         if src_val is not None:
@@ -8393,10 +8303,30 @@ if __name__ == '__main__':
         except Exception:
             pass
 
+        # Summarize skipped rows (if any) and complete batch processing
+        try:
+            sc = int(skipped_cannot_read) if 'skipped_cannot_read' in locals() else 0
+            se = int(skipped_empty_prefix) if 'skipped_empty_prefix' in locals() else 0
+            if sc or se:
+                parts = []
+                if sc:
+                    parts.append(f"{sc} unreadable prefix rows")
+                if se:
+                    parts.append(f"{se} empty prefix rows")
+                print(f"Batch processing summary: skipped {', '.join(parts)} from combinations file")
+        except Exception:
+            pass
+
         # Completed batch processing
         sys.exit(0)
 
     df = load_gaussians_from_excel(args.file, args.sheet)
+    # Final top-level safety: ensure `weight` exactly matches `aeff_adjusted`.
+    try:
+        if 'aeff_adjusted' in df.columns:
+            df['weight'] = df['aeff_adjusted'].astype(float)
+    except Exception:
+        pass
     plot_title_suffix = ""
     df_optimized = None
     
