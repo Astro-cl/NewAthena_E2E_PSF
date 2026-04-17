@@ -612,14 +612,15 @@ class ExtendedGUI:
             messagebox.showerror('Error', str(e))
     
     def load_standard_distributions(self, df):
-        """Load standard MM_PSF distribution definitions from Excel table starting at K1."""
+        """Load standard MM_PSF distribution definitions from Excel table starting at M1."""
         self.standard_distributions = {}
         
         try:
-            # Find the table starting at K1 (column 10, row 0 in 0-indexed)
+            # Find the table starting at M1 (column 12, row 0 in 0-indexed)
+            # Columns I-J hold degraded sigma_rad/sigma_azi; K-L are reserved.
             # Expected format: Name | sigma_rad | sigma_azi | alpha_rad | alpha_azi
-            start_row = 0  # K1 is row 1, 0-indexed = 0
-            start_col = 10  # K is column 11, 0-indexed = 10
+            start_row = 0  # M1 is row 1, 0-indexed = 0
+            start_col = 12  # M is column 13, 0-indexed = 12
             
             # Check if there's a header row
             if df.shape[0] <= start_row or df.shape[1] <= start_col:

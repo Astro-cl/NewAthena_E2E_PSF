@@ -534,6 +534,105 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             df.at[idx, 'sigma_rad [arcsec]'] = sigma_map_rad[mmv]
                         if mmv in sigma_map_azi:
                             df.at[idx, 'sigma_azi [arcsec]'] = sigma_map_azi[mmv]
+
+                    # Fallback: when D/E cached values are missing (openpyxl
+                    # strips formula caches on save), resolve the VLOOKUP
+                    # manually using the preset table and MM configuration.
+                    # Formula: =VLOOKUP(VLOOKUP($A,'MM configuration'!A:H,3), M31:Q45, 4/5)
+                    # Inner: MM# -> Row# via 'MM configuration' col A->C
+                    # Outer: Row# -> sigma from preset table col 4(P)/5(Q)
+                    rad_check = pd.to_numeric(df.get('sigma_rad [arcsec]'), errors='coerce')
+                    azi_check = pd.to_numeric(df.get('sigma_azi [arcsec]'), errors='coerce')
+                    missing_de = rad_check.isna() | azi_check.isna() | (rad_check <= 0.0) | (azi_check <= 0.0)
+                    if missing_de.any():
+                        try:
+                            # Build MM# -> Row# from 'MM configuration'
+                            mm_to_rownum = {}
+                            cfg_sheet = None
+                            for s in wb_vals.sheetnames:
+                                if s.lower() == 'mm configuration':
+                                    cfg_sheet = s
+                                    break
+                            if cfg_sheet is not None:
+                                ws_cfg = wb_vals[cfg_sheet]
+                                for r in range(2, (ws_cfg.max_row or 0) + 1):
+                                    pos_v = ws_cfg.cell(row=r, column=1).value
+                                    row_v = ws_cfg.cell(row=r, column=3).value
+                                    if pos_v is not None and row_v is not None:
+                                        try:
+                                            mm_to_rownum[int(float(pos_v))] = int(float(row_v))
+                                        except Exception:
+                                            pass
+
+                            # Build Row# -> (sigma_rad, sigma_azi) from preset
+                            # table in MM_PSF.  Detect preset region dynamically:
+                            # scan column M (13) for a cell containing "Row" as
+                            # header, then read rows below until blank.
+                            rownum_to_sigma = {}
+                            ws_psf_f = None
+                            try:
+                                wb_formulas = _load_wb_vals.__self__ if hasattr(_load_wb_vals, '__self__') else None
+                            except Exception:
+                                wb_formulas = None
+                            # Use the non-data_only workbook to read preset table
+                            # (it has plain values, not formulas)
+                            try:
+                                from openpyxl import load_workbook as _load_wb_f
+                                wb_f_tmp = _load_wb_f(path, data_only=False)
+                                for s in wb_f_tmp.sheetnames:
+                                    if s.lower() == 'mm_psf':
+                                        ws_psf_f = wb_f_tmp[s]
+                                        break
+                            except Exception:
+                                ws_psf_f = None
+                            if ws_psf_f is not None:
+                                # Find the preset header row (cell in col M containing "Row")
+                                preset_header_row = None
+                                for r in range(2, (ws_psf_f.max_row or 0) + 1):
+                                    v = ws_psf_f.cell(row=r, column=13).value
+                                    if v is not None and str(v).strip().lower() == 'row':
+                                        preset_header_row = r
+                                        break
+                                if preset_header_row is not None:
+                                    for r in range(preset_header_row + 1, (ws_psf_f.max_row or 0) + 1):
+                                        rv = ws_psf_f.cell(row=r, column=13).value
+                                        if rv is None:
+                                            break
+                                        sig_r = ws_psf_f.cell(row=r, column=16).value  # P = sigma_rad
+                                        sig_a = ws_psf_f.cell(row=r, column=17).value  # Q = sigma_azi
+                                        if sig_r is not None and sig_a is not None:
+                                            try:
+                                                rownum_to_sigma[int(float(rv))] = (float(sig_r), float(sig_a))
+                                            except Exception:
+                                                pass
+                                try:
+                                    wb_f_tmp.close()
+                                except Exception:
+                                    pass
+
+                            # Apply resolved VLOOKUP values
+                            if mm_to_rownum and rownum_to_sigma:
+                                resolved_count = 0
+                                for idx in df.index:
+                                    try:
+                                        mmv = int(pd.to_numeric(df.at[idx, 'MM #'], errors='coerce'))
+                                    except Exception:
+                                        continue
+                                    cur_rad = pd.to_numeric(df.at[idx, 'sigma_rad [arcsec]'], errors='coerce')
+                                    cur_azi = pd.to_numeric(df.at[idx, 'sigma_azi [arcsec]'], errors='coerce')
+                                    if pd.notna(cur_rad) and cur_rad > 0 and pd.notna(cur_azi) and cur_azi > 0:
+                                        continue  # already has valid values
+                                    rn = mm_to_rownum.get(mmv)
+                                    if rn is not None and rn in rownum_to_sigma:
+                                        sr, sa = rownum_to_sigma[rn]
+                                        df.at[idx, 'sigma_rad [arcsec]'] = sr
+                                        df.at[idx, 'sigma_azi [arcsec]'] = sa
+                                        resolved_count += 1
+                                if resolved_count:
+                                    print(f"INFO: resolved D/E VLOOKUP for {resolved_count} MMs from preset table")
+                        except Exception:
+                            pass
+
                     # If after attempting to map D/E values any required sigma cells
                     # remain missing, fail loudly — the workbook must contain cached
                     # numeric values for D/E. Ask user to re-save the Excel file with
@@ -2692,6 +2791,38 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 except Exception as e:
                     print(f"HEW_DEG: error processing sheets: {e}")
 
+                # Persist base sigma values (D/E) as plain numbers so they
+                # survive openpyxl round-trips (openpyxl strips formula caches).
+                try:
+                    ws_psf_de = None
+                    for s in wb.sheetnames:
+                        if s.lower() == 'mm_psf':
+                            ws_psf_de = wb[s]
+                            break
+                    if ws_psf_de is not None and 'MM #' in df.columns and 'sigma_rad [arcsec]' in df.columns:
+                        mm_to_row_de = {}
+                        for r in range(2, (ws_psf_de.max_row or 0) + 1):
+                            v = ws_psf_de.cell(row=r, column=1).value
+                            if v is not None:
+                                try:
+                                    mm_to_row_de[int(float(v))] = r
+                                except Exception:
+                                    pass
+                        written_de = 0
+                        for idx_de, row_de in df.iterrows():
+                            mm_de = int(row_de['MM #'])
+                            r_de = mm_to_row_de.get(mm_de)
+                            if r_de is None:
+                                continue
+                            ws_psf_de.cell(row=r_de, column=4, value=float(row_de['sigma_rad [arcsec]']))
+                            ws_psf_de.cell(row=r_de, column=5, value=float(row_de['sigma_azi [arcsec]']))
+                            written_de += 1
+                        print(f"HEW_DEG: persisted base sigma to MM_PSF D/E for {written_de} MMs")
+                    else:
+                        print(f"HEW_DEG: skipped D/E write: ws_psf_de={ws_psf_de is not None}, MM#={'MM #' in df.columns}, sigma_rad={'sigma_rad [arcsec]' in df.columns}")
+                except Exception as e_de:
+                    print(f"HEW_DEG: error writing D/E: {e_de}")
+
                 tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
                 tmpf.close()
                 wb.save(tmpf.name)
@@ -2904,9 +3035,20 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     # Apply HEW degradation broadening to sigma_rad and sigma_azi.
     # new_sigma = sqrt(sigma^2 + (hew_deg / (2*sqrt(2*ln(2))))^2)
     # The factor 2*sqrt(2*ln(2)) converts FWHM (HEW) to Gaussian sigma.
+    # DataFrame sigma values are in metres (arcsec * arcsec_to_m at load);
+    # HEW degradation values are in arcsec, so convert to metres first.
     if hew_deg_per_pos_rad or hew_deg_per_pos_azi:
         _fwhm_to_sigma = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ~2.3548
-        arcsec_to_m = 12.0 * np.pi / 180.0 / 3600.0
+        _arcsec_to_m = 12.0 * np.pi / 180.0 / 3600.0
+        # Collect per-position sigma_extra in arcsec for "Extra PSF degradations"
+        _sigma_extra_rad_arcsec = {}  # pos -> arcsec
+        _sigma_extra_azi_arcsec = {}  # pos -> arcsec
+        for pos_int, hew_val in hew_deg_per_pos_rad.items():
+            if hew_val is not None and hew_val > 0:
+                _sigma_extra_rad_arcsec[pos_int] = hew_val / _fwhm_to_sigma
+        for pos_int, hew_val in hew_deg_per_pos_azi.items():
+            if hew_val is not None and hew_val > 0:
+                _sigma_extra_azi_arcsec[pos_int] = hew_val / _fwhm_to_sigma
         broadened_rad = 0
         broadened_azi = 0
         for idx, row in df.iterrows():
@@ -2917,19 +3059,117 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             # Radial broadening from rotrad HEW degradation
             hew_rad = hew_deg_per_pos_rad.get(pos)
             if hew_rad is not None and hew_rad > 0:
-                sigma_extra = (hew_rad / _fwhm_to_sigma) * arcsec_to_m
+                sigma_extra = (hew_rad / _fwhm_to_sigma) * _arcsec_to_m
                 old_sigma = float(df.at[idx, 'sigma_rad'])
                 df.at[idx, 'sigma_rad'] = np.sqrt(old_sigma**2 + sigma_extra**2)
                 broadened_rad += 1
             # Azimuthal broadening from rotazi HEW degradation
             hew_azi = hew_deg_per_pos_azi.get(pos)
             if hew_azi is not None and hew_azi > 0:
-                sigma_extra = (hew_azi / _fwhm_to_sigma) * arcsec_to_m
+                sigma_extra = (hew_azi / _fwhm_to_sigma) * _arcsec_to_m
                 old_sigma = float(df.at[idx, 'sigma_azi'])
                 df.at[idx, 'sigma_azi'] = np.sqrt(old_sigma**2 + sigma_extra**2)
                 broadened_azi += 1
         if broadened_rad or broadened_azi:
             print(f"HEW_DEG broadening: {broadened_rad} sigma_rad, {broadened_azi} sigma_azi")
+
+        # Write sigma_extra per position to "Extra PSF degradations" sheet
+        # and final degraded sigma per MM to MM_PSF columns I/J.
+        # DataFrame values are in metres; convert back to arcsec for sheets.
+        _m_to_arcsec = 1.0 / _arcsec_to_m
+        try:
+            from openpyxl import load_workbook as _load_wb_hew
+            wb_hew = _load_wb_hew(path)
+
+            # --- "Extra PSF degradations" sheet: sigma_extra per position ---
+            ws_extra_deg = None
+            for s in wb_hew.sheetnames:
+                if 'extra' in s.lower() and 'degradation' in s.lower():
+                    ws_extra_deg = wb_hew[s]
+                    break
+            if ws_extra_deg is not None:
+                # Build Position# -> row mapping from column A
+                pos_to_row_extra = {}
+                for r in range(2, (ws_extra_deg.max_row or 0) + 1):
+                    v = ws_extra_deg.cell(row=r, column=1).value
+                    if v is not None:
+                        try:
+                            pos_to_row_extra[int(float(v))] = r
+                        except Exception:
+                            pass
+                written_extra = 0
+                for pos_int, r_extra in pos_to_row_extra.items():
+                    se_rad = _sigma_extra_rad_arcsec.get(pos_int, 0.0)
+                    se_azi = _sigma_extra_azi_arcsec.get(pos_int, 0.0)
+                    ws_extra_deg.cell(row=r_extra, column=2, value=float(se_rad))
+                    ws_extra_deg.cell(row=r_extra, column=3, value=float(se_azi))
+                    written_extra += 1
+                print(f"HEW_DEG: wrote sigma_extra to 'Extra PSF degradations' for {written_extra} positions")
+
+            # --- MM_PSF columns I/J: final degraded sigma per MM ---
+            ws_hew_psf = None
+            for s in wb_hew.sheetnames:
+                if s.lower() == 'mm_psf':
+                    ws_hew_psf = wb_hew[s]
+                    break
+            if ws_hew_psf is not None:
+                # Write headers
+                ws_hew_psf.cell(row=1, column=9, value='sigma_rad_deg [arcsec]')
+                ws_hew_psf.cell(row=1, column=10, value='sigma_azi_deg [arcsec]')
+                # Build MM# -> row mapping from column A
+                mm_to_row_hew = {}
+                for r in range(2, (ws_hew_psf.max_row or 0) + 1):
+                    v = ws_hew_psf.cell(row=r, column=1).value
+                    if v is not None:
+                        try:
+                            mm_to_row_hew[int(float(v))] = r
+                        except Exception:
+                            pass
+                written_ij = 0
+                for idx_hew, row_hew in df.iterrows():
+                    mm_num_hew = int(row_hew['MM #'])
+                    r_hew = mm_to_row_hew.get(mm_num_hew)
+                    if r_hew is None:
+                        continue
+                    ws_hew_psf.cell(row=r_hew, column=9, value=float(row_hew['sigma_rad']) * _m_to_arcsec)
+                    ws_hew_psf.cell(row=r_hew, column=10, value=float(row_hew['sigma_azi']) * _m_to_arcsec)
+                    written_ij += 1
+                print(f"HEW_DEG: wrote degraded sigma to MM_PSF cols I/J for {written_ij} MMs")
+
+            # Persist base sigma (D/E) as plain numbers in this save cycle too
+            if ws_hew_psf is not None and 'sigma_rad [arcsec]' in df.columns:
+                written_de2 = 0
+                for idx_de2, row_de2 in df.iterrows():
+                    mm_de2 = int(row_de2['MM #'])
+                    r_de2 = mm_to_row_hew.get(mm_de2)
+                    if r_de2 is None:
+                        continue
+                    val_d = row_de2['sigma_rad [arcsec]']
+                    val_e = row_de2['sigma_azi [arcsec]']
+                    if pd.notna(val_d):
+                        ws_hew_psf.cell(row=r_de2, column=4, value=float(val_d))
+                    if pd.notna(val_e):
+                        ws_hew_psf.cell(row=r_de2, column=5, value=float(val_e))
+                    written_de2 += 1
+                print(f"HEW_DEG: persisted base sigma to MM_PSF D/E (wb_hew) for {written_de2} MMs")
+
+            # Save workbook if any sheet was modified
+            if ws_extra_deg is not None or ws_hew_psf is not None:
+                import tempfile as _tmpf_hew
+                tmpf_hew = _tmpf_hew.NamedTemporaryFile(delete=False, suffix='.xlsx')
+                tmpf_hew.close()
+                wb_hew.save(tmpf_hew.name)
+                os.replace(tmpf_hew.name, path)
+                if ws_extra_deg is not None:
+                    print(f"HEW_DEG: saved sigma_extra to 'Extra PSF degradations'")
+                if ws_hew_psf is not None:
+                    print(f"HEW_DEG: saved degraded sigma to cols I/J for {written_ij} MMs")
+            try:
+                wb_hew.close()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"HEW_DEG: error writing degraded sigma to MM_PSF: {e}")
 
     # Copy sigma values
     df['sigmax'] = df['sigma_rad']
