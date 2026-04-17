@@ -16,6 +16,7 @@ A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of
 | [DOCS_SUMMARY.md](DOCS_SUMMARY.md) | Summary of core modules and API reference |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Guidelines for contributors |
 | [RELEASE_NOTES.md](RELEASE_NOTES.md) | Release history and change log |
+| [DOCS_FEATURES_APRIL2026.md](DOCS_FEATURES_APRIL2026.md) | v8 feature documentation (off-axis, defocus, HEW degradation, batch) |
 | [SENSITIVITY_QUICKSTART.txt](SENSITIVITY_QUICKSTART.txt) | Sensitivity pipeline guide |
 
 ## Quick Links
@@ -146,6 +147,42 @@ The repository includes a small sensitivity-run template and driver under the `s
 - Repo hygiene: removed large generated distribution/figure files from the
    repository index and added `.gitignore` entries to avoid accidental
    commits of generated artifacts.
+
+### Release v8 (2026-04-17)
+
+Major feature release introducing off-axis pointing, defocus, HEW
+degradation, and batch combination processing.
+
+- **Off-axis pointing**: decomposed into X/Y rotation components
+   (`offaxis × 60 / √2` arcsec) and written to a dedicated "Extra PSF
+   shifts" sheet, cleanly separated from thermal perturbations. Applied
+   additively in `compute_total_rot_polar()`.
+- **Defocus**: written as `d_extra_z [µm]` to the same "Extra PSF shifts"
+   sheet (mm × 1e3 → µm); projected to centroid shifts via
+   `d_z × x_MM / (12 − z_MM)` where 12 m is the focal length.
+- **HEW degradation**: new "MM HEW degradation rotazi"/"rotrad" sheets
+   with lookup tables (Row #, angle, energy → HEW arcsec); per-position
+   interpolation; sigma broadening via
+   `σ_new = √(σ_base² + (HEW / 2√(2·ln2))²)`. Results written to
+   "Extra PSF degradations" (sigma_extra) and MM_PSF columns I/J
+   (degraded sigma).
+- **VLOOKUP resolver**: Python-based fallback resolves MM_PSF D/E formula
+   values when openpyxl strips cached values; persists base sigma as plain
+   numbers for round-trip stability.
+- **Batch combinations**: `--batch-combinations` CLI for automated
+   multi-configuration runs (off-axis, energy, defocus per row); per-config
+   ZIP packaging under `Exports/`; aggregated results workbook; headless
+   operation (no GUI blocking).
+- **A_eff improvements**: robust formula evaluation fallback; dynamic
+   `Aeff_loss` sums; prefer packaged workbook for aggregation.
+- **Performance**: Pearson4 skipped in coarse/quick mode; default mode set
+   to coarse; extra-fine mode removed.
+- **Preset table shift**: MM_PSF distribution table moved from column K to
+   column M to avoid conflict with new I/J degraded sigma columns.
+- Tests: 71 passed (20 new integration tests for off-axis, defocus, HEW
+   degradation, and batch combinations).
+- Documentation: [DOCS_FEATURES_APRIL2026.md](DOCS_FEATURES_APRIL2026.md)
+   provides extensive technical documentation of all v8 features.
 
 ### Release v7 (2026-04-14)
 

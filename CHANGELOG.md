@@ -24,6 +24,38 @@ This file summarizes notable changes across releases (human-readable).
 ## v2 — 2025-12-15
 - Initial public release: core PSF generation, placement, GUI and CLI.
 
+## v8 — 2026-04-17
+- **Off-axis pointing:** decomposed into d_extra_rotx / d_extra_roty
+	(arcmin × 60 / √2 → arcsec) and written to a dedicated "Extra PSF
+	shifts" sheet instead of overwriting Thermal columns.
+- **Defocus:** written as d_extra_z [µm] to the same "Extra PSF shifts"
+	sheet (mm × 1e3 → µm); loader converts µm → m and projects via
+	d_z × x_MM / (12 − z_MM) for centroid shifts.
+- **HEW degradation:** new "MM HEW degradation rotazi" / "rotrad" sheets
+	with H–K lookup tables; per-position interpolation of angle → HEW
+	degradation; sigma broadening via √(σ_base² + (HEW/2√(2 ln 2))²).
+- **Sigma writeback:** degraded sigma → MM_PSF I/J; sigma_extra → "Extra
+	PSF degradations" B/C; VLOOKUP-resolved base sigma persisted to D/E
+	as plain numbers.
+- **Batch combinations:** `--batch-combinations` CLI for multi-config
+	runs; ZIP packaging per config under Exports/Export_<input>_<ts>/;
+	aggregated results workbook; headless plt.show noop.
+- **Preset table shift:** MM_PSF preset distribution table moved from
+	column K to column M to avoid I/J conflict.
+- **A_eff improvements:** robust formula evaluation fallback, dynamic
+	Aeff_loss sums, prefer packaged workbook for aggregation.
+- **Performance:** Pearson4 skipped in coarse/quick mode; default mode
+	set to coarse; extra-fine mode removed.
+- Tests: 71 passed (20 new integration tests for off-axis, defocus, HEW
+	degradation, and batch combinations).
+
+## v7 — 2026-04-14
+- Repository reorganization: tests grouped by concern; utilities moved
+	to tools/; agent scaffolding removed.
+- Documentation and docstring pass across core modules.
+- Fitting formulas documented (pseudo-Voigt, Pearson4, King).
+- Tests: 42 passed after reorganization.
+
 ## v6 — 2026-04-01
 - GUI: improved combobox behaviour on macOS so clicking the field opens the
 	dropdown and allows immediate mouse selection (no Enter required).
