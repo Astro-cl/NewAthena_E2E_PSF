@@ -119,6 +119,41 @@ def parse_multisheet_csv(path_or_buffer):
             out[name] = df
 
     return out
+# Vignetting sheet name candidates (support legacy and new names)
+VIG_ROT_AZI_CANDIDATES = ('MM vignetting rotazi', 'Vignetting rotazi')
+VIG_ROT_RAD_CANDIDATES = ('MM vignetting rotrad', 'Vignetting rotrad')
+
+def _pick_sheet_for(path: str, candidates: tuple) -> str | None:
+    """Return the first candidate sheet name present in workbook at path.
+
+    If none found return None.
+    """
+    try:
+        from openpyxl import load_workbook as _lw
+        wb_tmp = _lw(path, read_only=True)
+        for s in candidates:
+            if s in wb_tmp.sheetnames:
+                try:
+                    wb_tmp.close()
+                except Exception:
+                    pass
+                return s
+        try:
+            wb_tmp.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None
+
+def _find_sheet_in_wb(wb, candidates: tuple) -> str | None:
+    try:
+        for s in candidates:
+            if s in wb.sheetnames:
+                return s
+    except Exception:
+        pass
+    return None
 def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
@@ -137,28 +172,94 @@ def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     except Exception:
         return mapping
 
-    # Expect first column = MM #, second column = A_eff base
+    ncols = raw.shape[1]
+    # Prefer B (index 1) and energy columns J..T (indices 9..19)
+    candidate_cols = [1]
+    candidate_cols.extend([i for i in range(9, min(20, ncols))])
+
+    # Pre-open workbook with data_only to resolve formula cells when needed
+    wb_data = None
+    ws_data = None
+    try:
+        from openpyxl import load_workbook as _lw
+        wb_data = _lw(path, data_only=True)
+        wsname = sheet if sheet is not None else 'A_eff'
+        if wsname in wb_data.sheetnames:
+            ws_data = wb_data[wsname]
+    except Exception:
+        wb_data = None
+        ws_data = None
+
     for rid in range(raw.shape[0]):
         try:
             mmv = raw.iat[rid, 0]
         except Exception:
             mmv = None
-        try:
-            aval = raw.iat[rid, 1]
-        except Exception:
-            aval = None
         if mmv is None:
             continue
         try:
             mm_int = int(float(mmv))
         except Exception:
+            # not a valid MM id row
             continue
-        try:
-            a_float = float(aval)
-        except Exception:
-            # Found a MM entry but its A_eff value is invalid -> raise
-            raise ValueError(f"Invalid A_eff value for MM #{mm_int}: {aval!r}")
-        mapping[mm_int] = a_float
+
+        aval = None
+        # Try preferred candidate columns first
+        for cidx in candidate_cols:
+            if cidx >= ncols:
+                continue
+            try:
+                v = raw.iat[rid, cidx]
+            except Exception:
+                v = None
+            if v is None:
+                continue
+            # If cell contains a formula string, try the evaluated value
+            if isinstance(v, str) and v.strip().startswith('=') and ws_data is not None:
+                try:
+                    ev = ws_data.cell(row=rid+1, column=cidx+1).value
+                    v = ev
+                except Exception:
+                    pass
+            try:
+                aval = float(v)
+                break
+            except Exception:
+                continue
+
+        # Fallback: scan all columns for any numeric value
+        if aval is None:
+            for cidx in range(1, ncols):
+                try:
+                    v = raw.iat[rid, cidx]
+                except Exception:
+                    v = None
+                if v is None:
+                    continue
+                if isinstance(v, str) and v.strip().startswith('=') and ws_data is not None:
+                    try:
+                        ev = ws_data.cell(row=rid+1, column=cidx+1).value
+                        v = ev
+                    except Exception:
+                        pass
+                try:
+                    aval = float(v)
+                    break
+                except Exception:
+                    continue
+
+        if aval is None:
+            # no numeric A_eff found for this MM -> treat as invalid input
+            wsname = sheet if sheet is not None else 'A_eff'
+            raise ValueError(f"Missing or invalid A_eff value for MM {mm_int} in sheet '{wsname}'")
+        mapping[mm_int] = float(aval)
+
+    try:
+        if wb_data is not None:
+            wb_data.close()
+    except Exception:
+        pass
+
     return mapping
 
 
@@ -972,7 +1073,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # - Header-heavy workbooks often still contain the intended A->B mapping
         #   in the first two columns; we try that as a final fallback.
         try:
-            vdf_azi = pd.read_excel(path, sheet_name='Vignetting rotazi', engine='openpyxl')
+            # Pick the appropriate rotazi sheet name (support new 'MM vignetting rotazi')
+            _sheet = _pick_sheet_for(path, VIG_ROT_AZI_CANDIDATES)
+            if _sheet is not None:
+                vdf_azi = pd.read_excel(path, sheet_name=_sheet, engine='openpyxl')
+            else:
+                vdf_azi = pd.DataFrame()
             xs_azi = ys_azi = None
             ys_by_pos_azi = {}
             azi_mode = 'none'
@@ -1016,18 +1122,25 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # C2 fallback with openpyxl
                     from openpyxl import load_workbook
                     wb_tmp = load_workbook(path, data_only=True)
-                    for sname in ['Vignetting rotazi', 'Vignetting rotrad']:
-                        if sname in wb_tmp.sheetnames:
-                            ws_tmp = wb_tmp[sname]
-                            candidate = ws_tmp.cell(row=2, column=3).value
-                            if candidate is not None and not pd.isna(candidate):
-                                try:
-                                    sel_energy = float(candidate)
-                                    sel_energy_from_vdf = True
-                                    print(f'VIG sel_energy from {sname} C2: {sel_energy}')
-                                    break
-                                except:
-                                    pass
+                    try:
+                        for sname in (VIG_ROT_AZI_CANDIDATES + VIG_ROT_RAD_CANDIDATES):
+                            if sname in wb_tmp.sheetnames:
+                                ws_tmp = wb_tmp[sname]
+                                candidate = ws_tmp.cell(row=2, column=3).value
+                                if candidate is not None and not pd.isna(candidate):
+                                    try:
+                                        sel_energy = float(candidate)
+                                        sel_energy_from_vdf = True
+                                        print(f'VIG sel_energy from {sname} C2: {sel_energy}')
+                                        break
+                                    except:
+                                        pass
+                        
+                    finally:
+                        try:
+                            wb_tmp.close()
+                        except Exception:
+                            pass
             except Exception as e:
                 print(f'VIG sel_energy scan error: {e}')
             
@@ -1182,7 +1295,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # back to the single global curve. If neither is present we leave
         # the weight unchanged for that component.
         try:
-            vdf_rad = pd.read_excel(path, sheet_name='Vignetting rotrad', engine='openpyxl')
+            _sheet = _pick_sheet_for(path, VIG_ROT_RAD_CANDIDATES)
+            if _sheet is not None:
+                vdf_rad = pd.read_excel(path, sheet_name=_sheet, engine='openpyxl')
+            else:
+                vdf_rad = pd.DataFrame()
             xs_rad = ys_rad = None
             ys_by_pos_rad = {}
             rad_mode = 'none'
@@ -1297,11 +1414,18 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     from openpyxl import load_workbook
                     wb_tmp2 = load_workbook(path, data_only=True)
-                    if 'Vignetting rotrad' in wb_tmp2.sheetnames:
-                        ws_tmp2 = wb_tmp2['Vignetting rotrad']
-                        candidate = ws_tmp2.cell(row=2, column=3).value
-                    else:
-                        candidate = None
+                    try:
+                        sname2 = _find_sheet_in_wb(wb_tmp2, VIG_ROT_RAD_CANDIDATES)
+                        if sname2 is not None:
+                            ws_tmp2 = wb_tmp2[sname2]
+                            candidate = ws_tmp2.cell(row=2, column=3).value
+                        else:
+                            candidate = None
+                    finally:
+                        try:
+                            wb_tmp2.close()
+                        except Exception:
+                            pass
                 except Exception:
                     candidate = None
                 if candidate is not None and not (isinstance(candidate, float) and np.isnan(candidate)):
@@ -1757,11 +1881,13 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             if not final_vig_vals_azi and 'vig_vals_azi' in locals():
                 final_vig_vals_azi = dict(locals().get('vig_vals_azi', {}))
 
-            # VIGNETTE SHEETS: write col B and C1 only
-            for sname, vig_map in (
-                ('Vignetting rotazi', final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
-                ('Vignetting rotrad', final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
-            ):
+            # VIGNETTE SHEETS: write col B and C1 only (support new MM vignetting names)
+            pairs = [
+                (VIG_ROT_AZI_CANDIDATES, final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
+                (VIG_ROT_RAD_CANDIDATES, final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
+            ]
+            for cand_tuple, vig_map in pairs:
+                sname = _find_sheet_in_wb(wb, cand_tuple) or cand_tuple[0]
                 # Debug print of sample vig_map contents when requested
                 try:
                     if os.environ.get('VIG_DEBUG'):
@@ -1955,8 +2081,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 # Read vignette factors from workbook (column B of vignette sheets)
                 vig_rad_sheet = {}
                 vig_azi_sheet = {}
-                if 'Vignetting rotrad' in wb.sheetnames:
-                    wsr = wb['Vignetting rotrad']
+                r_name = _find_sheet_in_wb(wb, VIG_ROT_RAD_CANDIDATES)
+                if r_name is not None:
+                    wsr = wb[r_name]
                     for rr in range(1, wsr.max_row + 1):
                         a = wsr.cell(row=rr, column=1).value
                         b = wsr.cell(row=rr, column=2).value
@@ -1969,8 +2096,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 vig_rad_sheet[key] = float(b)
                             except Exception:
                                 pass
-                if 'Vignetting rotazi' in wb.sheetnames:
-                    wsa = wb['Vignetting rotazi']
+                a_name = _find_sheet_in_wb(wb, VIG_ROT_AZI_CANDIDATES)
+                if a_name is not None:
+                    wsa = wb[a_name]
                     for rr in range(1, wsa.max_row + 1):
                         a = wsa.cell(row=rr, column=1).value
                         b = wsa.cell(row=rr, column=2).value
@@ -2279,8 +2407,13 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # Also write these reconciled per-position factors back into
                     # the vignette sheets' column B so the workbook reflects the
                     # exact factors used to compute `aeff_adjusted`.
-                    for sname, final_map in (('Vignetting rotazi', vig_vals_azi), ('Vignetting rotrad', vig_vals_rad)):
-                        if sname not in wb.sheetnames:
+                    pairs = [
+                        (VIG_ROT_AZI_CANDIDATES, vig_vals_azi),
+                        (VIG_ROT_RAD_CANDIDATES, vig_vals_rad),
+                    ]
+                    for cand_tuple, final_map in pairs:
+                        sname = _find_sheet_in_wb(wb, cand_tuple)
+                        if sname is None:
                             continue
                         ws_w = wb[sname]
                         # build row map from column A (like earlier)
@@ -2335,8 +2468,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     vig_azi_sheet = {}
                     vig_rad_sheet = {}
-                    if 'Vignetting rotazi' in wb.sheetnames:
-                        wsa = wb['Vignetting rotazi']
+                    a_name = _find_sheet_in_wb(wb, VIG_ROT_AZI_CANDIDATES)
+                    if a_name is not None:
+                        wsa = wb[a_name]
                         for rr in range(1, wsa.max_row + 1):
                             a = wsa.cell(row=rr, column=1).value
                             b = wsa.cell(row=rr, column=2).value
@@ -2349,8 +2483,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                     vig_azi_sheet[key] = float(b)
                                 except Exception:
                                     pass
-                    if 'Vignetting rotrad' in wb.sheetnames:
-                        wsr = wb['Vignetting rotrad']
+                    r_name = _find_sheet_in_wb(wb, VIG_ROT_RAD_CANDIDATES)
+                    if r_name is not None:
+                        wsr = wb[r_name]
                         for rr in range(1, wsr.max_row + 1):
                             a = wsr.cell(row=rr, column=1).value
                             b = wsr.cell(row=rr, column=2).value
@@ -7441,7 +7576,7 @@ if __name__ == '__main__':
                             cell.value = cell_val + defocus_um
 
                 # Vignetting energy in C2 for both rotrad and rotazi
-                for sname in ('Vignetting rotrad', 'Vignetting rotazi'):
+                for sname in (VIG_ROT_RAD_CANDIDATES + VIG_ROT_AZI_CANDIDATES):
                     if sname in wb.sheetnames:
                         ws_v = wb[sname]
                         try:

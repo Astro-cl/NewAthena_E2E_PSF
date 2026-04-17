@@ -30,7 +30,19 @@ import traceback
 import ast
 from pathlib import Path
 import logging
- 
+# Candidate vignette sheet names (support both legacy and new workbook layouts)
+VIG_ROT_AZI_CANDIDATES = ('MM vignetting rotazi', 'Vignetting rotazi')
+VIG_ROT_RAD_CANDIDATES = ('MM vignetting rotrad', 'Vignetting rotrad')
+
+def _pick_sheet_in_wb(wb, candidates):
+    try:
+        for s in candidates:
+            if s in wb.sheetnames:
+                return s
+    except Exception:
+        pass
+    return None
+
 # Minimal DATA_TYPES structure required by the GUI module. This mirrors the
 # structure expected by the rest of the code and provides reasonable defaults
 # for non-interactive tests. The full definitions are normally loaded from
@@ -1799,7 +1811,11 @@ class ExtendedGUI:
                     import pandas as _pd
                     try:
                         xls = _pd.ExcelFile(self.excel_path, engine='openpyxl')
-                        sheets_to_check = [s for s in ['Vignetting rotazi', 'Vignetting rotrad'] if s in xls.sheet_names]
+                        # collect any present vignette sheets from candidate lists
+                        sheets_to_check = []
+                        for name in list(VIG_ROT_AZI_CANDIDATES) + list(VIG_ROT_RAD_CANDIDATES):
+                            if name in xls.sheet_names and name not in sheets_to_check:
+                                sheets_to_check.append(name)
                         energy_set = set()
                         for s in sheets_to_check:
                             try:
@@ -4989,8 +5005,9 @@ class ExtendedGUI:
                 # Fallback: if still None, try to read from existing vignetting C2
                 if sel_energy is None:
                     try:
-                        if 'Vignetting rotazi' in wb.sheetnames:
-                            vws = wb['Vignetting rotazi']
+                        name = _pick_sheet_in_wb(wb, VIG_ROT_AZI_CANDIDATES)
+                        if name:
+                            vws = wb[name]
                             vval = vws.cell(row=2, column=3).value
                             if vval is not None:
                                 sel_energy = float(vval)
@@ -4998,8 +5015,9 @@ class ExtendedGUI:
                         sel_energy = None
                 if sel_energy is None:
                     try:
-                        if 'Vignetting rotrad' in wb.sheetnames:
-                            vws = wb['Vignetting rotrad']
+                        name = _pick_sheet_in_wb(wb, VIG_ROT_RAD_CANDIDATES)
+                        if name:
+                            vws = wb[name]
                             vval = vws.cell(row=2, column=3).value
                             if vval is not None:
                                 sel_energy = float(vval)
@@ -5009,14 +5027,16 @@ class ExtendedGUI:
                 # Write selected energy into C2 of both vignetting sheets if present
                 if sel_energy is not None:
                     try:
-                        if 'Vignetting rotazi' in wb.sheetnames:
-                            vws = wb['Vignetting rotazi']
+                        name = _pick_sheet_in_wb(wb, VIG_ROT_AZI_CANDIDATES)
+                        if name:
+                            vws = wb[name]
                             vws.cell(row=2, column=3, value=float(sel_energy))
                     except Exception:
                         pass
                     try:
-                        if 'Vignetting rotrad' in wb.sheetnames:
-                            vws = wb['Vignetting rotrad']
+                        name = _pick_sheet_in_wb(wb, VIG_ROT_RAD_CANDIDATES)
+                        if name:
+                            vws = wb[name]
                             vws.cell(row=2, column=3, value=float(sel_energy))
                     except Exception:
                         pass
