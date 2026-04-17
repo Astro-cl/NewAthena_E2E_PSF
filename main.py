@@ -124,6 +124,10 @@ def parse_multisheet_csv(path_or_buffer):
 VIG_ROT_AZI_CANDIDATES = ('MM vignetting rotazi', 'Vignetting rotazi')
 VIG_ROT_RAD_CANDIDATES = ('MM vignetting rotrad', 'Vignetting rotrad')
 
+# HEW degradation sheet name candidates
+HEW_DEG_ROT_AZI_CANDIDATES = ('MM HEW degradation rotazi',)
+HEW_DEG_ROT_RAD_CANDIDATES = ('MM HEW degradation rotrad',)
+
 def _find_vig_sheet(container, candidates):
     """Return first candidate sheet name present in *container*, or None.
 
@@ -1010,6 +1014,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     }
         except Exception:
             pass
+
+    # Per-position HEW degradation values (arcsec), populated during
+    # HEW degradation sheet processing below; used later to broaden sigma.
+    hew_deg_per_pos_azi: dict[int, float] = {}
+    hew_deg_per_pos_rad: dict[int, float] = {}
 
     # --- Apply polar vignetting (rotazi + rotrad) after A_eff/weight initialization ---
     try:
@@ -2528,6 +2537,161 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 except Exception:
                     pass
 
+                # --- HEW degradation sheets: compute per-position ---
+                # Logic mirrors vignetting rotazi/rotrad: for each position
+                # use its cfg_row, the selected energy, and local rotation
+                # angle to interpolate from the H-K lookup table, then write
+                # the result into column B.
+                try:
+                    # Build pos->cfg_row mapping (may not exist from vignetting)
+                    _hew_local_pos_to_cfg = {}
+                    if 'local_pos_to_cfg' in locals() and local_pos_to_cfg:
+                        _hew_local_pos_to_cfg = local_pos_to_cfg
+                    elif 'pos_to_cfg_row' in locals() and pos_to_cfg_row:
+                        _hew_local_pos_to_cfg = pos_to_cfg_row
+                    if not _hew_local_pos_to_cfg:
+                        try:
+                            _hew_mmcfg = pd.read_excel(path, sheet_name='MM configuration', engine='openpyxl')
+                            if 'Position #' in _hew_mmcfg.columns:
+                                _hew_tmp = _hew_mmcfg.copy()
+                                _hew_tmp['Position #'] = pd.to_numeric(_hew_tmp['Position #'], errors='coerce')
+                                _hew_tmp = _hew_tmp[_hew_tmp['Position #'].notna()]
+                                for _hew_oi, (_, _hew_rr) in enumerate(_hew_tmp.iterrows()):
+                                    _hew_pval = int(_hew_rr['Position #'])
+                                    _hew_rownum = _hew_rr.get('Row #') if 'Row #' in _hew_mmcfg.columns else None
+                                    if _hew_rownum is not None and not pd.isna(_hew_rownum):
+                                        _hew_local_pos_to_cfg[_hew_pval] = int(float(_hew_rownum))
+                                    else:
+                                        _hew_local_pos_to_cfg[_hew_pval] = _hew_oi + 1
+                        except Exception:
+                            pass
+                    _hew_sel_energy = locals().get('sheet_energy') or locals().get('sel_energy') or 1.0
+
+                    for hew_candidates, rot_map, angle_label in (
+                        (HEW_DEG_ROT_AZI_CANDIDATES, rot_azi_map, 'rotazi'),
+                        (HEW_DEG_ROT_RAD_CANDIDATES, rot_rad_map, 'rotrad'),
+                    ):
+                        hew_sname = _find_vig_sheet(wb, hew_candidates)
+                        if hew_sname is None or hew_sname not in wb.sheetnames:
+                            continue
+                        ws_hew = wb[hew_sname]
+
+                        # Check C2 for sheet-specific selected energy
+                        hew_sheet_energy = _hew_sel_energy
+                        try:
+                            c2_val = ws_hew.cell(row=2, column=3).value
+                            if c2_val is not None and not (isinstance(c2_val, float) and np.isnan(c2_val)):
+                                hew_sheet_energy = float(c2_val)
+                        except Exception:
+                            pass
+
+                        # Build per-(cfg_row, energy) series from cols H-K
+                        # using a data-only workbook to resolve cached values
+                        hew_series = {}
+                        try:
+                            from openpyxl import load_workbook as _load_wb_hew
+                            wb_hew_vals = _load_wb_hew(path, data_only=True)
+                            ws_hew_vals = wb_hew_vals[hew_sname]
+                            for rr in range(2, (ws_hew_vals.max_row or 0) + 1):
+                                try:
+                                    cfg_row_val = ws_hew_vals.cell(row=rr, column=8).value  # H
+                                    if cfg_row_val is None:
+                                        continue
+                                    cfg_row_val = int(float(cfg_row_val))
+                                    angle_arcmin = ws_hew_vals.cell(row=rr, column=9).value  # I
+                                    energy_val_hew = ws_hew_vals.cell(row=rr, column=10).value  # J
+                                    hew_val = ws_hew_vals.cell(row=rr, column=11).value  # K
+                                    if angle_arcmin is None or hew_val is None:
+                                        continue
+                                    xval = float(angle_arcmin) * 60.0  # arcmin -> arcsec
+                                    yval = float(hew_val)
+                                    # Key by (cfg_row, energy_float)
+                                    try:
+                                        key = (cfg_row_val, float(energy_val_hew))
+                                    except Exception:
+                                        continue
+                                    if key not in hew_series:
+                                        hew_series[key] = {'xs': [], 'ys': []}
+                                    hew_series[key]['xs'].append(xval)
+                                    hew_series[key]['ys'].append(yval)
+                                except Exception:
+                                    continue
+                            try:
+                                wb_hew_vals.close()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                        if not hew_series:
+                            continue
+
+                        # Sort each series by x
+                        for k in list(hew_series.keys()):
+                            v = hew_series[k]
+                            order = np.argsort(v['xs'])
+                            hew_series[k] = (np.array(v['xs'], dtype=float)[order],
+                                             np.array(v['ys'], dtype=float)[order])
+
+                        print(f"HEW_DEG {angle_label}: loaded {len(hew_series)} series, sel_energy={hew_sheet_energy}")
+
+                        # Build pos -> row mapping from column A
+                        hew_pos_row = {}
+                        for rr in range(2, (ws_hew.max_row or 0) + 1):
+                            try:
+                                av = ws_hew.cell(row=rr, column=1).value
+                                if av is None:
+                                    continue
+                                hew_pos_row[int(float(av))] = rr
+                            except Exception:
+                                continue
+
+                        # For each position, interpolate and write to column B
+                        hew_written = 0
+                        for pos_int, row_idx in hew_pos_row.items():
+                            try:
+                                cfg_row = _hew_local_pos_to_cfg.get(pos_int)
+                                if cfg_row is None:
+                                    continue
+                                rot_val = abs(float(rot_map.get(pos_int, 0.0)))
+                                # Find the series for (cfg_row, sel_energy)
+                                series = None
+                                try:
+                                    series = hew_series.get((cfg_row, float(hew_sheet_energy)))
+                                except Exception:
+                                    pass
+                                # Fallback: closest energy for this cfg_row
+                                if series is None:
+                                    best_key = None
+                                    best_dist = float('inf')
+                                    for k in hew_series:
+                                        if k[0] == cfg_row:
+                                            try:
+                                                d = abs(float(k[1]) - float(hew_sheet_energy))
+                                                if d < best_dist:
+                                                    best_dist = d
+                                                    best_key = k
+                                            except Exception:
+                                                continue
+                                    if best_key is not None:
+                                        series = hew_series[best_key]
+                                if series is None:
+                                    continue
+                                xs_h, ys_h = series
+                                hew_deg_val = float(np.interp(rot_val, xs_h, ys_h))
+                                ws_hew.cell(row=row_idx, column=2, value=hew_deg_val)
+                                # Store for later sigma broadening
+                                if angle_label == 'rotazi':
+                                    hew_deg_per_pos_azi[pos_int] = hew_deg_val
+                                else:
+                                    hew_deg_per_pos_rad[pos_int] = hew_deg_val
+                                hew_written += 1
+                            except Exception:
+                                continue
+                        print(f"HEW_DEG {angle_label}: wrote {hew_written}/{len(hew_pos_row)} positions")
+                except Exception as e:
+                    print(f"HEW_DEG: error processing sheets: {e}")
+
                 tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx')
                 tmpf.close()
                 wb.save(tmpf.name)
@@ -2737,6 +2901,36 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         df.at[idx, 'mux'] = new_mux
         df.at[idx, 'muy'] = new_muy
     
+    # Apply HEW degradation broadening to sigma_rad and sigma_azi.
+    # new_sigma = sqrt(sigma^2 + (hew_deg / (2*sqrt(2*ln(2))))^2)
+    # The factor 2*sqrt(2*ln(2)) converts FWHM (HEW) to Gaussian sigma.
+    if hew_deg_per_pos_rad or hew_deg_per_pos_azi:
+        _fwhm_to_sigma = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ~2.3548
+        arcsec_to_m = 12.0 * np.pi / 180.0 / 3600.0
+        broadened_rad = 0
+        broadened_azi = 0
+        for idx, row in df.iterrows():
+            mm_num = row['MM #']
+            pos = mm_to_pos.get(int(mm_num))
+            if pos is None:
+                continue
+            # Radial broadening from rotrad HEW degradation
+            hew_rad = hew_deg_per_pos_rad.get(pos)
+            if hew_rad is not None and hew_rad > 0:
+                sigma_extra = (hew_rad / _fwhm_to_sigma) * arcsec_to_m
+                old_sigma = float(df.at[idx, 'sigma_rad'])
+                df.at[idx, 'sigma_rad'] = np.sqrt(old_sigma**2 + sigma_extra**2)
+                broadened_rad += 1
+            # Azimuthal broadening from rotazi HEW degradation
+            hew_azi = hew_deg_per_pos_azi.get(pos)
+            if hew_azi is not None and hew_azi > 0:
+                sigma_extra = (hew_azi / _fwhm_to_sigma) * arcsec_to_m
+                old_sigma = float(df.at[idx, 'sigma_azi'])
+                df.at[idx, 'sigma_azi'] = np.sqrt(old_sigma**2 + sigma_extra**2)
+                broadened_azi += 1
+        if broadened_rad or broadened_azi:
+            print(f"HEW_DEG broadening: {broadened_rad} sigma_rad, {broadened_azi} sigma_azi")
+
     # Copy sigma values
     df['sigmax'] = df['sigma_rad']
     df['sigmay'] = df['sigma_azi']
@@ -7616,6 +7810,15 @@ if __name__ == '__main__':
                         ws_v = wb[sname]
                         try:
                             ws_v.cell(row=2, column=3).value = float(energy_val)
+                        except Exception:
+                            pass
+
+                # HEW degradation energy in C2 for both rotazi and rotrad
+                for sname in list(HEW_DEG_ROT_AZI_CANDIDATES) + list(HEW_DEG_ROT_RAD_CANDIDATES):
+                    if sname in wb.sheetnames:
+                        ws_h = wb[sname]
+                        try:
+                            ws_h.cell(row=2, column=3).value = float(energy_val)
                         except Exception:
                             pass
 
