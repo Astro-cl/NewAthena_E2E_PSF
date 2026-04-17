@@ -119,16 +119,48 @@ def parse_multisheet_csv(path_or_buffer):
             out[name] = df
 
     return out
-def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
+
+# Vignetting sheet name candidates (support both new and legacy names)
+VIG_ROT_AZI_CANDIDATES = ('MM vignetting rotazi', 'Vignetting rotazi')
+VIG_ROT_RAD_CANDIDATES = ('MM vignetting rotrad', 'Vignetting rotrad')
+
+def _find_vig_sheet(container, candidates):
+    """Return first candidate sheet name present in *container*, or None.
+
+    *container* may be an openpyxl Workbook (has `.sheetnames`) or any
+    iterable of sheet name strings.
+    """
+    names = container.sheetnames if hasattr(container, 'sheetnames') else container
+    for c in candidates:
+        if c in names:
+            return c
+    return None
+
+def _read_excel_vig(path, candidates, **kwargs):
+    """Try ``pd.read_excel`` with each candidate sheet name in order.
+
+    Returns the DataFrame on success, or None if no candidate matched.
+    """
+    for name in candidates:
+        try:
+            return pd.read_excel(path, sheet_name=name, **kwargs)
+        except Exception:
+            continue
+    return None
+
+def load_aeff_weight_map(path: str, sheet: str | None = None, energy_col: int | None = None) -> dict:
     """Load A_eff mapping (MM # -> base A_eff) from `A_eff` sheet.
 
     Reads the `A_eff` sheet (headerless) and returns a dict mapping integer
-    MM -> float(A_eff_base). If the sheet is missing or no valid rows are
-    found an empty dict is returned.
+    MM -> float(A_eff_base).  When *energy_col* is given (0-based column
+    index, e.g. 9 for column J, up to 19 for column T) the value is read
+    from that column instead of column B (index 1).  If the sheet is
+    missing or no valid rows are found an empty dict is returned.
     """
     mapping = {}
+    val_col = energy_col if energy_col is not None else 1
     try:
-            kwargs = {"engine": "openpyxl", "header": None, "dtype": str}
+        kwargs = {"engine": "openpyxl", "header": None, "dtype": str}
         if sheet is not None:
             kwargs["sheet_name"] = sheet
         else:
@@ -137,14 +169,14 @@ def load_aeff_weight_map(path: str, sheet: str | None = None) -> dict:
     except Exception:
         return mapping
 
-    # Expect first column = MM #, second column = A_eff base
+    # Column A = MM #; value column = B (default) or energy_col (J..T)
     for rid in range(raw.shape[0]):
         try:
             mmv = raw.iat[rid, 0]
         except Exception:
             mmv = None
         try:
-            aval = raw.iat[rid, 1]
+            aval = raw.iat[rid, val_col]
         except Exception:
             aval = None
         if mmv is None:
@@ -171,7 +203,7 @@ def load_aeff_weight_map_with_name(path: str) -> tuple[dict, str | None]:
     mapping = load_aeff_weight_map(path)
     col_name = None
     try:
-            raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None, dtype=str)
+        raw = pd.read_excel(path, sheet_name='A_eff', engine='openpyxl', header=None, dtype=str)
         # scan first few rows/cols for a string containing 'keV'
         import re
         for r in range(min(6, raw.shape[0])):
@@ -486,6 +518,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 sigma_map_rad[mm_int] = eval_d
                             if eval_e is not None:
                                 sigma_map_azi[mm_int] = eval_e
+                        except Exception:
+                            continue
                     # Apply maps to the DataFrame for matching MM # rows
                     for idx in df.index:
                         try:
@@ -733,6 +767,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     alignment_by_pos: dict[int, dict] = {}
     gravity_by_pos: dict[int, dict] = {}
     thermal_by_pos: dict[int, dict] = {}
+    extra_by_pos: dict[int, dict] = {}
     mm_config_map = {}
     mm_to_pos: dict[int, int] = {}
     
@@ -955,11 +990,32 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             rotx_values = [v.get('d_therm_rotx', 0) for v in thermal_by_pos.values()]
             print(f"VIG DEBUG: d_therm_rotx values: min={min(rotx_values):.1f}, max={max(rotx_values):.1f}, all_same={len(set(rotx_values)) == 1}")
 
+    # Load extra PSF shifts (off-axis pointing, etc.)
+    if 'MM #' in df.columns:
+        try:
+            extra_df = pd.read_excel(path, sheet_name='Extra PSF shifts', engine='openpyxl')
+            if 'Position #' in extra_df.columns:
+                for c in ['d_extra_rotx [arcsec]', 'd_extra_roty [arcsec]', 'd_extra_z [µm]']:
+                    if c in extra_df.columns:
+                        extra_df[c] = pd.to_numeric(extra_df[c], errors='coerce').fillna(0.0)
+                for _, row in extra_df.iterrows():
+                    pos_val = row.get('Position #')
+                    if pd.isna(pos_val):
+                        continue
+                    pos = int(pos_val)
+                    extra_by_pos[pos] = {
+                        'd_extra_rotx': float(row.get('d_extra_rotx [arcsec]', 0.0)),
+                        'd_extra_roty': float(row.get('d_extra_roty [arcsec]', 0.0)),
+                        'd_extra_z': float(row.get('d_extra_z [µm]', 0.0)) * 1e-6,  # µm -> m
+                    }
+        except Exception:
+            pass
+
     # --- Apply polar vignetting (rotazi + rotrad) after A_eff/weight initialization ---
     try:
         # compute rotation projections using the populated mm_to_pos and *_by_pos
         try:
-            _, _, rot_rad_map, rot_azi_map = compute_total_rot_polar(mm_to_pos, mm_config_map, alignment_by_pos, gravity_by_pos, thermal_by_pos)
+            _, _, rot_rad_map, rot_azi_map = compute_total_rot_polar(mm_to_pos, mm_config_map, alignment_by_pos, gravity_by_pos, thermal_by_pos, extra_by_pos)
             print(f"VIG DEBUG: rot_azi_map has {len(rot_azi_map)} entries")
             if rot_azi_map:
                 sample = dict(list(rot_azi_map.items())[:3])
@@ -983,7 +1039,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # - Header-heavy workbooks often still contain the intended A->B mapping
         #   in the first two columns; we try that as a final fallback.
         try:
-            vdf_azi = pd.read_excel(path, sheet_name='Vignetting rotazi', engine='openpyxl')
+            vdf_azi = _read_excel_vig(path, VIG_ROT_AZI_CANDIDATES, engine='openpyxl')
+            if vdf_azi is None:
+                raise ValueError('No vignetting rotazi sheet found')
             xs_azi = ys_azi = None
             ys_by_pos_azi = {}
             azi_mode = 'none'
@@ -1027,7 +1085,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # C2 fallback with openpyxl
                     from openpyxl import load_workbook
                     wb_tmp = load_workbook(path, data_only=True)
-                    for sname in ['Vignetting rotazi', 'Vignetting rotrad']:
+                    for sname in list(VIG_ROT_AZI_CANDIDATES) + list(VIG_ROT_RAD_CANDIDATES):
                         if sname in wb_tmp.sheetnames:
                             ws_tmp = wb_tmp[sname]
                             candidate = ws_tmp.cell(row=2, column=3).value
@@ -1193,7 +1251,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # back to the single global curve. If neither is present we leave
         # the weight unchanged for that component.
         try:
-            vdf_rad = pd.read_excel(path, sheet_name='Vignetting rotrad', engine='openpyxl')
+            vdf_rad = _read_excel_vig(path, VIG_ROT_RAD_CANDIDATES, engine='openpyxl')
+            if vdf_rad is None:
+                raise ValueError('No vignetting rotrad sheet found')
             xs_rad = ys_rad = None
             ys_by_pos_rad = {}
             rad_mode = 'none'
@@ -1308,8 +1368,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     from openpyxl import load_workbook
                     wb_tmp2 = load_workbook(path, data_only=True)
-                    if 'Vignetting rotrad' in wb_tmp2.sheetnames:
-                        ws_tmp2 = wb_tmp2['Vignetting rotrad']
+                    _vig_rad_name = _find_vig_sheet(wb_tmp2, VIG_ROT_RAD_CANDIDATES)
+                    if _vig_rad_name:
+                        ws_tmp2 = wb_tmp2[_vig_rad_name]
                         candidate = ws_tmp2.cell(row=2, column=3).value
                     else:
                         candidate = None
@@ -1740,10 +1801,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         continue
                     fr = r.get('aeff_vig_factor_rad') if 'aeff_vig_factor_rad' in r.index else None
                     fa = r.get('aeff_vig_factor_azi') if 'aeff_vig_factor_azi' in r.index else None
-                    combined = r.get('aeff_vig_factor') if 'aeff_vig_factor' in r.index else None
+                    combined = r.get('aeff_vig_factor') if 'aeff_vig_factor' in r.index else 1.0
                     try:
                         if fr is None or (isinstance(fr, float) and (fr != fr)):
-                            if fa is not None and not (isinstance(fa, float) and (fa != fa)) and combined is not None:
+                            if fa is not None and not (isinstance(fa, float) and (fa != fa)):
                                 fr = float(combined) / float(fa) if float(fa) != 0 else 1.0
                             else:
                                 fr = 1.0
@@ -1751,12 +1812,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         fr = 1.0
                     try:
                         if fa is None or (isinstance(fa, float) and (fa != fa)):
-                            if fr is not None and combined is not None and not (isinstance(fr, float) and (fr != fr)):
-                                fa = float(combined) / float(fr) if float(fr) != 0 else float(combined or 1.0)
+                            if fr is not None and not (isinstance(fr, float) and (fr != fr)):
+                                fa = float(combined) / float(fr) if float(fr) != 0 else float(combined)
                             else:
-                                fa = float(combined or 1.0)
+                                fa = float(combined)
                     except Exception:
-                        fa = float(combined or 1.0)
+                        fa = float(combined)
 
                     final_vig_vals_rad[pos_k] = float(fr)
                     final_vig_vals_azi[pos_k] = float(fa)
@@ -1769,10 +1830,14 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 final_vig_vals_azi = dict(locals().get('vig_vals_azi', {}))
 
             # VIGNETTE SHEETS: write col B and C1 only
+            _vig_azi_sname = _find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES)
+            _vig_rad_sname = _find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES)
             for sname, vig_map in (
-                ('Vignetting rotazi', final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
-                ('Vignetting rotrad', final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
+                (_vig_azi_sname, final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
+                (_vig_rad_sname, final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
             ):
+                if sname is None:
+                    continue
                 # Debug print of sample vig_map contents when requested
                 try:
                     if os.environ.get('VIG_DEBUG'):
@@ -1966,8 +2031,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 # Read vignette factors from workbook (column B of vignette sheets)
                 vig_rad_sheet = {}
                 vig_azi_sheet = {}
-                if 'Vignetting rotrad' in wb.sheetnames:
-                    wsr = wb['Vignetting rotrad']
+                _vr_name = _find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES)
+                if _vr_name:
+                    wsr = wb[_vr_name]
                     for rr in range(1, wsr.max_row + 1):
                         a = wsr.cell(row=rr, column=1).value
                         b = wsr.cell(row=rr, column=2).value
@@ -1980,8 +2046,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 vig_rad_sheet[key] = float(b)
                             except Exception:
                                 pass
-                if 'Vignetting rotazi' in wb.sheetnames:
-                    wsa = wb['Vignetting rotazi']
+                _va_name = _find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES)
+                if _va_name:
+                    wsa = wb[_va_name]
                     for rr in range(1, wsa.max_row + 1):
                         a = wsa.cell(row=rr, column=1).value
                         b = wsa.cell(row=rr, column=2).value
@@ -2013,31 +2080,31 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         except Exception:
                             continue
                         pos = mm_to_pos.get(mmv) if 'mm_to_pos' in locals() else None
-                        rad_f = vig_rad_sheet.get(pos, None) if pos is not None else None
-                        azi_f = vig_azi_sheet.get(pos, None) if pos is not None else None
-                        combined = None
-                        try:
-                            if rad_f is not None and azi_f is not None:
-                                combined = float(rad_f) * float(azi_f)
-                        except Exception:
-                            combined = None
-                        try:
-                            if rad_f is not None:
-                                df.at[idx, 'aeff_vig_factor_rad'] = float(rad_f)
-                        except Exception:
-                            df.at[idx, 'aeff_vig_factor_rad'] = np.nan
-                        try:
-                            if azi_f is not None:
-                                df.at[idx, 'aeff_vig_factor_azi'] = float(azi_f)
-                        except Exception:
-                            df.at[idx, 'aeff_vig_factor_azi'] = np.nan
-                        try:
-                            if combined is not None:
-                                df.at[idx, 'aeff_vig_factor'] = float(combined)
-                            else:
-                                df.at[idx, 'aeff_vig_factor'] = np.nan
-                        except Exception:
-                            df.at[idx, 'aeff_vig_factor'] = np.nan
+                        rad_f_sheet = vig_rad_sheet.get(pos) if pos is not None else None
+                        azi_f_sheet = vig_azi_sheet.get(pos) if pos is not None else None
+                        # Use sheet value if available; otherwise keep
+                        # existing DataFrame value (from interpolation);
+                        # fall back to 1.0 (no vignetting) as last resort.
+                        if rad_f_sheet is not None:
+                            rad_f = float(rad_f_sheet)
+                        else:
+                            try:
+                                v = df.at[idx, 'aeff_vig_factor_rad']
+                                rad_f = float(v) if pd.notna(v) else 1.0
+                            except Exception:
+                                rad_f = 1.0
+                        if azi_f_sheet is not None:
+                            azi_f = float(azi_f_sheet)
+                        else:
+                            try:
+                                v = df.at[idx, 'aeff_vig_factor_azi']
+                                azi_f = float(v) if pd.notna(v) else 1.0
+                            except Exception:
+                                azi_f = 1.0
+                        combined = rad_f * azi_f
+                        df.at[idx, 'aeff_vig_factor_rad'] = rad_f
+                        df.at[idx, 'aeff_vig_factor_azi'] = azi_f
+                        df.at[idx, 'aeff_vig_factor'] = combined
                         # Enforce that aeff_base must be present and numeric for every MM row.
                         if 'aeff_base' not in df.columns:
                             raise ValueError("Missing required column 'aeff_base' in MM_PSF; A_eff column B must be present in the workbook.")
@@ -2046,10 +2113,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             raise ValueError(f"Missing A_eff base value for MM {mm_missing} (row index {idx}). A_eff column B must contain a numeric weight for every MM used.")
                         base_val = float(df.at[idx, 'aeff_base'])
                         try:
-                            if combined is None:
-                                df.at[idx, 'aeff_adjusted'] = 0.0
-                            else:
-                                df.at[idx, 'aeff_adjusted'] = float(base_val) * float(combined)
+                            df.at[idx, 'aeff_adjusted'] = float(base_val) * float(combined)
                             # Synchronize weight for this MM immediately so incremental
                             # updates don't leave weight out-of-sync with aeff_adjusted.
                             try:
@@ -2057,11 +2121,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             except Exception:
                                 df.at[idx, 'weight'] = df.at[idx, 'aeff_adjusted']
                         except Exception:
-                            df.at[idx, 'aeff_adjusted'] = 0.0
-                            try:
-                                df.at[idx, 'weight'] = 0.0
-                            except Exception:
-                                pass
+                            pass
                 except Exception:
                     pass
 
@@ -2097,14 +2157,20 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
                     # determine per-position factor from sheet
                     pos = mm_to_pos.get(mmv) if 'mm_to_pos' in locals() else None
-                    rad_f = vig_rad_sheet.get(pos, None) if pos is not None else None
-                    azi_f = vig_azi_sheet.get(pos, None) if pos is not None else None
-                    combined = None
-                    try:
-                        if rad_f is not None and azi_f is not None:
-                            combined = float(rad_f) * float(azi_f)
-                    except Exception:
-                        combined = None
+                    rad_f_sheet = vig_rad_sheet.get(pos) if pos is not None else None
+                    azi_f_sheet = vig_azi_sheet.get(pos) if pos is not None else None
+                    if rad_f_sheet is not None and azi_f_sheet is not None:
+                        combined = float(rad_f_sheet) * float(azi_f_sheet)
+                    else:
+                        # Sheet lacks per-position data; use DataFrame value
+                        try:
+                            vig_row = df.loc[df['MM #'] == mmv, 'aeff_vig_factor']
+                            if not vig_row.empty and pd.notna(vig_row.iat[0]):
+                                combined = float(vig_row.iat[0])
+                            else:
+                                combined = 1.0
+                        except Exception:
+                            combined = 1.0
 
                     # Write column B = canonical base (if known)
                     if base_val is not None:
@@ -2113,12 +2179,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         except Exception:
                             pass
 
-                    # Write column C = adjusted using sheet-derived factors when available
+                    # Write column C = adjusted = base * combined vignetting factor
                     try:
-                        if combined is None or base_val is None or base_val == 0.0:
-                            ws_a.cell(row=r, column=3, value=0.0)
-                        else:
+                        if base_val is not None and base_val != 0.0:
                             ws_a.cell(row=r, column=3, value=float(base_val) * float(combined))
+                        else:
+                            ws_a.cell(row=r, column=3, value=0.0)
                         written_a += 1
                     except Exception:
                         try:
@@ -2147,12 +2213,24 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             # Find rows in df matching this MM and update
                             mask = df['MM #'] == mmv
                             if 'aeff_adjusted' in df.columns:
-                                val = float(cval) if cval is not None else 0.0
-                                df.loc[mask, 'aeff_adjusted'] = val
-                                try:
-                                    df.loc[mask, 'weight'] = val
-                                except Exception:
-                                    pass
+                                val = float(cval) if cval is not None else None
+                                # Only overwrite if the workbook value is meaningful;
+                                # preserve the authoritative in-memory computation
+                                # when the sheet stores 0 but in-memory is non-zero.
+                                if val is not None and val != 0.0:
+                                    df.loc[mask, 'aeff_adjusted'] = val
+                                    try:
+                                        df.loc[mask, 'weight'] = val
+                                    except Exception:
+                                        pass
+                                elif val == 0.0:
+                                    existing = df.loc[mask, 'aeff_adjusted']
+                                    if existing.isna().all() or (existing == 0.0).all():
+                                        df.loc[mask, 'aeff_adjusted'] = 0.0
+                                        try:
+                                            df.loc[mask, 'weight'] = 0.0
+                                        except Exception:
+                                            pass
                             # also update combined vig factor column if base present
                             if 'aeff_base' in df.columns and cval is not None:
                                 try:
@@ -2316,8 +2394,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     # Also write these reconciled per-position factors back into
                     # the vignette sheets' column B so the workbook reflects the
                     # exact factors used to compute `aeff_adjusted`.
-                    for sname, final_map in (('Vignetting rotazi', vig_vals_azi), ('Vignetting rotrad', vig_vals_rad)):
-                        if sname not in wb.sheetnames:
+                    for sname, final_map in ((_find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES), vig_vals_azi), (_find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES), vig_vals_rad)):
+                        if sname is None or sname not in wb.sheetnames:
                             continue
                         ws_w = wb[sname]
                         # build row map from column A (like earlier)
@@ -2372,8 +2450,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 try:
                     vig_azi_sheet = {}
                     vig_rad_sheet = {}
-                    if 'Vignetting rotazi' in wb.sheetnames:
-                        wsa = wb['Vignetting rotazi']
+                    _va_name2 = _find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES)
+                    if _va_name2:
+                        wsa = wb[_va_name2]
                         for rr in range(1, wsa.max_row + 1):
                             a = wsa.cell(row=rr, column=1).value
                             b = wsa.cell(row=rr, column=2).value
@@ -2386,8 +2465,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                     vig_azi_sheet[key] = float(b)
                                 except Exception:
                                     pass
-                    if 'Vignetting rotrad' in wb.sheetnames:
-                        wsr = wb['Vignetting rotrad']
+                    _vr_name2 = _find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES)
+                    if _vr_name2:
+                        wsr = wb[_vr_name2]
                         for rr in range(1, wsr.max_row + 1):
                             a = wsr.cell(row=rr, column=1).value
                             b = wsr.cell(row=rr, column=2).value
@@ -2422,19 +2502,24 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             except Exception:
                                 base_val = 0.0
                             pos = mm_to_pos.get(mmv) if 'mm_to_pos' in locals() else None
-                            rad_f = vig_rad_sheet.get(pos, None) if pos is not None else None
-                            azi_f = vig_azi_sheet.get(pos, None) if pos is not None else None
-                            combined = None
+                            rad_f_sheet = vig_rad_sheet.get(pos) if pos is not None else None
+                            azi_f_sheet = vig_azi_sheet.get(pos) if pos is not None else None
+                            if rad_f_sheet is not None and azi_f_sheet is not None:
+                                combined = float(rad_f_sheet) * float(azi_f_sheet)
+                            else:
+                                try:
+                                    vig_row = df.loc[df['MM #'] == mmv, 'aeff_vig_factor']
+                                    if not vig_row.empty and pd.notna(vig_row.iat[0]):
+                                        combined = float(vig_row.iat[0])
+                                    else:
+                                        combined = 1.0
+                                except Exception:
+                                    combined = 1.0
                             try:
-                                if rad_f is not None and azi_f is not None:
-                                    combined = float(rad_f) * float(azi_f)
-                            except Exception:
-                                combined = None
-                            try:
-                                if combined is None or base_val is None or base_val == 0.0:
-                                    ws_a.cell(row=r, column=3, value=0.0)
-                                else:
+                                if base_val is not None and base_val != 0.0:
                                     ws_a.cell(row=r, column=3, value=float(base_val) * float(combined))
+                                else:
+                                    ws_a.cell(row=r, column=3, value=0.0)
                             except Exception:
                                 try:
                                     ws_a.cell(row=r, column=3, value=0.0)
@@ -2472,12 +2557,24 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             try:
                                 mask = df['MM #'] == mmv
                                 if 'aeff_adjusted' in df.columns:
-                                    val = float(cval) if cval is not None else 0.0
-                                    df.loc[mask, 'aeff_adjusted'] = val
-                                    try:
-                                        df.loc[mask, 'weight'] = val
-                                    except Exception:
-                                        pass
+                                    val = float(cval) if cval is not None else None
+                                    # Only overwrite if the workbook value is meaningful;
+                                    # preserve the authoritative in-memory computation
+                                    # when the sheet stores 0 but in-memory is non-zero.
+                                    if val is not None and val != 0.0:
+                                        df.loc[mask, 'aeff_adjusted'] = val
+                                        try:
+                                            df.loc[mask, 'weight'] = val
+                                        except Exception:
+                                            pass
+                                    elif val == 0.0:
+                                        existing = df.loc[mask, 'aeff_adjusted']
+                                        if existing.isna().all() or (existing == 0.0).all():
+                                            df.loc[mask, 'aeff_adjusted'] = 0.0
+                                            try:
+                                                df.loc[mask, 'weight'] = 0.0
+                                            except Exception:
+                                                pass
                                 if 'aeff_base' in df.columns and cval is not None:
                                     base_vals = df.loc[mask, 'aeff_base']
                                     for i_idx in base_vals.index:
@@ -2615,8 +2712,13 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             new_muy += thermal_by_pos[pos]['d_therm_y']
             d_therm_z = thermal_by_pos[pos]['d_therm_z']
         
+        # Get extra d_z (defocus, etc.)
+        d_extra_z = 0
+        if pos is not None and pos in extra_by_pos:
+            d_extra_z = extra_by_pos[pos].get('d_extra_z', 0)
+
         # Calculate d_z_total and apply z-axis projection
-        d_z_total = d_align_z + d_grav_z + d_therm_z
+        d_z_total = d_align_z + d_grav_z + d_therm_z + d_extra_z
         if mm_num in mm_config_map:
             mm_config = mm_config_map[mm_num]
             x_MM = mm_config['x_MM']
@@ -2702,7 +2804,7 @@ def _resolve_custom_psf_path(workbook_path: str, stem: str) -> str | None:
     return None
 
 
-def compute_total_rot_polar(mm_to_pos: dict, mm_config_map: dict, alignment_by_pos: dict, gravity_by_pos: dict, thermal_by_pos: dict):
+def compute_total_rot_polar(mm_to_pos: dict, mm_config_map: dict, alignment_by_pos: dict, gravity_by_pos: dict, thermal_by_pos: dict, extra_by_pos: dict | None = None):
     """Compute total rotation components and their projections onto polar axes.
 
     Returns (rotx, roty, rot_rad, rot_azi) where each is a dict keyed by position.
@@ -2724,6 +2826,8 @@ def compute_total_rot_polar(mm_to_pos: dict, mm_config_map: dict, alignment_by_p
         positions.update(gravity_by_pos.keys())
     if thermal_by_pos:
         positions.update(thermal_by_pos.keys())
+    if extra_by_pos:
+        positions.update(extra_by_pos.keys())
 
     # Reverse mapping: position -> an example MM for geometry lookup
     pos_to_mm = {}
@@ -2741,6 +2845,9 @@ def compute_total_rot_polar(mm_to_pos: dict, mm_config_map: dict, alignment_by_p
         if thermal_by_pos and pos in thermal_by_pos:
             rtx_total += float(thermal_by_pos[pos].get('d_therm_rotx', 0.0) or 0.0)
             rty_total += float(thermal_by_pos[pos].get('d_therm_roty', 0.0) or 0.0)
+        if extra_by_pos and pos in extra_by_pos:
+            rtx_total += float(extra_by_pos[pos].get('d_extra_rotx', 0.0) or 0.0)
+            rty_total += float(extra_by_pos[pos].get('d_extra_roty', 0.0) or 0.0)
 
         rotx[pos] = rtx_total
         roty[pos] = rty_total
@@ -7467,39 +7574,44 @@ if __name__ == '__main__':
                         if nh == 'd_therm_z' or nh.startswith('d_therm_z'):
                             col_z = idx + 1
 
-                    # Compute deltas
-                    # offaxis in input sheet is in arcminutes; convert to arcseconds
-                    offaxis_arcsec = float(offaxis_val) * 60.0
-                    # split equally between rot x/y by dividing by sqrt(2)
-                    delta_rot = offaxis_arcsec / math.sqrt(2.0)
-                    # defocus in input sheet is in millimetres; convert to microns
-                    defocus_um = float(defocus_val) * 1e3
+                    # Defocus is now stored in the "Extra PSF shifts" sheet
+                    # (d_extra_z column) rather than baked into Thermal d_therm_z.
 
-                    for r in range(2, ws.max_row + 1):
-                        if col_rotx:
-                            cell = ws.cell(row=r, column=col_rotx)
+                # Create / populate "Extra PSF shifts" sheet with the
+                # off-axis contribution.  Values stored in arcsec.
+                extra_rotx_arcsec = float(offaxis_val) * 60.0 / math.sqrt(2.0)
+                extra_roty_arcsec = float(offaxis_val) * 60.0 / math.sqrt(2.0)
+                if 'Extra PSF shifts' in wb.sheetnames:
+                    ws_extra = wb['Extra PSF shifts']
+                else:
+                    ws_extra = wb.create_sheet('Extra PSF shifts')
+                ws_extra.cell(row=1, column=1, value='Position #')
+                ws_extra.cell(row=1, column=2, value='d_extra_rotx [arcsec]')
+                ws_extra.cell(row=1, column=3, value='d_extra_roty [arcsec]')
+                ws_extra.cell(row=1, column=4, value='d_extra_z [µm]')
+                defocus_um = float(defocus_val) * 1e3  # mm -> µm
+                # Determine positions from Thermal sheet (or fall back to 1..max)
+                thermal_positions = []
+                if 'Thermal' in wb.sheetnames:
+                    ws_th = wb['Thermal']
+                    for rr in range(2, (ws_th.max_row or 0) + 1):
+                        pv = ws_th.cell(row=rr, column=1).value
+                        if pv is not None:
                             try:
-                                cell_val = float(cell.value) if cell.value is not None else 0.0
-                            except Exception:
-                                cell_val = 0.0
-                            cell.value = cell_val + delta_rot
-                        if col_roty:
-                            cell = ws.cell(row=r, column=col_roty)
-                            try:
-                                cell_val = float(cell.value) if cell.value is not None else 0.0
-                            except Exception:
-                                cell_val = 0.0
-                            cell.value = cell_val + delta_rot
-                        if col_z:
-                            cell = ws.cell(row=r, column=col_z)
-                            try:
-                                cell_val = float(cell.value) if cell.value is not None else 0.0
-                            except Exception:
-                                cell_val = 0.0
-                            cell.value = cell_val + defocus_um
+                                thermal_positions.append(int(float(pv)))
+                            except (ValueError, TypeError):
+                                pass
+                if not thermal_positions:
+                    thermal_positions = list(range(1, 601))
+                for i, pos_num in enumerate(thermal_positions):
+                    row_idx = i + 2
+                    ws_extra.cell(row=row_idx, column=1, value=pos_num)
+                    ws_extra.cell(row=row_idx, column=2, value=extra_rotx_arcsec)
+                    ws_extra.cell(row=row_idx, column=3, value=extra_roty_arcsec)
+                    ws_extra.cell(row=row_idx, column=4, value=defocus_um)
 
                 # Vignetting energy in C2 for both rotrad and rotazi
-                for sname in ('Vignetting rotrad', 'Vignetting rotazi'):
+                for sname in list(VIG_ROT_RAD_CANDIDATES) + list(VIG_ROT_AZI_CANDIDATES):
                     if sname in wb.sheetnames:
                         ws_v = wb[sname]
                         try:
@@ -7518,7 +7630,7 @@ if __name__ == '__main__':
                         ws_a_values = None
                         try:
                             from openpyxl import load_workbook as _load_wb_vals
-                            wb_vals = _load_wb_vals(path, data_only=True)
+                            wb_vals = _load_wb_vals(new_path, data_only=True)
                             if 'A_eff' in wb_vals.sheetnames:
                                 ws_a_values = wb_vals['A_eff']
                         except Exception:
@@ -7718,6 +7830,32 @@ if __name__ == '__main__':
                                         ws_a.cell(row=row_idx, column=2).value = write_val
                                 except Exception:
                                     continue
+                except Exception:
+                    pass
+
+                 # Resolve MM_PSF formula cells (sigma_rad/sigma_azi in
+                # columns D/E) using cached values from the *source*
+                # workbook.  openpyxl preserves formula strings but does
+                # NOT recalculate them, so the copy would have None for
+                # data_only reads.  We read the cached numeric values
+                # from the original file and stamp them as literals.
+                try:
+                    if 'MM_PSF' in wb.sheetnames:
+                        ws_mm = wb['MM_PSF']
+                        from openpyxl import load_workbook as _load_wb_src
+                        wb_src_cached = _load_wb_src(src_path, data_only=True)
+                        if 'MM_PSF' in wb_src_cached.sheetnames:
+                            ws_src_cached = wb_src_cached['MM_PSF']
+                            for rr in range(2, (ws_mm.max_row or 0) + 1):
+                                for cc in (4, 5):  # D=sigma_rad, E=sigma_azi
+                                    cell_val = ws_mm.cell(row=rr, column=cc).value
+                                    if isinstance(cell_val, str) and cell_val.startswith('='):
+                                        cached = ws_src_cached.cell(row=rr, column=cc).value
+                                        if cached is not None:
+                                            try:
+                                                ws_mm.cell(row=rr, column=cc).value = float(cached)
+                                            except (ValueError, TypeError):
+                                                pass
                 except Exception:
                     pass
 
