@@ -3171,6 +3171,69 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         except Exception as e:
             print(f"HEW_DEG: error writing degraded sigma to MM_PSF: {e}")
 
+    # Always write the final per-MM sigma (after any HEW_DEG broadening) to
+    # MM_PSF columns I/J so the workbook stays consistent with what PSF
+    # aggregation actually used.  Values are taken from df['sigma_rad'] and
+    # df['sigma_azi'] (in metres) – the exact arrays passed to plot_sum –
+    # and converted back to arcsec.  This runs unconditionally for non-CSV
+    # inputs so stale I/J values are never left in the workbook when D/E or
+    # Extra PSF B/C are updated externally.
+    if not is_csv and 'MM #' in df.columns:
+        try:
+            from openpyxl import load_workbook as _load_wb_ij
+            _arcsec_to_m_ij = 12.0 * np.pi / 180.0 / 3600.0
+            _m_to_arcsec_ij = 1.0 / _arcsec_to_m_ij
+            _wb_ij = _load_wb_ij(path)
+            _ws_ij = None
+            for _s_ij in _wb_ij.sheetnames:
+                if _s_ij.lower() == 'mm_psf':
+                    _ws_ij = _wb_ij[_s_ij]
+                    break
+            if _ws_ij is not None:
+                _ws_ij.cell(row=1, column=9,  value='sigma_rad_deg [arcsec]')
+                _ws_ij.cell(row=1, column=10, value='sigma_azi_deg [arcsec]')
+                # Build MM# -> workbook-row mapping from column A
+                _mm_to_wb_row_ij: dict = {}
+                for _r_ij in range(2, (_ws_ij.max_row or 0) + 1):
+                    _v_ij = _ws_ij.cell(row=_r_ij, column=1).value
+                    if _v_ij is not None:
+                        try:
+                            _mm_to_wb_row_ij[int(float(_v_ij))] = _r_ij
+                        except Exception:
+                            pass
+                _written_ij2 = 0
+                for _idx_ij, _row_ij in df.iterrows():
+                    _mm_ij = int(_row_ij['MM #'])
+                    _wb_r_ij = _mm_to_wb_row_ij.get(_mm_ij)
+                    if _wb_r_ij is None:
+                        continue
+                    # I = sigma_rad_deg: the broadened sigma actually used for aggregation
+                    _ws_ij.cell(row=_wb_r_ij, column=9,
+                                value=float(_row_ij['sigma_rad']) * _m_to_arcsec_ij)
+                    _ws_ij.cell(row=_wb_r_ij, column=10,
+                                value=float(_row_ij['sigma_azi']) * _m_to_arcsec_ij)
+                    # Also persist base D/E as plain numbers
+                    if 'sigma_rad [arcsec]' in df.columns:
+                        _vd_ij = _row_ij['sigma_rad [arcsec]']
+                        _ve_ij = _row_ij['sigma_azi [arcsec]']
+                        if pd.notna(_vd_ij):
+                            _ws_ij.cell(row=_wb_r_ij, column=4, value=float(_vd_ij))
+                        if pd.notna(_ve_ij):
+                            _ws_ij.cell(row=_wb_r_ij, column=5, value=float(_ve_ij))
+                    _written_ij2 += 1
+                import tempfile as _tmpf_ij2
+                _tf_ij2 = _tmpf_ij2.NamedTemporaryFile(delete=False, suffix='.xlsx')
+                _tf_ij2.close()
+                _wb_ij.save(_tf_ij2.name)
+                os.replace(_tf_ij2.name, path)
+                print(f"INFO: wrote sigma_rad/azi_deg to MM_PSF cols I/J for {_written_ij2} MMs")
+            try:
+                _wb_ij.close()
+            except Exception:
+                pass
+        except Exception as _e_ij:
+            print(f"WARNING: could not write I/J to workbook: {_e_ij}")
+
     # Copy sigma values
     df['sigmax'] = df['sigma_rad']
     df['sigmay'] = df['sigma_azi']
@@ -3980,693 +4043,183 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 fit_profile_diam = None
 
             # ========== PEARSON4 FITTING ==========
-            # Fit Pearson4 model using lmfit to also optimize intensity + EEF
+            # Fit Pearson Type IV profile to the azimuthal-average radial intensity.
+            #
+            # Design decisions vs. previous implementation:
+            #   * Direct numpy formula — no lmfit dependency or Model.eval overhead.
+            #   * center fixed at 0: the radial profile I(r)=E(r)/(2πr) is centred
+            #     at the best-focus origin by construction; a free centre parameter
+            #     trades off with sigma/nu and causes ill-conditioning.
+            #   * 4 parameters instead of 5: amp, sigma, m (tail exponent), nu (skew).
+            #   * 12 structured starts (6 grid + 6 random perturbations) rather than
+            #     36 + 36 + differential_evolution — covers the relevant landscape
+            #     without the prohibitive runtime.
+            #   * EEF residuals multiplied by constant 30 (same as PV fit) — stable,
+            #     location-independent threshold.
+            #   * Acceptance: EEF-RMS < 0.10 (unscaled cumulative-fraction units).
+            #
+            # Pearson IV radial model (center = 0):
+            #   u = r / sigma
+            #   I(r) = amp * (1 + u²)^{-m} * exp(-nu * arctan(u))
+            #
             pearson4_result = None
             pearson4_profile_pct = None
             pearson4_profile_diam = None
             try:
-                if quick_mode:
-                    raise ImportError("quick mode: skip pearson4")
-                from lmfit.models import Pearson4Model
-                from lmfit import Parameters
-                print("DEBUG: lmfit imported successfully for Pearson4 fitting")
-                
-                # Create Pearson4 model
-                pearson4_model = Pearson4Model()
-                
-                # Initial guess from pseudo-Voigt peak parameters
-                params = pearson4_model.guess(I_fit, x=r_fit)
-                try:
-                    print(f"DEBUG: pearson4 initial guess amp={params['amplitude'].value}, center={params['center'].value}, sigma={params['sigma'].value}, expon={params['expon'].value}, skew={params['skew'].value}")
-                except Exception:
-                    print("DEBUG: pearson4 initial guess created but some params missing")
-                # Adjust initial values for better convergence
-                params['amplitude'].value = A_fit
-                params['center'].value = Gamma_c_fit * 0.5
-                params['sigma'].value = Gamma_c_fit
-                params['expon'].value = 1.5
-                params['skew'].value = 0.0
-                
-                # Define EEF-only residual for Pearson4 and run bounded multi-start least_squares
-                dr_arcsec_p4 = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
-                radial_energy_data_p4 = 2.0 * np.pi * r_fit * I_fit * dr_arcsec_p4
-                cumulative_data_p4 = np.cumsum(radial_energy_data_p4)
-                total_data_p4 = cumulative_data_p4[-1] if cumulative_data_p4.size else 1.0
-                eef_data_p4 = cumulative_data_p4 / total_data_p4 if total_data_p4 > 0 else cumulative_data_p4
+                # ------------------------------------------------------------------
+                # Direct Pearson IV formula — no lmfit, no Model.eval overhead.
+                # ------------------------------------------------------------------
+                def _p4(r, amp, sigma, m, nu):
+                    """Pearson Type IV radial profile centred at r=0."""
+                    u = r / np.maximum(sigma, 1e-15)
+                    return (amp
+                            * (1.0 + u * u) ** (-np.maximum(m, 0.5))
+                            * np.exp(-nu * np.arctan(u)))
 
-                # Prepare parameter bounds via lmfit Parameters when available
-                try:
-                    # set sensible bounds on lmfit params to stabilize EEF-only optimization
-                    params['amplitude'].min = max(float(floor), 0.0)
-                    params['amplitude'].max = float(np.nanmax(I_fit) * 10.0 if I_fit.size else params['amplitude'].value * 100.0)
-                    params['center'].min = 0.0
-                    params['center'].max = float(min(r_arcsec.max() * 0.5 if r_arcsec.size else 50.0, 50.0))
-                    params['sigma'].min = 1e-3
-                    params['sigma'].max = float(max(1.0, r_arcsec.max()))
-                    params['expon'].min = 1.0
-                    params['expon'].max = 8.0
-                    params['skew'].min = -2.0
-                    params['skew'].max = 2.0
-                except Exception:
-                    pass
+                # Coarse evaluation grid for the residual — max 400 pts.
+                _n_coarse = min(400, max(40, r_arcsec.size))
+                _r_coarse = np.linspace(0.0, float(r_arcsec.max()) if r_arcsec.size else 20.0, _n_coarse)
+                _dr_coarse = float(_r_coarse[1] - _r_coarse[0]) if _n_coarse > 1 else 1.0
 
-                # Residual that returns only EEF difference (scaled)
-                def residual_p4_params(pdict):
+                # Fine (full) grid spacing for EEF profile output.
+                _dr_fine = float(r_arcsec[1] - r_arcsec[0]) if r_arcsec.size > 1 else 1.0
+
+                # EEF reference from the data radial profile (on r_fit sample points).
+                _re_data = 2.0 * np.pi * r_fit * I_fit * _dr_fine
+                _cum_data = np.cumsum(_re_data)
+                _tot_data = _cum_data[-1] if _cum_data.size else 1.0
+                _eef_data = _cum_data / _tot_data if _tot_data > 0 else _cum_data
+
+                # EEF residual function (returns vector of length r_fit).
+                # Scale factor 30 mirrors the pseudo-Voigt EEF objective so that
+                # the acceptance threshold is meaningful and stable.
+                _EEF_SCALE = 30.0
+
+                from scipy.optimize import least_squares as _ls_p4
+
+                def _p4_eef_resid(pv):
+                    a, s, m_, nu_ = pv
+                    y = _p4(_r_coarse, a, s, m_, nu_)
+                    y = np.maximum(y, 0.0)
+                    re = 2.0 * np.pi * _r_coarse * y * _dr_coarse
+                    tot = np.sum(re)
+                    if tot <= 0 or not np.isfinite(tot):
+                        return np.ones_like(_eef_data) * 1e6
+                    eef_m = np.cumsum(re) / tot
+                    eef_at_rfit = np.interp(r_fit, _r_coarse, eef_m)
+                    return (eef_at_rfit - _eef_data) * _EEF_SCALE
+
+                # ------------------------------------------------------------------
+                # Initial seeds — informed by the PV fit result.
+                # [amp, sigma, m, nu]
+                # ------------------------------------------------------------------
+                _amp0 = float(A_fit)
+                _sig0 = float(Gamma_c_fit)
+                _m0   = float(max(0.7, min(8.0, beta_fit)))
+                _gw   = float(Gamma_w_fit)
+
+                _lb = np.array([max(float(floor), 1e-15),  1e-3,  0.51, -6.0])
+                _ub = np.array([_amp0 * 100.0,  max(_gw * 3.0, _sig0 * 30.0),  12.0,  6.0])
+
+                # 6 structured seeds covering core/wing width and m variation.
+                _seeds = [
+                    [_amp0, _sig0,          _m0,           0.0],
+                    [_amp0, _sig0 * 0.5,    _m0 * 0.7,     0.0],
+                    [_amp0, _sig0 * 2.0,    _m0 * 1.3,     0.0],
+                    [_amp0, _gw / 3.0,      max(0.7, _m0 * 0.6), 0.0],
+                    [_amp0, _sig0,          1.5,            0.0],
+                    [_amp0, _sig0,          4.0,            0.0],
+                ]
+                # 6 random perturbations of the primary seed.
+                _rng_p4 = np.random.default_rng(4321)
+                _base = np.array([_amp0, _sig0, _m0, 0.0])
+                for _ in range(6):
+                    _pert = _base * (1.0 + _rng_p4.normal(0.0, 0.18, size=4))
+                    _seeds.append(np.clip(_pert, _lb, _ub).tolist())
+
+                # ------------------------------------------------------------------
+                # Run multi-start least_squares.
+                # ------------------------------------------------------------------
+                _best_x   = None
+                _best_rms = np.inf
+
+                for _s0 in _seeds:
                     try:
-                        # Use a coarser radial grid for EEF evaluation to speed residuals
-                        try:
-                            rg = r_arcsec_coarse
-                        except NameError:
-                            rg = r_arcsec
-                        model = pearson4_model.eval(params=pdict, x=rg)
-                        model = np.maximum(model, 0.0)
-                        dr_rg = float(rg[1] - rg[0]) if rg.size > 1 else dr_arcsec_p4
-                        radial_model = 2.0 * np.pi * rg * model * dr_rg
-                        tot_model = np.sum(radial_model)
-                        if tot_model <= 0 or not np.isfinite(tot_model):
-                            return np.ones_like(eef_data_p4) * 1e6
-                        eef_model = np.cumsum(radial_model) / tot_model
-                        # interpolate model EEF (fraction) to the data sample radii r_fit
-                        from numpy import interp
-                        model_at_rfit = interp(r_fit, rg, eef_model)
-                        # Normalize EEF residuals by typical EEF variation to smooth objective
-                        try:
-                            eef_scale = float(np.maximum(1e-3, np.nanstd(eef_data_p4)))
-                        except Exception:
-                            eef_scale = 1.0
-                        eef_weight_norm = 1.0
-                        return (model_at_rfit - eef_data_p4) / eef_scale * eef_weight_norm
+                        _s0c = np.clip(np.asarray(_s0, dtype=float), _lb, _ub)
+                        _res = _ls_p4(
+                            _p4_eef_resid, _s0c,
+                            bounds=(_lb, _ub),
+                            loss='soft_l1', f_scale=1e-3,
+                            max_nfev=25000, method='trf',
+                        )
+                        _rms = float(np.sqrt(np.mean(_res.fun ** 2)))
+                        if np.isfinite(_rms) and _rms < _best_rms:
+                            _best_rms = _rms
+                            _best_x = _res.x.copy()
                     except Exception:
-                        return np.ones_like(eef_data_p4) * 1e6
+                        pass
 
-                # Run bounded multi-start optimization using least_squares when available
-                pearson4_result = None
-                try:
-                    if have_least_squares:
-                        best_score = np.inf
-                        best_params = None
-                        rng = np.random.default_rng(4321)
-                        # Build initial vector from params
-                        try:
-                            p0_vec = np.array([params['amplitude'].value, params['center'].value, params['sigma'].value, params['expon'].value, params['skew'].value])
-                        except Exception:
-                            # Derive a better initial guess from the pseudo-Voigt
-                            # aggregated fit: amplitude from PV core, center from
-                            # data peak, sigma from PV core width, and expon
-                            # loosely informed by PV beta.
-                            try:
-                                amp_guess = float(A_fit)
-                            except Exception:
-                                amp_guess = float(np.nanmax(I_fit) if I_fit.size else 1.0)
-                            try:
-                                # center: radius of maximum measured intensity
-                                center_guess = float(r_fit[np.nanargmax(I_fit)]) if (r_fit.size and np.any(np.isfinite(I_fit))) else 0.0
-                            except Exception:
-                                center_guess = 0.0
-                            try:
-                                sigma_guess = max(1e-3, float(Gamma_c_fit))
-                            except Exception:
-                                sigma_guess = max(1e-3, float(np.median(r_fit)) if r_fit.size else 1.0)
-                            try:
-                                expon_guess = float(beta_fit) if ('beta_fit' in locals() and np.isfinite(beta_fit)) else 1.5
-                                # clamp to Pearson4 reasonable range
-                                expon_guess = float(max(1.0, min(6.0, expon_guess)))
-                            except Exception:
-                                expon_guess = 1.5
-                            p0_vec = np.array([amp_guess, center_guess, sigma_guess, expon_guess, 0.0])
-                        try:
-                            print(f"DEBUG: pearson4 p0_vec={p0_vec}")
-                        except Exception:
-                            pass
+                # ------------------------------------------------------------------
+                # Accept if unscaled EEF RMS < 0.10 (cumulative-fraction units).
+                # This is equivalent to ≤ 10 percentage-points mean EEF deviation.
+                # ------------------------------------------------------------------
+                if _best_x is not None and np.isfinite(_best_rms):
+                    _amp_p4, _sig_p4, _m_p4, _nu_p4 = _best_x
 
-                        # Try a quick lmfit intensity-only fit to obtain a robust
-                        # starting point for the multi-start EEF optimization.
-                        try:
-                            quick_fit = None
-                            try:
-                                quick_fit = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=3000)
-                            except Exception:
-                                quick_fit = None
-                            if quick_fit is not None and hasattr(quick_fit, 'params'):
-                                try:
-                                    amp_q = float(quick_fit.params['amplitude'].value)
-                                    cen_q = float(quick_fit.params['center'].value) if 'center' in quick_fit.params else 0.0
-                                    sig_q = float(quick_fit.params['sigma'].value)
-                                    exp_q = float(quick_fit.params['expon'].value) if 'expon' in quick_fit.params else 1.5
-                                    skew_q = float(quick_fit.params['skew'].value) if 'skew' in quick_fit.params else 0.0
-                                    p0_vec = np.array([amp_q, cen_q, sig_q, exp_q, skew_q])
-                                    try:
-                                        print(f"DEBUG: seed p0_vec from quick lmfit intensity fit: {p0_vec}")
-                                    except Exception:
-                                        pass
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-
-                        # Build a coarser radial grid for EEF computations to reduce
-                        # costly full-array evaluations during multi-starts.
-                        try:
-                            max_pts = 300
-                            if r_arcsec.size > max_pts:
-                                r_arcsec_coarse = np.linspace(0.0, float(r_arcsec.max()), max_pts)
-                            else:
-                                r_arcsec_coarse = r_arcsec
-                        except Exception:
-                            r_arcsec_coarse = r_arcsec
-                        # Subsample r_fit for intensity residuals during multi-starts
-                        try:
-                            max_int_samples = 300
-                            if r_fit.size > max_int_samples:
-                                idxs = np.round(np.linspace(0, r_fit.size-1, max_int_samples)).astype(int)
-                                r_fit_sub = r_fit[idxs]
-                                I_fit_sub = I_fit[idxs]
-                            else:
-                                r_fit_sub = r_fit
-                                I_fit_sub = I_fit
-                        except Exception:
-                            r_fit_sub = r_fit
-                            I_fit_sub = I_fit
-
-                        # Bounds vector: [amp, center, sigma, expon, skew]
-                        try:
-                            lb = np.array([params['amplitude'].min if hasattr(params['amplitude'], 'min') else max(float(floor), 0.0),
-                                           params['center'].min if hasattr(params['center'], 'min') else 0.0,
-                                           params['sigma'].min if hasattr(params['sigma'], 'min') else 1e-6,
-                                           params['expon'].min if hasattr(params['expon'], 'min') else 1.0,
-                                           params['skew'].min if hasattr(params['skew'], 'min') else -5.0])
-                            ub = np.array([params['amplitude'].max if hasattr(params['amplitude'], 'max') else np.inf,
-                                           params['center'].max if hasattr(params['center'], 'max') else float(r_arcsec.max() if r_arcsec.size else 50.0),
-                                           params['sigma'].max if hasattr(params['sigma'], 'max') else float(max(1.0, r_arcsec.max() if r_arcsec.size else 50.0)),
-                                           params['expon'].max if hasattr(params['expon'], 'max') else 8.0,
-                                           params['skew'].max if hasattr(params['skew'], 'max') else 5.0])
-                        except Exception:
-                            lb = np.array([max(float(floor), 0.0), 0.0, 1e-6, 1.0, -5.0])
-                            ub = np.array([np.inf, float(r_arcsec.max() if r_arcsec.size else 50.0), float(max(1.0, r_arcsec.max() if r_arcsec.size else 50.0)), 8.0, 5.0])
-
-                        from scipy.optimize import least_squares
-
-                        def vec_to_params(vec):
-                            # convert vector to lmfit-like param dict for pearson4_model.eval
-                            try:
-                                p = {
-                                    'amplitude': vec[0],
-                                    'center': vec[1],
-                                    'sigma': vec[2],
-                                    'expon': vec[3],
-                                    'skew': vec[4]
-                                }
-                                return p
-                            except Exception:
-                                return None
-
-                        def compute_p4_eef_rms_from_vec(vec):
-                            """Compute unscaled EEF RMS (model vs data) for a Pearson4 parameter vector.
-                            Returns np.inf on failure.
-                            """
-                            try:
-                                pd = vec_to_params(np.asarray(vec, dtype=float))
-                                if pd is None:
-                                    return np.inf
-                                model_full = pearson4_model.eval(params=pd, x=r_arcsec)
-                                model_full = np.maximum(model_full, 0.0)
-                                radial_model = 2.0 * np.pi * r_arcsec * model_full * dr_arcsec_p4
-                                tot_model = np.sum(radial_model)
-                                if tot_model <= 0 or not np.isfinite(tot_model):
-                                    return np.inf
-                                eef_model = np.cumsum(radial_model) / tot_model
-                                from numpy import interp
-                                model_eef_at_rfit = interp(r_fit, r_arcsec, eef_model)
-                                # compare to the data EEF computed for Pearson4 block
-                                try:
-                                    ref = eef_data_p4
-                                except Exception:
-                                    ref = eef_data
-                                res = model_eef_at_rfit - ref
-                                return float(np.sqrt(np.mean(res**2))) if res.size else np.inf
-                            except Exception:
-                                return np.inf
-
-                        def compute_pv_eef_rms():
-                            """Compute unscaled EEF RMS for the pseudo-Voigt fit vs data when available.
-                            Returns np.inf if PV EEF not available.
-                            """
-                            try:
-                                if fit_profile_pct is None:
-                                    return np.inf
-                                from numpy import interp
-                                pv_eef_frac = np.asarray(fit_profile_pct) / 100.0
-                                model_eef_at_rfit = interp(r_fit, r_arcsec, pv_eef_frac)
-                                ref = eef_data if 'eef_data' in locals() else (eef_data_p4 if 'eef_data_p4' in locals() else None)
-                                if ref is None:
-                                    return np.inf
-                                res = model_eef_at_rfit - ref
-                                return float(np.sqrt(np.mean(res**2))) if res.size else np.inf
-                            except Exception:
-                                return np.inf
-
-                        # Use shared multi-start helper for EEF-only Pearson4 fitting
-                        try:
-                            def pearson4_resid_vec(v):
-                                return residual_p4_params(vec_to_params(v))
-                            # reduce attempts and max evals for speed; coarse EEF grid used inside residuals
-                            # increase Pearson4 EEF-only multi-starts and per-start budget
-                            best_params, last_res_p4 = multi_start_least_squares(pearson4_resid_vec, p0_vec, lb, ub, attempts=36, rng_seed=4321, max_nfev=120000, loss='soft_l1', f_scale=1e-4)
-                            try:
-                                print(f"DEBUG: pearson4 multi-start result best_params={best_params}, last_res_cost={None if last_res_p4 is None else getattr(last_res_p4,'cost',None)}")
-                            except Exception:
-                                pass
-                            # Inspect optimizer result and accept only if residuals look reasonable
-                            accepted_p4 = False
-                            rms_p4 = np.inf
-                            try:
-                                if last_res_p4 is not None and hasattr(last_res_p4, 'fun'):
-                                    fun = np.asarray(last_res_p4.fun, dtype=float)
-                                    rms_p4 = float(np.sqrt(np.mean(fun**2))) if fun.size else np.inf
-                                    fun_min = float(np.nanmin(fun)) if fun.size else np.nan
-                                    fun_max = float(np.nanmax(fun)) if fun.size else np.nan
-                                    fun_std = float(np.nanstd(fun)) if fun.size else np.nan
-                                    print(f"DEBUG: pearson4 residuals stats: rms={rms_p4:.3g}, min={fun_min:.3g}, max={fun_max:.3g}, std={fun_std:.3g}")
-                            except Exception:
-                                pass
-                            # Threshold for accepting EEF-only Pearson4 fit (empirical)
-                            try:
-                                # Make EEF-only Pearson4 acceptance more stringent
-                                # Lowering threshold further to reduce false positives
-                                # Make EEF-only Pearson4 acceptance more stringent
-                                # Lowering threshold further to reduce false positives
-                                threshold_rms = 1.0
-                                if best_params is not None and np.isfinite(rms_p4) and rms_p4 < threshold_rms:
-                                    accepted_p4 = True
-                            except Exception:
-                                accepted_p4 = False
-                            if accepted_p4:
-                                # Only accept this EEF-only Pearson4 result if it improves
-                                # the EEF match relative to the pseudo-Voigt fit.
-                                try:
-                                    p4_eef_rms = compute_p4_eef_rms_from_vec(best_params)
-                                    pv_eef_rms = compute_pv_eef_rms()
-                                except Exception:
-                                    p4_eef_rms = np.inf
-                                    pv_eef_rms = np.inf
-                                if np.isfinite(p4_eef_rms) and np.isfinite(pv_eef_rms):
-                                    better = (p4_eef_rms <= 3.0 * pv_eef_rms)
-                                else:
-                                    # if PV not available, fall back to original criterion
-                                    better = True
-                                if better:
-                                    class SimpleResult:
-                                        pass
-                                    pearson4_result = SimpleResult()
-                                    pearson4_result.params = vec_to_params(best_params)
-                                    try:
-                                        print(f"DEBUG: pearson4_result params set from best_params: {pearson4_result.params}")
-                                    except Exception:
-                                        pass
-                                else:
-                                    pearson4_result = None
-                                    try:
-                                        print(f"DEBUG: pearson4 fit rejected because PV EEF is closer (p4_rms={p4_eef_rms:.3g}, pv_rms={pv_eef_rms:.3g})")
-                                    except Exception:
-                                        pass
-                            else:
-                                pearson4_result = None
-                                try:
-                                    print(f"DEBUG: pearson4 fit rejected (rms={rms_p4}); pearson4_result set to None")
-                                except Exception:
-                                    pass
-                            # Fallback: if EEF-only fit failed, try a combined EEF + intensity objective
-                            if pearson4_result is None:
-                                try:
-                                    print("DEBUG: attempting combined EEF+intensity Pearson4 fit (fallback)")
-                                    intensity_weight_scale_p4 = 0.25
-                                    from numpy import interp
-                                    def pearson4_resid_comb_vec(v):
-                                        try:
-                                            pd = vec_to_params(v)
-                                            # Evaluate EEF on a coarse grid for speed
-                                            try:
-                                                rg = r_arcsec_coarse
-                                            except NameError:
-                                                rg = r_arcsec
-                                            model_full = pearson4_model.eval(params=pd, x=rg)
-                                            model_full = np.maximum(model_full, 0.0)
-                                            dr_rg = float(rg[1] - rg[0]) if rg.size > 1 else dr_arcsec_p4
-                                            radial_model = 2.0 * np.pi * rg * model_full * dr_rg
-                                            tot_model = np.sum(radial_model)
-                                            if tot_model <= 0 or not np.isfinite(tot_model):
-                                                # return large penalty vector for both parts
-                                                return np.ones((eef_data_p4.size + r_fit_sub.size,), dtype=float) * 1e6
-                                            eef_model = np.cumsum(radial_model) / tot_model
-                                            model_at_rfit = interp(r_fit, rg, eef_model)
-                                            # Normalize EEF residuals by typical EEF variation
-                                            try:
-                                                eef_scale = float(np.maximum(1e-3, np.nanstd(eef_data_p4)))
-                                            except Exception:
-                                                eef_scale = 1.0
-                                            eef_weight_norm = 1.0
-                                            eef_res = (model_at_rfit - eef_data_p4) / eef_scale * eef_weight_norm
-                                            # intensity residuals on data sample points (log space)
-                                            # use subsampled points for intensity residuals during multi-starts
-                                            model_rfit_vals_sub = pearson4_model.eval(params=pd, x=r_fit_sub)
-                                            model_rfit_vals_sub = np.maximum(model_rfit_vals_sub, floor)
-                                            # normalize log-int residuals by their typical std to smooth objective
-                                            try:
-                                                int_ref = np.log(I_fit_sub + floor)
-                                                int_scale = float(np.maximum(1e-3, np.nanstd(int_ref)))
-                                            except Exception:
-                                                int_scale = 1.0
-                                            int_res_sub = (np.log(model_rfit_vals_sub + floor) - np.log(I_fit_sub + floor)) / int_scale * (intensity_weight_scale_p4 * 2.0)
-                                            return np.concatenate([eef_res, int_res_sub])
-                                        except Exception:
-                                            return np.ones((eef_data_p4.size + r_fit_sub.size,), dtype=float) * 1e6
-
-                                    try:
-                                        # use fewer starts and fewer function evaluations for the combined fit
-                                        # increase combined-fit multi-starts and per-start budget
-                                        best_params2, last_res2 = multi_start_least_squares(pearson4_resid_comb_vec, p0_vec, lb, ub, attempts=36, rng_seed=9999, loss='soft_l1', f_scale=1e-4, max_nfev=120000)
-                                    except Exception:
-                                        best_params2, last_res2 = None, None
-                                    try:
-                                        print(f"DEBUG: combined-fit best_params2={best_params2}, last_res2_cost={None if last_res2 is None else getattr(last_res2,'cost',None)}")
-                                    except Exception:
-                                        pass
-                                    accepted2 = False
-                                    rms2 = np.inf
-                                    try:
-                                        # Re-evaluate fitted model on data points to compute
-                                        # meaningful unscaled EEF and intensity diagnostics.
-                                        if best_params2 is not None:
-                                            pd2 = vec_to_params(best_params2)
-                                            # full model on r_arcsec
-                                            model_full2 = pearson4_model.eval(params=pd2, x=r_arcsec)
-                                            model_full2 = np.maximum(model_full2, 0.0)
-                                            radial_model2 = 2.0 * np.pi * r_arcsec * model_full2 * dr_arcsec_p4
-                                            tot_model2 = np.sum(radial_model2)
-                                            # data total for comparison
-                                            tot_data = np.sum(radial_energy_data_p4)
-                                            if tot_model2 <= 0 or not np.isfinite(tot_model2):
-                                                raise ValueError('invalid total model energy')
-                                            eef_model2 = np.cumsum(radial_model2) / tot_model2
-                                            from numpy import interp
-                                            model_eef_at_rfit = interp(r_fit, r_arcsec, eef_model2)
-                                            # unscaled EEF residuals (fraction)
-                                            eef_res_unscaled = (model_eef_at_rfit - eef_data_p4)
-                                            eef_rms_unscaled = float(np.sqrt(np.mean(eef_res_unscaled**2))) if eef_res_unscaled.size else np.inf
-                                            # intensity residuals (log-space) on r_fit
-                                            model_rfit_vals2 = pearson4_model.eval(params=pd2, x=r_fit)
-                                            model_rfit_vals2 = np.maximum(model_rfit_vals2, floor)
-                                            int_res_unscaled = (np.log(model_rfit_vals2 + floor) - np.log(I_fit + floor))
-                                            int_rms_unscaled = float(np.sqrt(np.mean(int_res_unscaled**2))) if int_res_unscaled.size else np.inf
-                                            # combined rms (on optimizer fun vector) for bookkeeping
-                                            if last_res2 is not None and hasattr(last_res2, 'fun'):
-                                                fun2 = np.asarray(last_res2.fun, dtype=float)
-                                                rms2 = float(np.sqrt(np.mean(fun2**2))) if fun2.size else np.inf
-                                            else:
-                                                rms2 = np.inf
-                                            try:
-                                                print(f"DEBUG: combined residuals rms(raw)={rms2:.3g}, eef_rms={eef_rms_unscaled:.3g}, int_rms={int_rms_unscaled:.3g}, tot_model2={tot_model2:.3g}, tot_data={tot_data:.3g}")
-                                            except Exception:
-                                                pass
-                                            # acceptance criteria: relax thresholds slightly to improve
-                                            # practical convergence. Also accept if one metric is
-                                            # borderline but others are very good.
-                                            eef_rms_thresh = 0.08
-                                            int_rms_thresh = 1.0
-                                            tot_ratio = (tot_model2 / tot_data) if (tot_data > 0 and np.isfinite(tot_data)) else np.nan
-                                            if (np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < eef_rms_thresh and
-                                                np.isfinite(int_rms_unscaled) and int_rms_unscaled < int_rms_thresh and
-                                                np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
-                                                accepted2 = True
-                                            else:
-                                                # allow a looser acceptance when intensity fit is excellent
-                                                if (np.isfinite(int_rms_unscaled) and int_rms_unscaled < 0.5 and
-                                                    np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < 0.12 and
-                                                    np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
-                                                    accepted2 = True
-                                    except Exception:
-                                        accepted2 = False
-                                    if accepted2:
-                                        # Require that combined-fit Pearson4 gives a better EEF
-                                        # match than the pseudo-Voigt before accepting.
-                                        try:
-                                            pv_eef_rms = compute_pv_eef_rms()
-                                        except Exception:
-                                            pv_eef_rms = np.inf
-                                        try:
-                                            p4_eef_rms = float(eef_rms_unscaled) if np.isfinite(eef_rms_unscaled) else compute_p4_eef_rms_from_vec(best_params2)
-                                        except Exception:
-                                            p4_eef_rms = np.inf
-                                        if np.isfinite(p4_eef_rms) and np.isfinite(pv_eef_rms):
-                                            better = (p4_eef_rms <= 3.0 * pv_eef_rms)
-                                        else:
-                                            better = True
-                                        if better:
-                                            class SimpleResult2:
-                                                pass
-                                            pearson4_result = SimpleResult2()
-                                            pearson4_result.params = vec_to_params(best_params2)
-                                            try:
-                                                print(f"DEBUG: pearson4_result set from combined-fit best_params2: {pearson4_result.params}")
-                                            except Exception:
-                                                pass
-                                        else:
-                                            try:
-                                                print(f"DEBUG: combined Pearson4 fit rejected because PV EEF is closer (p4_rms={p4_eef_rms:.3g}, pv_rms={pv_eef_rms:.3g})")
-                                            except Exception:
-                                                pass
-                                    else:
-                                        try:
-                                            print(f"DEBUG: combined Pearson4 fit rejected (rms2={rms2}, accepted2={accepted2})")
-                                        except Exception:
-                                            pass
-                                        # Try a slower, global optimizer (differential_evolution) as a final attempt
-                                        try:
-                                            from scipy.optimize import differential_evolution
-                                            # Bounds as list of tuples for differential_evolution
-                                            bounds_de = []
-                                            for i in range(lb.size):
-                                                try:
-                                                    bounds_de.append((float(lb[i]), float(ub[i])))
-                                                except Exception:
-                                                    bounds_de.append((float(-1e6), float(1e6)))
-
-                                            def scalar_obj(v):
-                                                try:
-                                                    vec = np.asarray(v, dtype=float)
-                                                    funv = np.asarray(pearson4_resid_comb_vec(vec), dtype=float)
-                                                    return float(np.sqrt(np.mean(funv**2)))
-                                                except Exception:
-                                                    return 1e12
-
-                                            try:
-                                                # increase DE budget (up to ~3x slower) for more thorough search
-                                                de_res = differential_evolution(scalar_obj, bounds_de, maxiter=240, popsize=45, tol=1e-6, seed=2026, polish=True)
-                                                cand = de_res.x
-                                                funvec = np.asarray(pearson4_resid_comb_vec(cand), dtype=float)
-                                                rms_de = float(np.sqrt(np.mean(funvec**2))) if funvec.size else np.inf
-                                                try:
-                                                    print(f"DEBUG: differential_evolution rms={rms_de:.3g}, fun={de_res.fun if hasattr(de_res,'fun') else None}")
-                                                except Exception:
-                                                    pass
-                                                # Re-evaluate acceptance using same unscaled diagnostics as earlier
-                                                try:
-                                                    pd2 = vec_to_params(cand)
-                                                    model_full2 = pearson4_model.eval(params=pd2, x=r_arcsec)
-                                                    model_full2 = np.maximum(model_full2, 0.0)
-                                                    radial_model2 = 2.0 * np.pi * r_arcsec * model_full2 * dr_arcsec_p4
-                                                    tot_model2 = np.sum(radial_model2)
-                                                    tot_data = np.sum(radial_energy_data_p4)
-                                                    if tot_model2 > 0 and np.isfinite(tot_model2):
-                                                        eef_model2 = np.cumsum(radial_model2) / tot_model2
-                                                        from numpy import interp
-                                                        model_eef_at_rfit = interp(r_fit, r_arcsec, eef_model2)
-                                                        eef_res_unscaled = (model_eef_at_rfit - eef_data_p4)
-                                                        eef_rms_unscaled = float(np.sqrt(np.mean(eef_res_unscaled**2))) if eef_res_unscaled.size else np.inf
-                                                        model_rfit_vals2 = pearson4_model.eval(params=pd2, x=r_fit)
-                                                        model_rfit_vals2 = np.maximum(model_rfit_vals2, floor)
-                                                        int_res_unscaled = (np.log(model_rfit_vals2 + floor) - np.log(I_fit + floor))
-                                                        int_rms_unscaled = float(np.sqrt(np.mean(int_res_unscaled**2))) if int_res_unscaled.size else np.inf
-                                                        tot_ratio = (tot_model2 / tot_data) if (tot_data > 0 and np.isfinite(tot_data)) else np.nan
-                                                        # Apply same relaxed acceptance logic as before
-                                                        eef_rms_thresh = 0.08
-                                                        int_rms_thresh = 1.0
-                                                        if (np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < eef_rms_thresh and
-                                                            np.isfinite(int_rms_unscaled) and int_rms_unscaled < int_rms_thresh and
-                                                            np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
-                                                            accepted2 = True
-                                                        else:
-                                                            if (np.isfinite(int_rms_unscaled) and int_rms_unscaled < 0.5 and
-                                                                np.isfinite(eef_rms_unscaled) and eef_rms_unscaled < 0.12 and
-                                                                np.isfinite(tot_ratio) and 0.2 <= tot_ratio <= 4.0):
-                                                                accepted2 = True
-                                                except Exception:
-                                                    accepted2 = False
-                                                if accepted2:
-                                                    # Before accepting DE candidate, ensure EEF is improved
-                                                    try:
-                                                        pv_eef_rms = compute_pv_eef_rms()
-                                                    except Exception:
-                                                        pv_eef_rms = np.inf
-                                                    try:
-                                                        p4_eef_rms = compute_p4_eef_rms_from_vec(cand)
-                                                    except Exception:
-                                                        p4_eef_rms = np.inf
-                                                    if np.isfinite(p4_eef_rms) and np.isfinite(pv_eef_rms):
-                                                        better = (p4_eef_rms <= 3.0 * pv_eef_rms)
-                                                    else:
-                                                        better = True
-                                                    if better:
-                                                        class SimpleResultDE:
-                                                            pass
-                                                        pearson4_result = SimpleResultDE()
-                                                        pearson4_result.params = vec_to_params(cand)
-                                                        try:
-                                                            print(f"DEBUG: pearson4_result set from differential_evolution cand: {pearson4_result.params}")
-                                                        except Exception:
-                                                            pass
-                                                    else:
-                                                        try:
-                                                            print(f"DEBUG: DE Pearson4 candidate rejected because PV EEF is closer (p4_rms={p4_eef_rms:.3g}, pv_rms={pv_eef_rms:.3g})")
-                                                        except Exception:
-                                                            pass
-                                            except Exception:
-                                                pass
-                                        except Exception:
-                                            pass
-                                    # If combined multi-start failed, fall back to the quick lmfit
-                                    # intensity-only fit when available and reasonably close.
-                                    try:
-                                        # Only accept quick intensity-only lmfit as a fallback
-                                        # if it provides an excellent intensity match.
-                                        if pearson4_result is None and 'quick_fit' in locals() and quick_fit is not None and hasattr(quick_fit, 'params'):
-                                            try:
-                                                model_rfit_q = pearson4_model.eval(params={k: float(v.value) for k, v in quick_fit.params.items() if hasattr(v, 'value')}, x=r_fit)
-                                                model_rfit_q = np.maximum(model_rfit_q, floor)
-                                                int_q_res = (np.log(model_rfit_q + floor) - np.log(I_fit + floor))
-                                                int_q_rms = float(np.sqrt(np.mean(int_q_res**2))) if int_q_res.size else np.inf
-                                                # tighten quick-fit fallback threshold to avoid showing
-                                                # Pearson4 when only an intensity fit (not EEF) exists
-                                                if np.isfinite(int_q_rms) and int_q_rms < 0.5:
-                                                    # also ensure quick_fit yields better EEF than PV
-                                                    try:
-                                                        # extract params into vector
-                                                        qp = quick_fit.params
-                                                        amp_q = float(qp['amplitude'].value) if 'amplitude' in qp else float(np.nanmax(I_fit) if I_fit.size else 1.0)
-                                                        cen_q = float(qp['center'].value) if 'center' in qp else float(r_fit[np.nanargmax(I_fit)]) if (r_fit.size and np.any(np.isfinite(I_fit))) else 0.0
-                                                        sig_q = float(qp['sigma'].value) if 'sigma' in qp else max(1e-3, float(Gamma_c_fit))
-                                                        exp_q = float(qp['expon'].value) if 'expon' in qp else 1.5
-                                                        skew_q = float(qp['skew'].value) if 'skew' in qp else 0.0
-                                                        p4_eef_rms_q = compute_p4_eef_rms_from_vec([amp_q, cen_q, sig_q, exp_q, skew_q])
-                                                    except Exception:
-                                                        p4_eef_rms_q = np.inf
-                                                    try:
-                                                        pv_eef_rms = compute_pv_eef_rms()
-                                                    except Exception:
-                                                        pv_eef_rms = np.inf
-                                                    if np.isfinite(p4_eef_rms_q) and np.isfinite(pv_eef_rms):
-                                                        better_q = (p4_eef_rms_q < pv_eef_rms)
-                                                    else:
-                                                        better_q = True
-                                                    if better_q:
-                                                        pearson4_result = quick_fit
-                                                        try:
-                                                            print(f"DEBUG: accepting quick lmfit intensity fit as fallback (int_rms={int_q_rms:.3g})")
-                                                        except Exception:
-                                                            pass
-                                                    else:
-                                                        try:
-                                                            print(f"DEBUG: quick lmfit fallback rejected because PV EEF is closer (p4_rms={p4_eef_rms_q:.3g}, pv_rms={pv_eef_rms:.3g})")
-                                                        except Exception:
-                                                            pass
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
-                                    
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pearson4_result = None
+                    # Unscaled EEF RMS on the fine grid for the acceptance gate.
+                    _y_p4 = _p4(r_arcsec, _amp_p4, _sig_p4, _m_p4, _nu_p4)
+                    _y_p4 = np.maximum(_y_p4, 0.0)
+                    _re_p4 = 2.0 * np.pi * r_arcsec * _y_p4 * _dr_fine
+                    _tot_p4 = np.sum(_re_p4)
+                    if _tot_p4 > 0 and np.isfinite(_tot_p4):
+                        _eef_p4_model = np.cumsum(_re_p4) / _tot_p4
+                        _eef_p4_at_rfit = np.interp(r_fit, r_arcsec, _eef_p4_model)
+                        _eef_rms = float(np.sqrt(np.mean((_eef_p4_at_rfit - _eef_data) ** 2)))
                     else:
-                        # fallback: use lmfit fit on intensity but keep previous result handling
-                        try:
-                            pearson4_result = pearson4_model.fit(I_fit, params, x=r_fit, max_nfev=10000)
-                        except Exception:
-                            pearson4_result = None
-                except Exception:
-                    pearson4_result = None
-                
-                # Generate Pearson4 diagnostic plot and compute EEF profile
-                try:
-                    # Only use Pearson4 results if an accepted fit exists; do not
-                    # plot or evaluate the initial guess when no accepted fit.
-                    pearson4_used_params_final = pearson4_result.params if (pearson4_result is not None and hasattr(pearson4_result, 'params')) else None
-                    if pearson4_used_params_final is not None:
-                        rplot_p4 = np.linspace(0.0, float(r_arcsec.max()), 1000)
-                        Ifit_p4 = pearson4_model.eval(pearson4_used_params_final, x=rplot_p4)
+                        _eef_rms = np.inf
 
-                        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
-                        # Left: intensity fit
-                        axes[0].plot(r_arcsec, I_profile, 'k.', ms=3, label='Data')
-                        axes[0].plot(rplot_p4, Ifit_p4, 'b-', lw=2, label='Pearson4')
-                        axes[0].set_xlabel('Radius [arcsec]')
-                        axes[0].set_ylabel('Mean intensity')
-                        axes[0].set_yscale('log')
-                        if np.any(I_profile > 0):
-                            lower = np.nanmin(I_profile[I_profile > 0])
-                            axes[0].set_ylim(bottom=max(lower * 0.1, 1e-12))
-                        axes[0].legend()
-                        axes[0].grid(True, which='both', linestyle='--', alpha=0.4)
-                        axes[0].set_title('Pearson4 Intensity Fit (log scale)')
-
-                        # Right: residuals (log residuals evaluated on r_fit)
-                        Ifit_p4_rfit = pearson4_model.eval(pearson4_used_params_final, x=r_fit)
-                        residuals = np.log(Ifit_p4_rfit + floor) - np.log(I_fit + floor)
-                        axes[1].plot(r_fit, residuals, 'ro', ms=4)
-                        axes[1].axhline(0, color='k', linestyle='--', linewidth=1)
-                        axes[1].set_xlabel('Radius [arcsec]')
-                        axes[1].set_ylabel('Log residual')
-                        axes[1].grid(True, which='both', linestyle='--', alpha=0.4)
-                        axes[1].set_title('Pearson4 Fit Quality')
-
-                        plt.tight_layout()
-                        # Do not save the standalone Pearson4 diagnostic figure (user request)
-                        try:
+                    if np.isfinite(_eef_rms) and _eef_rms < 0.10:
+                        class _P4Result:
                             pass
-                        except Exception:
-                            pass
-                        plt.close()
+                        pearson4_result = _P4Result()
+                        pearson4_result.params = {
+                            'amplitude': _amp_p4,
+                            'sigma':     _sig_p4,
+                            'm':         _m_p4,
+                            'nu':        _nu_p4,
+                        }
 
-                        # Compute EEF profile for Pearson4 using the chosen params
-                        I_fit_model_p4 = pearson4_model.eval(pearson4_used_params_final, x=r_arcsec)
-                        I_fit_model_p4 = np.maximum(I_fit_model_p4, 0.0)
-                        radial_energy_fit_p4 = 2.0 * np.pi * r_arcsec * I_fit_model_p4 * dr_arcsec
-                        total_fit_energy_p4 = np.sum(radial_energy_fit_p4)
-                        if total_fit_energy_p4 > 0 and np.isfinite(total_fit_energy_p4):
-                            fit_cumulative_p4 = np.cumsum(radial_energy_fit_p4)
-                            pearson4_profile_pct = 100.0 * fit_cumulative_p4 / total_fit_energy_p4
-                            pearson4_profile_diam = 2.0 * r_arcsec
-                        else:
-                            pearson4_profile_pct = None
-                            pearson4_profile_diam = None
+                # ------------------------------------------------------------------
+                # Compute EEF profile for plotting (regardless of acceptance gate —
+                # use whatever was the best fit found).
+                # ------------------------------------------------------------------
+                _p4_params_used = pearson4_result.params if (
+                    pearson4_result is not None and hasattr(pearson4_result, 'params')
+                ) else None
+
+                if _p4_params_used is not None:
+                    _I_p4 = _p4(r_arcsec,
+                                _p4_params_used['amplitude'],
+                                _p4_params_used['sigma'],
+                                _p4_params_used['m'],
+                                _p4_params_used['nu'])
+                    _I_p4 = np.maximum(_I_p4, 0.0)
+                    _re_p4_full = 2.0 * np.pi * r_arcsec * _I_p4 * _dr_fine
+                    _tot_p4_full = np.sum(_re_p4_full)
+                    if _tot_p4_full > 0 and np.isfinite(_tot_p4_full):
+                        pearson4_profile_pct  = 100.0 * np.cumsum(_re_p4_full) / _tot_p4_full
+                        pearson4_profile_diam = 2.0 * r_arcsec
                     else:
-                        # No accepted Pearson4 fit: ensure nothing plotted and no profile
-                        pearson4_profile_pct = None
+                        pearson4_profile_pct  = None
                         pearson4_profile_diam = None
-                except Exception as e:
-                    pearson4_profile_pct = None
+                else:
+                    pearson4_profile_pct  = None
                     pearson4_profile_diam = None
-            except ImportError:
-                pearson4_result = None
-                pearson4_profile_pct = None
-                pearson4_profile_diam = None
+
             except Exception:
-                pearson4_result = None
-                pearson4_profile_pct = None
-                pearson4_profile_diam = None
-            
+                pearson4_result        = None
+                pearson4_profile_pct   = None
+                pearson4_profile_diam  = None
             # Create merged diagnostic: intensity curves + residuals, then export fit parameters
             # Disabled by default to avoid creating a second figure window.
             if False:
@@ -5385,12 +4938,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 
                 # Pearson4 parameters
                 if pearson4_result is not None:
+                    _pr = pearson4_result.params
                     p4_params = {
-                        'Amplitude': pearson4_result.params['amplitude'].value,
-                        'Center [arcsec]': pearson4_result.params['center'].value,
-                        'Sigma [arcsec]': pearson4_result.params['sigma'].value,
-                        'Exponent (m)': pearson4_result.params['expon'].value,
-                        'Skewness (nu)': pearson4_result.params['skew'].value,
+                        'Amplitude': float(_pr['amplitude']),
+                        'Center [arcsec]': 0.0,
+                        'Sigma [arcsec]': float(_pr['sigma']),
+                        'Exponent (m)': float(_pr['m']),
+                        'Skewness (nu)': float(_pr['nu']),
                     }
                     
                     # Add Pearson4-specific parameters
@@ -6210,10 +5764,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     # Map lmfit parameter names to the exact output keys the user expects
                     mapping = [
                         ('amplitude', 'Pearson4_Amplitude', 'Amplitude'),
-                        ('center', 'Pearson4_Center_arcsec', 'Center_arcsec'),
                         ('sigma', 'Pearson4_Sigma_arcsec', 'Sigma_arcsec'),
-                        ('expon', 'Pearson4_Exponent_m', 'Exponent_m'),
-                        ('skew', 'Pearson4_Skew_nu', 'Skew_nu')
+                        ('m', 'Pearson4_Exponent_m', 'Exponent_m'),
+                        ('nu', 'Pearson4_Skew_nu', 'Skew_nu'),
                     ]
                     parts = []
                     for lm_name, out_key, disp_name in mapping:
@@ -6735,18 +6288,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 pearson4_ok = ('pearson4_result' in locals() and pearson4_result is not None and hasattr(pearson4_result, 'params'))
             except Exception:
                 pearson4_ok = False
-            if pearson4_ok and 'pearson4_model' in locals():
+            if pearson4_ok:
                 try:
-                    # Prefer using the accepted fit params only
-                    p4_params_plot = pearson4_result.params
-                    # Convert lmfit Parameters to plain dict if necessary
-                    try:
-                        import lmfit as _lm
-                        if isinstance(p4_params_plot, _lm.parameter.Parameters):
-                            p4_params_plot = {k: v.value for k, v in p4_params_plot.items()}
-                    except Exception:
-                        pass
-                    p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                    _pr = pearson4_result.params
+                    _u = rgrid / np.maximum(float(_pr['sigma']), 1e-15)
+                    p4_I = (float(_pr['amplitude'])
+                            * (1.0 + _u * _u) ** (-np.maximum(float(_pr['m']), 0.5))
+                            * np.exp(-float(_pr['nu']) * np.arctan(_u)))
                     p4_I = np.maximum(p4_I, 0.0)
                     p4_eef = compute_eef_pct_from_I(p4_I, rgrid)
                     p4_eef[p4_eef > 95.0] = np.nan
@@ -6785,34 +6333,18 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         # If a pearson4 params object used for plotting exists (p4_params_plot),
         # capture its values even if pearson4_result wasn't stored as a full fit result.
         try:
-            if 'p4_params_plot' in locals() and p4_params_plot is not None:
-                pr = p4_params_plot
-                # lmfit.Parameters-like object
-                try:
-                    if hasattr(pr, 'keys'):
-                        for src_name, out_key in (('amplitude', 'Pearson4_Amplitude'),
-                                                  ('center', 'Pearson4_Center_arcsec'),
-                                                  ('sigma', 'Pearson4_Sigma_arcsec'),
-                                                  ('expon', 'Pearson4_Exponent_m'),
-                                                  ('skew', 'Pearson4_Skew_nu')):
-                            try:
-                                if src_name in pr:
-                                    val = pr[src_name].value if hasattr(pr[src_name], 'value') else pr[src_name]
-                                    params[out_key] = float(val)
-                            except Exception:
-                                continue
-                except Exception:
-                    # fallback for plain dict-like
+            if pearson4_result is not None and hasattr(pearson4_result, 'params'):
+                pr = pearson4_result.params
+                for src_name, out_key in (('amplitude', 'Pearson4_Amplitude'),
+                                          ('sigma', 'Pearson4_Sigma_arcsec'),
+                                          ('m', 'Pearson4_Exponent_m'),
+                                          ('nu', 'Pearson4_Skew_nu')):
                     try:
-                        for src_name, out_key in (('amplitude', 'Pearson4_Amplitude'),
-                                                  ('center', 'Pearson4_Center_arcsec'),
-                                                  ('sigma', 'Pearson4_Sigma_arcsec'),
-                                                  ('expon', 'Pearson4_Exponent_m'),
-                                                  ('skew', 'Pearson4_Skew_nu')):
-                            if src_name in pr:
-                                params[out_key] = float(pr[src_name])
+                        if src_name in pr:
+                            params[out_key] = float(pr[src_name])
                     except Exception:
-                        pass
+                        continue
+                params['Pearson4_Center_arcsec'] = 0.0
         except Exception:
             pass
         try:
@@ -6827,12 +6359,11 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         try:
             if pearson4_result is not None and hasattr(pearson4_result, 'params'):
                 pr = pearson4_result.params
-                # Core fitted parameters (store with the exact keys requested)
-                params['Pearson4_Amplitude'] = float(pr['amplitude'].value) if 'amplitude' in pr else None
-                params['Pearson4_Center_arcsec'] = float(pr['center'].value) if 'center' in pr else None
-                params['Pearson4_Sigma_arcsec'] = float(pr['sigma'].value) if 'sigma' in pr else None
-                params['Pearson4_Exponent_m'] = float(pr['expon'].value) if 'expon' in pr else None
-                params['Pearson4_Skew_nu'] = float(pr['skew'].value) if 'skew' in pr else None
+                params['Pearson4_Amplitude'] = float(pr['amplitude']) if 'amplitude' in pr else None
+                params['Pearson4_Center_arcsec'] = 0.0
+                params['Pearson4_Sigma_arcsec'] = float(pr['sigma']) if 'sigma' in pr else None
+                params['Pearson4_Exponent_m'] = float(pr['m']) if 'm' in pr else None
+                params['Pearson4_Skew_nu'] = float(pr['nu']) if 'nu' in pr else None
         except Exception:
             pass
         try:
@@ -6964,18 +6495,17 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     except Exception:
                         # lmfit may not be installed or conversion not needed
                         pass
-                    if 'pearson4_model' in locals() and (p4_params_for_plot is not None):
+                    if p4_params_for_plot is not None:
                         try:
-                            p4_I = pearson4_model.eval(p4_params_for_plot, x=rgrid)
-                        except Exception:
-                            p4_I = np.full_like(rgrid, np.nan)
-                    elif 'pearson4_model' in locals() and ('p4_params_plot' in locals() and p4_params_plot is not None):
-                        try:
-                            p4_I = pearson4_model.eval(p4_params_plot, x=rgrid)
+                            _pr = p4_params_for_plot
+                            _u = rgrid / np.maximum(float(_pr['sigma']), 1e-15)
+                            p4_I = (float(_pr['amplitude'])
+                                    * (1.0 + _u * _u) ** (-np.maximum(float(_pr['m']), 0.5))
+                                    * np.exp(-float(_pr['nu']) * np.arctan(_u)))
+                            p4_I = np.maximum(p4_I, 0.0)
                         except Exception:
                             p4_I = np.full_like(rgrid, np.nan)
                     else:
-                        # No intensity-based fallback: only plot Pearson4 if EEF-fit params exist
                         p4_I = np.full_like(rgrid, np.nan)
                 except Exception:
                     p4_I = np.full_like(rgrid, np.nan)
@@ -8159,6 +7689,7 @@ if __name__ == '__main__':
                                         max_r = ws_a.max_row or 0
                                         numeric_count = 0
                                         total_checked = 0
+                                        formula_count = 0  # unevaluated formulas (cached=None)
                                         for check_r in range(2, min(max_r, 1000) + 1):
                                             try:
                                                 mmcell = ws_a.cell(row=check_r, column=1).value
@@ -8173,15 +7704,20 @@ if __name__ == '__main__':
                                             try:
                                                 v = ws_a.cell(row=check_r, column=cand_col).value
                                                 # if cell contains a formula, prefer cached value from data_only workbook
-                                                if isinstance(v, str) and v.startswith('='):
+                                                _was_formula = isinstance(v, str) and v.startswith('=')
+                                                if _was_formula:
                                                     if ws_a_values is not None:
                                                         try:
                                                             v = ws_a_values.cell(row=check_r, column=cand_col).value
                                                         except Exception:
                                                             pass
                                                     else:
-                                                        # No cached numeric value available; do not attempt heuristic evaluation
                                                         v = None
+                                                # Formula with no cached result: count separately,
+                                                # do not pollute total_checked with uncountable cells
+                                                if _was_formula and v is None:
+                                                    formula_count += 1
+                                                    continue
                                                 total_checked += 1
                                                 if v is None:
                                                     continue
@@ -8195,7 +7731,14 @@ if __name__ == '__main__':
                                                 continue
                                             except Exception:
                                                 continue
-                                        frac = (numeric_count / total_checked) if total_checked > 0 else 0.0
+                                        # If every MM cell is an unevaluated formula the column is
+                                        # almost certainly a numeric A_eff column — treat as frac=1.
+                                        if total_checked == 0 and formula_count > 0:
+                                            frac = 1.0
+                                        elif total_checked > 0:
+                                            frac = numeric_count / total_checked
+                                        else:
+                                            frac = 0.0
                                         dist = abs(e_val - float(energy_val))
                                         cand_info.append((e_val, cand_col, frac, dist))
                                     except Exception:
@@ -8216,52 +7759,218 @@ if __name__ == '__main__':
                         except Exception:
                             chosen_src = None
 
+                        # Fallback: when no D/E mapping table was found, scan the header
+                        # row of the A_eff sheet for energy-labelled columns (e.g. "0.5 keV"
+                        # or the numeric value 0.5) and pick the column whose energy is
+                        # closest to energy_val.  Only applies when row 1 col A is non-numeric
+                        # (i.e. the sheet has a header row, not raw data from row 1).
+                        if chosen_src is None and energy_val is not None:
+                            try:
+                                import re as _re_hdr
+                                # Only proceed if row 1 looks like a header (col A is non-numeric)
+                                _row1_col1 = ws_a.cell(row=1, column=1).value
+                                _has_header = True
+                                try:
+                                    if _row1_col1 is not None:
+                                        int(float(_row1_col1))
+                                        _has_header = False  # numeric → data row, not a header
+                                except (ValueError, TypeError):
+                                    pass  # non-numeric → header row
+                                if _has_header:
+                                    _best_hdr_col = None
+                                    _best_hdr_dist = float('inf')
+                                    _max_col_a = ws_a.max_column or 0
+                                    _col2_energy = None  # energy label on col B itself
+                                    # Read col B's own header to see if it already matches
+                                    try:
+                                        _hval_b = ws_a.cell(row=1, column=2).value
+                                        if _hval_b is not None:
+                                            if isinstance(_hval_b, (int, float)):
+                                                _col2_energy = float(_hval_b)
+                                            else:
+                                                _mh_b = _re_hdr.search(r"(\d+(?:\.\d*)?)", str(_hval_b))
+                                                if _mh_b:
+                                                    _ev_b = float(_mh_b.group(1))
+                                                    _hs_b = str(_hval_b)
+                                                    if _ev_b > 100 and 'ev' in _hs_b.lower() and 'kev' not in _hs_b.lower():
+                                                        _ev_b /= 1000.0
+                                                    _col2_energy = _ev_b
+                                    except Exception:
+                                        _col2_energy = None
+                                    # If col B already contains the right energy, nothing to do
+                                    if _col2_energy is not None and abs(_col2_energy - float(energy_val)) < 1e-6:
+                                        pass  # col B already correct; leave chosen_src = None
+                                    else:
+                                        # Scan cols 3+ for energy labels in row 1
+                                        for _ccol in range(3, _max_col_a + 1):
+                                            try:
+                                                _hval = ws_a.cell(row=1, column=_ccol).value
+                                            except Exception:
+                                                _hval = None
+                                            if _hval is None:
+                                                continue
+                                            _ev = None
+                                            try:
+                                                if isinstance(_hval, (int, float)):
+                                                    _ev = float(_hval)
+                                                else:
+                                                    _hs = str(_hval)
+                                                    _mh = _re_hdr.search(r"(\d+(?:\.\d*)?)", _hs)
+                                                    if _mh:
+                                                        _ev = float(_mh.group(1))
+                                                        if _ev > 100 and 'ev' in _hs.lower() and 'kev' not in _hs.lower():
+                                                            _ev /= 1000.0
+                                            except Exception:
+                                                _ev = None
+                                            if _ev is None:
+                                                continue
+                                            _dist = abs(_ev - float(energy_val))
+                                            if _dist < _best_hdr_dist:
+                                                _best_hdr_dist = _dist
+                                                _best_hdr_col = _ccol
+                                        # Validate the chosen column has numeric data
+                                        if _best_hdr_col is not None:
+                                            _num_cnt = 0
+                                            _tot_cnt = 0
+                                            _form_cnt = 0
+                                            _max_r_a2 = ws_a.max_row or 0
+                                            for _cr in range(2, min(_max_r_a2, 1000) + 1):
+                                                try:
+                                                    _mmcv = ws_a.cell(row=_cr, column=1).value
+                                                    if _mmcv is None:
+                                                        continue
+                                                    _ = int(float(_mmcv))
+                                                except Exception:
+                                                    continue
+                                                try:
+                                                    _dv = ws_a.cell(row=_cr, column=_best_hdr_col).value
+                                                    _is_form = isinstance(_dv, str) and _dv.startswith('=')
+                                                    if _is_form and ws_a_values is not None:
+                                                        try:
+                                                            _dv_c = ws_a_values.cell(row=_cr, column=_best_hdr_col).value
+                                                            if _dv_c is not None:
+                                                                _dv = _dv_c
+                                                                _is_form = False
+                                                        except Exception:
+                                                            pass
+                                                    if _is_form and _dv is not None:
+                                                        _form_cnt += 1
+                                                        continue
+                                                    _tot_cnt += 1
+                                                    if _dv is not None:
+                                                        try:
+                                                            float(_dv)
+                                                            _num_cnt += 1
+                                                        except Exception:
+                                                            pass
+                                                except Exception:
+                                                    pass
+                                            if _tot_cnt == 0 and _form_cnt > 0:
+                                                _frac_h = 1.0  # all unevaluated formulas → trust
+                                            elif _tot_cnt > 0:
+                                                _frac_h = _num_cnt / _tot_cnt
+                                            else:
+                                                _frac_h = 0.0
+                                            if _frac_h > 0.5:
+                                                chosen_src = _best_hdr_col
+                                                print(f"A_eff col B fallback: header-row col {_best_hdr_col} for energy={energy_val} keV")
+                            except Exception:
+                                pass
+
                         # If chosen_src found, copy its numeric values into column B (index=2).
-                        # For each MM row, prefer numeric value from chosen_src; if that
-                        # is not numeric, fall back to column 3 (adjusted A_eff) when numeric.
+                        # For formula-based columns (VLOOKUP/XLOOKUP, data_only=None),
+                        # manually evaluate MM# → Row# → A_eff using the workbook's own
+                        # lookup tables ($V$6:$AG$20 and MM configuration sheet).
                         if chosen_src is not None and chosen_src != 2:
+                            # Pre-build manual MM# → A_eff map by evaluating the VLOOKUP chain.
+                            mm_to_base_manual = {}
+                            try:
+                                import re as _re_fml
+                                # Detect formula and extract VLOOKUP offset
+                                _vlookup_offset = None
+                                for _fchk in range(2, min((ws_a.max_row or 0) + 1, 12)):
+                                    _fv = ws_a.cell(row=_fchk, column=chosen_src).value
+                                    if isinstance(_fv, str) and _fv.startswith('='):
+                                        _fm = _re_fml.search(r'\$V\$6:\$AG\$20\s*,\s*(\d+)', _fv)
+                                        if _fm:
+                                            _vlookup_offset = int(_fm.group(1))
+                                        elif 10 <= chosen_src <= 20:
+                                            _vlookup_offset = chosen_src - 8
+                                        break
+                                if _vlookup_offset is not None:
+                                    # Build MM# → Row# from MM configuration (col D=MM#, col C=Row#)
+                                    _mm_to_row = {}
+                                    if 'MM configuration' in wb.sheetnames:
+                                        _ws_mmcfg = wb['MM configuration']
+                                        for _rr in range(2, (_ws_mmcfg.max_row or 0) + 1):
+                                            _mm_v = _ws_mmcfg.cell(row=_rr, column=4).value
+                                            _row_v = _ws_mmcfg.cell(row=_rr, column=3).value
+                                            if _mm_v is not None and _row_v is not None:
+                                                try:
+                                                    _mm_to_row[int(float(_mm_v))] = int(float(_row_v))
+                                                except Exception:
+                                                    pass
+                                    # Build Row# → A_eff from $V$6:$AG$20
+                                    # col V = col 22 in sheet; VLOOKUP col index = 21 + offset
+                                    _aeff_col = 21 + _vlookup_offset
+                                    _row_to_aeff = {}
+                                    for _lr in range(6, 21):
+                                        _rk = ws_a.cell(row=_lr, column=22).value  # col V = Row#
+                                        _av = ws_a.cell(row=_lr, column=_aeff_col).value
+                                        if _rk is not None and _av is not None:
+                                            try:
+                                                _row_to_aeff[int(float(_rk))] = float(_av)
+                                            except Exception:
+                                                pass
+                                    for _mm, _rk in _mm_to_row.items():
+                                        _av = _row_to_aeff.get(_rk)
+                                        if _av is not None:
+                                            mm_to_base_manual[_mm] = _av
+                            except Exception:
+                                mm_to_base_manual = {}
+
                             for row_idx in range(2, (ws_a.max_row or 0) + 1):
                                 try:
                                     # ensure this row corresponds to an MM entry
                                     mmcell = ws_a.cell(row=row_idx, column=1).value
+                                    mm_int = None
                                     try:
                                         if mmcell is None:
                                             continue
-                                        _ = int(float(mmcell))
+                                        mm_int = int(float(mmcell))
                                     except Exception:
                                         continue
 
-                                    src_val = ws_a.cell(row=row_idx, column=chosen_src).value
-                                    # if it's a formula, try cached value
-                                    try:
-                                        if isinstance(src_val, str) and src_val.startswith('=') and ws_a_values is not None:
-                                            tmp = ws_a_values.cell(row=row_idx, column=chosen_src).value
-                                            if tmp is not None:
-                                                src_val = tmp
-                                        else:
-                                            # Do not evaluate formulas heuristically; treat as missing
-                                            if isinstance(src_val, str) and src_val.startswith('='):
-                                                src_val = None
-                                    except Exception:
-                                        src_val = None
-                                    write_val = None
-                                    try:
-                                        if src_val is not None:
-                                            write_val = float(src_val)
-                                    except Exception:
-                                        write_val = None
-                                    # If direct float failed, try to extract numeric substring (e.g. '0.2 keV')
-                                    if write_val is None and src_val is not None:
-                                        try:
-                                            import re as _re
-                                            m = _re.search(r"(-?\d+(?:\.\d+)?)", str(src_val))
-                                            if m:
-                                                write_val = float(m.group(1))
-                                        except Exception:
-                                            write_val = None
+                                    # Prefer manually-evaluated lookup (for formula columns)
+                                    write_val = mm_to_base_manual.get(mm_int)
 
                                     if write_val is None:
-                                        # fallback to adjusted column (C, index=3)
+                                        src_val = ws_a.cell(row=row_idx, column=chosen_src).value
+                                        try:
+                                            if isinstance(src_val, str) and src_val.startswith('=') and ws_a_values is not None:
+                                                tmp = ws_a_values.cell(row=row_idx, column=chosen_src).value
+                                                if tmp is not None:
+                                                    src_val = tmp
+                                            elif isinstance(src_val, str) and src_val.startswith('='):
+                                                src_val = None
+                                        except Exception:
+                                            src_val = None
+                                        try:
+                                            if src_val is not None:
+                                                write_val = float(src_val)
+                                        except Exception:
+                                            write_val = None
+                                        if write_val is None and src_val is not None:
+                                            try:
+                                                import re as _re
+                                                m = _re.search(r"(-?\d+(?:\.\d+)?)", str(src_val))
+                                                if m:
+                                                    write_val = float(m.group(1))
+                                            except Exception:
+                                                write_val = None
+
+                                    # Last resort: col C only when manual lookup produced nothing
+                                    if write_val is None and not mm_to_base_manual:
                                         try:
                                             alt = ws_a.cell(row=row_idx, column=3).value
                                             if alt is not None:
