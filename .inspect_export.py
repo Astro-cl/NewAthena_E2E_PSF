@@ -3,7 +3,9 @@ import os,glob
 pkg_dir='Exports/Export_reallistic_20260416_112020/2__Ang__20__E__7__Def__0_reallistic_20260416_112145'
 print('Package dir exists:', os.path.isdir(pkg_dir))
 # find fitparams
-fit_paths=glob.glob(os.path.join(pkg_dir,'fitparams_aeffloss.xlsx'))
+fit_paths=glob.glob(os.path.join(pkg_dir,'EEF_fitting.xlsx'))
+if not fit_paths:
+    fit_paths=glob.glob(os.path.join(pkg_dir,'fitparams_aeffloss.xlsx'))
 if not fit_paths:
     fit_paths=glob.glob(os.path.join(pkg_dir,'EEF_fittingparams*.xlsx'))
 print('Found fitparams:', fit_paths)
@@ -25,7 +27,8 @@ for fp in fit_paths:
 # find exported workbook (input file copied into package)
 xls = None
 for cand in os.listdir(pkg_dir):
-    if cand.lower().endswith('.xlsx') and not cand.lower().startswith('eef_fittingparams') and 'fitparams' not in cand.lower():
+    if (cand.lower().endswith('.xlsx') and not cand.lower().startswith('eef_fittingparams')
+            and 'fitparams' not in cand.lower() and cand.lower() != 'eef_fitting.xlsx'):
         xls=os.path.join(pkg_dir,cand)
         break
 print('\nExported workbook:', xls)

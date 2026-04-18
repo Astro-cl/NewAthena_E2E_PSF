@@ -6268,19 +6268,22 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 pa_s = pa[order]
                 # interpolate percent at diam_grid; values outside range will be extrapolated as edge values
                 agg_pct_on_grid = np.interp(diam_grid, da_s, pa_s, left=pa_s[0], right=pa_s[-1])
-                agg_pct_on_grid[agg_pct_on_grid > 95.0] = np.nan
             else:
                 agg_pct_on_grid = np.full_like(diam_grid, np.nan)
         except Exception:
             agg_pct_on_grid = np.full_like(diam_grid, np.nan)
+        # Excel version: up to 99.9%; plot version: up to 95%
+        agg_pct_xlsx = np.where(agg_pct_on_grid > 99.9, np.nan, agg_pct_on_grid)
+        agg_pct_on_grid = np.where(agg_pct_on_grid > 95.0, np.nan, agg_pct_on_grid)
 
         # PV model EEF on grid
         try:
             pv_I = beta_pseudo_gaussian(rgrid, A_fit, Gamma_c_fit, Gamma_w_fit, eta_fit, beta_fit, scalar_fit)
             pv_eef = compute_eef_pct_from_I(pv_I, rgrid)
-            pv_eef[pv_eef > 95.0] = np.nan
         except Exception:
             pv_eef = np.full_like(diam_grid, np.nan)
+        pv_eef_xlsx = np.where(pv_eef > 99.9, np.nan, pv_eef)
+        pv_eef = np.where(pv_eef > 95.0, np.nan, pv_eef)
 
         # Pearson4 EEF on grid - ONLY compute if an accepted pearson4_result exists
         try:
@@ -6297,13 +6300,14 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                             * np.exp(-float(_pr['nu']) * np.arctan(_u)))
                     p4_I = np.maximum(p4_I, 0.0)
                     p4_eef = compute_eef_pct_from_I(p4_I, rgrid)
-                    p4_eef[p4_eef > 95.0] = np.nan
                 except Exception:
                     p4_eef = np.full_like(diam_grid, np.nan)
             else:
                 p4_eef = np.full_like(diam_grid, np.nan)
         except Exception:
             p4_eef = np.full_like(diam_grid, np.nan)
+        p4_eef_xlsx = np.where(p4_eef > 99.9, np.nan, p4_eef)
+        p4_eef = np.where(p4_eef > 95.0, np.nan, p4_eef)
 
         # King EEF on grid
         try:
@@ -6311,22 +6315,45 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 k_I = king_profile(rgrid, I0_k, rc_k, alpha_k, b_k)
                 k_I = np.maximum(k_I, 0.0)
                 k_eef = compute_eef_pct_from_I(k_I, rgrid)
-                k_eef[k_eef > 95.0] = np.nan
             else:
                 k_eef = np.full_like(diam_grid, np.nan)
         except Exception:
             k_eef = np.full_like(diam_grid, np.nan)
+        k_eef_xlsx = np.where(k_eef > 99.9, np.nan, k_eef)
+        k_eef = np.where(k_eef > 95.0, np.nan, k_eef)
 
-        # Make a canonical name used later in plotting code
+        # Make a canonical name used later in plotting code (95% cap)
         try:
             if 'k_eef' in locals() and k_eef is not None:
                 king_eef_pct_plot = k_eef
         except Exception:
             pass
 
+        # Origin (0,0) EEF interpolated to diam_grid
+        try:
+            _pct_orig_raw = (profile_pct_00 if 'profile_pct_00' in locals() and profile_pct_00 is not None
+                             else (frac_00 * 100 if 'frac_00' in locals() and frac_00 is not None else None))
+            _diam_orig_raw = (profile_diam_00 if 'profile_diam_00' in locals() and profile_diam_00 is not None
+                              else (2 * r_profile_00 * m_to_arcsec if 'r_profile_00' in locals() and r_profile_00 is not None else None))
+            if (_pct_orig_raw is not None and _diam_orig_raw is not None
+                    and hasattr(_pct_orig_raw, '__len__') and len(_pct_orig_raw) > 0):
+                _pa_o = np.asarray(_pct_orig_raw, dtype=float)
+                _da_o = np.asarray(_diam_orig_raw, dtype=float)
+                _ord_o = np.argsort(_da_o)
+                orig_pct_on_grid = np.interp(diam_grid, _da_o[_ord_o], _pa_o[_ord_o],
+                                             left=_pa_o[_ord_o[0]], right=_pa_o[_ord_o[-1]])
+            else:
+                orig_pct_on_grid = np.full_like(diam_grid, np.nan)
+        except Exception:
+            orig_pct_on_grid = np.full_like(diam_grid, np.nan)
+        orig_pct_xlsx = np.where(orig_pct_on_grid > 99.9, np.nan, orig_pct_on_grid)
+        orig_pct_on_grid = np.where(orig_pct_on_grid > 95.0, np.nan, orig_pct_on_grid)
+
         # Build DataFrame for sheet1: one column per curve (index = diameter)
-        df_eef = _pd.DataFrame({'diameter_arcsec': diam_grid, 'EEF_aggregated_pct': agg_pct_on_grid,
-                                 'EEF_pv_pct': pv_eef, 'EEF_pearson4_pct': p4_eef, 'EEF_king_pct': k_eef})
+        # Excel version uses 99.9%-capped arrays; plot arrays remain at 95%.
+        df_eef = _pd.DataFrame({'diameter_arcsec': diam_grid, 'EEF_aggregated_pct': agg_pct_xlsx,
+                                 'EEF_origin_pct': orig_pct_xlsx,
+                                 'EEF_pv_pct': pv_eef_xlsx, 'EEF_pearson4_pct': p4_eef_xlsx, 'EEF_king_pct': k_eef_xlsx})
 
         # Build parameter table for sheet2
         params = {}
@@ -8127,7 +8154,7 @@ if __name__ == '__main__':
                             if os.path.exists(p):
                                 ordered.append(p)
 
-                            # Before creating the package, compute A_eff sums and write a fitparams_aeffloss workbook
+                            # Before creating the package, compute A_eff sums and write EEF_fitting workbook
                             sum_orig = None
                             sum_mod = None
                             aeff_loss = None
@@ -8178,10 +8205,11 @@ if __name__ == '__main__':
                             if sum_orig is not None and sum_mod is not None and sum_orig != 0:
                                 aeff_loss = 1.0 - (sum_mod / sum_orig)
 
-                            # write fitparams_aeffloss.xlsx inside the package dir (merge existing Fit_parameters if possible)
+                            # write EEF_fitting.xlsx inside the package dir (merge existing Fit_parameters + EEF_curves with formulas)
                             try:
-                                target_fp = os.path.join(pkg_path, 'fitparams_aeffloss.xlsx')
+                                target_fp = os.path.join(pkg_path, 'EEF_fitting.xlsx')
                                 df_rows = []
+                                df_eef_src = None
                                 cand = os.path.join(pkg_path, 'EEF_fittingparams.xlsx')
                                 existing_fp = cand if os.path.exists(cand) else None
                                 if existing_fp is None:
@@ -8196,12 +8224,99 @@ if __name__ == '__main__':
                                                 df_rows.append({'parameter': str(r['parameter']), 'value': r['value']})
                                     except Exception:
                                         df_rows = []
+                                    try:
+                                        df_eef_src = pd.read_excel(existing_fp, sheet_name='EEF_curves', engine='openpyxl')
+                                    except Exception:
+                                        df_eef_src = None
                                 df_rows.append({'parameter': 'Aeff_sum_orig', 'value': sum_orig})
                                 df_rows.append({'parameter': 'Aeff_sum_mod', 'value': sum_mod})
                                 df_rows.append({'parameter': 'Aeff_loss', 'value': aeff_loss})
                                 try:
                                     import pandas as _pd
-                                    _pd.DataFrame(df_rows).to_excel(target_fp, sheet_name='Fit_parameters', index=False)
+                                    with _pd.ExcelWriter(target_fp, engine='openpyxl') as _writer:
+                                        _pd.DataFrame(df_rows).to_excel(_writer, sheet_name='Fit_parameters', index=False)
+                                        # Add EEF_curves sheet: data columns for both data curves,
+                                        # formula columns (I + integrand + EEF) for each of the 3 fits.
+                                        if df_eef_src is not None and 'diameter_arcsec' in df_eef_src.columns:
+                                            _wb = _writer.book
+                                            _ws = _wb.create_sheet('EEF_curves')
+                                            _hdr = [
+                                                'diameter_arcsec',
+                                                'EEF_centered_min_pct',
+                                                'EEF_centered_origin_pct',
+                                                'I_pv [arb.u.]', 'I_pv_x_r', 'EEF_pv_pct',
+                                                'I_pearson4 [arb.u.]', 'I_pearson4_x_r', 'EEF_pearson4_pct',
+                                                'I_king [arb.u.]', 'I_king_x_r', 'EEF_king_pct',
+                                            ]
+                                            for _ci, _h in enumerate(_hdr, 1):
+                                                _ws.cell(1, _ci).value = _h
+                                            _diam_vals = list(df_eef_src['diameter_arcsec'])
+                                            # Forward-fill NaN (capped >95% rows) so every row
+                                            # has a numeric value matching the formula-column length
+                                            def _to_full(col_name):
+                                                if col_name not in df_eef_src.columns:
+                                                    return [None] * len(_diam_vals)
+                                                s = df_eef_src[col_name].ffill()
+                                                return [None if (v != v) else v for v in s]
+                                            _eef_min  = _to_full('EEF_aggregated_pct')
+                                            _eef_orig = _to_full('EEF_origin_pct')
+                                            _end = 1 + len(_diam_vals)  # last data row index
+                                            # VLOOKUP helpers referencing the Fit_parameters sheet
+                                            def _vl(key):
+                                                return f'VLOOKUP("{key}",Fit_parameters!$A:$B,2,FALSE)'
+                                            _A_lu = _vl('Modified_PV_Amplitude_A')
+                                            _eta_lu = _vl('Modified_PV_eta')
+                                            _sc_lu = _vl('Modified_PV_scalar')
+                                            _beta_lu = _vl('Modified_PV_beta')
+                                            _Gc_lu = _vl('Modified_PV_Gamma_c_arcsec')
+                                            _Gw_lu = _vl('Modified_PV_Gamma_w_arcsec')
+                                            _Amp4_lu = _vl('Pearson4_Amplitude')
+                                            _sig4_lu = _vl('Pearson4_Sigma_arcsec')
+                                            _m4_lu = _vl('Pearson4_Exponent_m')
+                                            _nu4_lu = _vl('Pearson4_Skew_nu')
+                                            _I0k_lu = _vl('King_I0')
+                                            _rck_lu = _vl('King_rc_arcsec')
+                                            _ak_lu = _vl('King_alpha')
+                                            _bk_lu = _vl('King_b')
+                                            for _ri, (_dval, _emin, _eorig) in enumerate(
+                                                    zip(_diam_vals, _eef_min, _eef_orig), start=2):
+                                                _r = f'A{_ri}/2'  # radius = diameter / 2
+                                                _ws.cell(_ri, 1).value = _dval
+                                                _ws.cell(_ri, 2).value = _emin
+                                                _ws.cell(_ri, 3).value = _eorig
+                                                # Col D: Modified PV intensity
+                                                _G = f'EXP(-4*LN(2)*(({_r})/({_Gc_lu}))^2)'
+                                                _ae = f'(POWER(2,1/({_beta_lu}))-1)'
+                                                _C = f'1/POWER(1+{_ae}*(2*({_r})/({_Gw_lu}))^2,{_beta_lu})'
+                                                _mix = f'(1-{_eta_lu})*{_G}+{_eta_lu}*{_sc_lu}*{_C}'
+                                                _nrm = f'(1-{_eta_lu})+{_eta_lu}*{_sc_lu}'
+                                                _ws.cell(_ri, 4).value = f'={_A_lu}*({_mix})/({_nrm})'
+                                                # Col E: I_pv * r  (integrand for EEF)
+                                                _ws.cell(_ri, 5).value = f'=D{_ri}*{_r}'
+                                                # Col F: EEF_pv_pct (cumulative sum / total)
+                                                _ws.cell(_ri, 6).value = (
+                                                    f'=IF(SUM($E$2:$E${_end})>0,'
+                                                    f'100*SUM($E$2:E{_ri})/SUM($E$2:$E${_end}),NA())')
+                                                # Col G: Pearson4 intensity
+                                                _u4 = f'({_r})/({_sig4_lu})'
+                                                _ws.cell(_ri, 7).value = (
+                                                    f'={_Amp4_lu}*POWER(1+({_u4})^2,-({_m4_lu}))'
+                                                    f'*EXP(-({_nu4_lu})*ATAN({_u4}))')
+                                                # Col H: I_pearson4 * r
+                                                _ws.cell(_ri, 8).value = f'=G{_ri}*{_r}'
+                                                # Col I: EEF_pearson4_pct
+                                                _ws.cell(_ri, 9).value = (
+                                                    f'=IF(SUM($H$2:$H${_end})>0,'
+                                                    f'100*SUM($H$2:H{_ri})/SUM($H$2:$H${_end}),NA())')
+                                                # Col J: King intensity
+                                                _ws.cell(_ri, 10).value = (
+                                                    f'={_I0k_lu}*POWER(1+(({_r})/({_rck_lu}))^2,-({_ak_lu}))+{_bk_lu}')
+                                                # Col K: I_king * r
+                                                _ws.cell(_ri, 11).value = f'=J{_ri}*{_r}'
+                                                # Col L: EEF_king_pct
+                                                _ws.cell(_ri, 12).value = (
+                                                    f'=IF(SUM($K$2:$K${_end})>0,'
+                                                    f'100*SUM($K$2:K{_ri})/SUM($K$2:$K${_end}),NA())')
                                     if existing_fp is not None and os.path.exists(existing_fp):
                                         try:
                                             os.remove(existing_fp)
@@ -8246,7 +8361,7 @@ if __name__ == '__main__':
                             if 'pkg_path' in locals() and os.path.isdir(pkg_path):
                                 candidate_files.append(os.path.join(pkg_path, 'EEF_fittingparams.xlsx'))
                                 # include the aeff-loss fitparams file we write earlier
-                                candidate_files.append(os.path.join(pkg_path, 'fitparams_aeffloss.xlsx'))
+                                candidate_files.append(os.path.join(pkg_path, 'EEF_fitting.xlsx'))
                                 # search for common patterns (renamed or original)
                                 candidate_files.extend(glob.glob(os.path.join(pkg_path, 'E2E_EEF_and_fitparams_*.xlsx')))
                                 candidate_files.extend(glob.glob(os.path.join(pkg_path, 'CustomPSFs', 'E2E_EEF_and_fitparams_*.xlsx')))
@@ -8273,9 +8388,10 @@ if __name__ == '__main__':
                                             lname = name.lower()
                                             # accept a variety of fitparams filenames including
                                             # E2E_EEF_and_fitparams, EEF_fittingparams, and
-                                            # the fitparams_aeffloss workbook we generate.
+                                            # the EEF_fitting workbook we generate.
                                             if ('e2e_eef_and_fitparams' in lname or
                                                 'eef_fittingparams' in lname or
+                                                'eef_fitting' in lname or
                                                 'fitparams' in lname):
                                                 # extract to temp and attempt to read
                                                 tf = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(name)[1])

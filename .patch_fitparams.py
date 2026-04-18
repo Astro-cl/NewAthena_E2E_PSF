@@ -1,21 +1,25 @@
 from openpyxl import load_workbook
 import os,glob
 pkg_dir='Exports/Export_reallistic_20260416_112020/2__Ang__20__E__7__Def__0_reallistic_20260416_112145'
-fit_fp=os.path.join(pkg_dir,'fitparams_aeffloss.xlsx')
+fit_fp=os.path.join(pkg_dir,'EEF_fitting.xlsx')
 wb_fp=None
 if os.path.exists(fit_fp):
     wb_fp=fit_fp
 else:
-    cand=os.path.join(pkg_dir,'EEF_fittingparams.xlsx')
-    if os.path.exists(cand):
-        wb_fp=cand
+    # fall back to older naming conventions
+    for _fb in ('fitparams_aeffloss.xlsx', 'EEF_fittingparams.xlsx'):
+        cand=os.path.join(pkg_dir, _fb)
+        if os.path.exists(cand):
+            wb_fp=cand
+            break
 if not wb_fp:
     print('No fitparams workbook found to patch')
     raise SystemExit(1)
 # compute sums from workbook inside package
 xls=None
 for cand in os.listdir(pkg_dir):
-    if cand.lower().endswith('.xlsx') and not cand.lower().startswith('eef_fittingparams') and 'fitparams' not in cand.lower():
+    if (cand.lower().endswith('.xlsx') and not cand.lower().startswith('eef_fittingparams')
+            and 'fitparams' not in cand.lower() and cand.lower() != 'eef_fitting.xlsx'):
         xls=os.path.join(pkg_dir,cand)
         break
 if not xls:
