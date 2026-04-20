@@ -32,6 +32,7 @@ def _make_workbook(
     hew_rad_table=None,
     sel_energy=1.0,
     row_nums=None,
+    energy_scaling_table=None,
 ):
     """Write a test workbook with controllable HEW degradation sheets.
 
@@ -42,6 +43,9 @@ def _make_workbook(
         If None the corresponding sheet is omitted.
     row_nums : list[int] | None
         Row # per position in MM configuration (defaults to 1 for all).
+    energy_scaling_table : list[tuple] | None
+        Each entry is (energy_keV, scaling_factor) for the
+        "MM HEW degradation energy" sheet.  If None the sheet is omitted.
     """
     mm_nums = list(range(1, n_mm + 1))
     if row_nums is None:
@@ -109,6 +113,31 @@ def _make_workbook(
 
     # Add HEW degradation sheets with openpyxl (needs specific column layout)
     wb = openpyxl.load_workbook(path)
+
+    # Write sel_energy to A_eff D2 so main.py detects it as authoritative source
+    ws_aeff = wb['A_eff']
+    ws_aeff.cell(row=1, column=4, value='Selected energy')
+    ws_aeff.cell(row=2, column=4, value=f'{sel_energy} keV')
+
+    # Minimal vignetting sheets (required for sel_energy detection path in main.py)
+    for vig_name in ('MM vignetting rotazi', 'MM vignetting rotrad'):
+        ws_vig = wb.create_sheet(vig_name)
+        ws_vig.cell(row=1, column=1, value='rotazi [arcmin]' if 'rotazi' in vig_name else 'rotrad [arcmin]')
+        ws_vig.cell(row=1, column=2, value='factor')
+        ws_vig.cell(row=2, column=1, value=0.0)
+        ws_vig.cell(row=2, column=2, value=1.0)
+        ws_vig.cell(row=3, column=1, value=10.0)
+        ws_vig.cell(row=3, column=2, value=1.0)
+
+    # "MM HEW degradation energy" sheet (energy vs sigma scaling factor)
+    if energy_scaling_table is not None:
+        ws_esc = wb.create_sheet('MM HEW degradation energy')
+        ws_esc.cell(row=1, column=1, value='Energy (Kev)')
+        ws_esc.cell(row=1, column=2, value="σ's scaling factor (wrt 1keV)")
+        for i, (e_kev, s_factor) in enumerate(energy_scaling_table):
+            ws_esc.cell(row=i + 2, column=1, value=e_kev)
+            ws_esc.cell(row=i + 2, column=2, value=s_factor)
+
     for sname, table in (
         ('MM HEW degradation rotazi', hew_azi_table),
         ('MM HEW degradation rotrad', hew_rad_table),
@@ -397,3 +426,196 @@ class TestHEWSigmaBroadening:
         actual = float(df['sigma_rad'].iloc[0])
         assert abs(actual - expected) / expected < 1e-4, \
             f"Expected {expected:.10e}, got {actual:.10e}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Energy-dependent sigma scaling ("MM HEW degradation energy" sheet)
+# ---------------------------------------------------------------------------
+
+# Reference scaling table (subset of real data)
+_ENERGY_SCALING_TABLE = [
+    (0.2,  0.98),
+    (0.35, 0.98),
+    (1.0,  1.00),
+    (2.0,  1.03),
+    (4.0,  1.09),
+    (7.0,  1.18),
+    (10.0, 1.23),
+    (12.0, 1.28),
+]
+
+
+class TestHEWEnergyScaling:
+    """Verify energy-dependent sigma scaling from 'MM HEW degradation energy' sheet."""
+
+    def test_factor_applied_at_7kev(self, tmp_path):
+        """At 7 keV the factor is 1.18 – sigma should be scaled accordingly."""
+        sigma_0 = 4.0  # arcsec
+        path = str(tmp_path / 'energy_7.xlsx')
+        _make_workbook(path, n_mm=2, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=7.0, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        expected = sigma_0 * _ARCSEC_TO_M * 1.18
+        for col in ('sigma_rad', 'sigma_azi'):
+            actual = float(df[col].iloc[0])
+            assert abs(actual - expected) / expected < 1e-4, \
+                f"{col}: expected {expected:.6e}, got {actual:.6e}"
+
+    def test_factor_unity_at_1kev(self, tmp_path):
+        """At 1 keV the factor is 1.0 – sigma should be unchanged."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'energy_1.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=1.0, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        expected = sigma_0 * _ARCSEC_TO_M
+        for col in ('sigma_rad', 'sigma_azi'):
+            actual = float(df[col].iloc[0])
+            assert abs(actual - expected) < 1e-10, \
+                f"{col}: expected {expected:.6e} (no scaling), got {actual:.6e}"
+
+    def test_interpolation_at_intermediate_energy(self, tmp_path):
+        """At 5.5 keV the factor should be linearly interpolated between 4 and 7 keV."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'energy_5_5.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0,
+                       sel_energy=5.5, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        # np.interp between (4, 1.09) and (7, 1.18): factor = 1.09 + (5.5-4)/(7-4) * (1.18-1.09)
+        expected_factor = 1.09 + (5.5 - 4.0) / (7.0 - 4.0) * (1.18 - 1.09)
+        expected = sigma_0 * _ARCSEC_TO_M * expected_factor
+        actual = float(df['sigma_rad'].iloc[0])
+        assert abs(actual - expected) / expected < 1e-4, \
+            f"Expected factor={expected_factor:.4f}, sigma={expected:.6e}, got {actual:.6e}"
+
+    def test_no_energy_sheet_no_scaling(self, tmp_path):
+        """Without 'MM HEW degradation energy' sheet, sigma should be unscaled."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'no_energy_sheet.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=7.0, energy_scaling_table=None)
+        df = load_gaussians_from_excel(path)
+        expected = sigma_0 * _ARCSEC_TO_M
+        for col in ('sigma_rad', 'sigma_azi'):
+            actual = float(df[col].iloc[0])
+            assert abs(actual - expected) < 1e-10, \
+                f"{col}: without energy sheet sigma should be unchanged, got {actual:.6e}"
+
+    def test_energy_scaling_applies_without_hew_broadening(self, tmp_path):
+        """Energy scaling must apply even when no rotazi/rotrad HEW sheets exist."""
+        sigma_0 = 5.0
+        path = str(tmp_path / 'energy_only.xlsx')
+        _make_workbook(path, n_mm=2, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=7.0, energy_scaling_table=_ENERGY_SCALING_TABLE,
+                       hew_azi_table=None, hew_rad_table=None)
+        df = load_gaussians_from_excel(path)
+        expected = sigma_0 * _ARCSEC_TO_M * 1.18
+        for col in ('sigma_rad', 'sigma_azi'):
+            actual = float(df[col].iloc[0])
+            assert abs(actual - expected) / expected < 1e-4, \
+                f"{col}: energy scaling should apply without HEW sheets, got {actual:.6e}"
+
+    def test_energy_scaling_combined_with_hew_broadening(self, tmp_path):
+        """Energy scaling should multiply on top of HEW broadening."""
+        sigma_0 = 4.0
+        hew_deg = 2.0  # constant HEW degradation
+        hew_table = [
+            (1, 0, 7.0, hew_deg),
+            (1, 5, 7.0, hew_deg),
+        ]
+        path = str(tmp_path / 'combined.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0,
+                       sel_energy=7.0,
+                       hew_rad_table=hew_table,
+                       energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        # First HEW broadening: sqrt(sigma^2 + (hew/FWHM_to_sigma)^2)
+        sigma_m = sigma_0 * _ARCSEC_TO_M
+        sigma_extra_m = (hew_deg / _FWHM_TO_SIGMA) * _ARCSEC_TO_M
+        broadened = math.sqrt(sigma_m**2 + sigma_extra_m**2)
+        # Then energy scaling
+        expected = broadened * 1.18
+        actual = float(df['sigma_rad'].iloc[0])
+        assert abs(actual - expected) / expected < 1e-4, \
+            f"Expected broadened*1.18={expected:.6e}, got {actual:.6e}"
+
+    def test_sigmax_sigmay_include_energy_scaling(self, tmp_path):
+        """sigmax/sigmay (used by aggregation) must include energy scaling."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'sigxy_energy.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=7.0, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        assert float(df['sigmax'].iloc[0]) == float(df['sigma_rad'].iloc[0])
+        assert float(df['sigmay'].iloc[0]) == float(df['sigma_azi'].iloc[0])
+        # And they should be scaled
+        expected = sigma_0 * _ARCSEC_TO_M * 1.18
+        assert abs(float(df['sigmax'].iloc[0]) - expected) / expected < 1e-4
+
+    def test_ij_columns_match_dataframe(self, tmp_path):
+        """Workbook I/J columns must contain the same energy-scaled sigmas."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'ij_match.xlsx')
+        _make_workbook(path, n_mm=2, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=7.0, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+
+        m_to_arcsec = 1.0 / _ARCSEC_TO_M
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb['MM_PSF']
+        for idx, row in df.iterrows():
+            mm = int(row['MM #'])
+            # Find the workbook row for this MM
+            for r in range(2, (ws.max_row or 0) + 1):
+                if ws.cell(r, 1).value is not None and int(float(ws.cell(r, 1).value)) == mm:
+                    i_val = float(ws.cell(r, 9).value)
+                    j_val = float(ws.cell(r, 10).value)
+                    expected_i = float(row['sigma_rad']) * m_to_arcsec
+                    expected_j = float(row['sigma_azi']) * m_to_arcsec
+                    assert abs(i_val - expected_i) / expected_i < 1e-6, \
+                        f"MM {mm}: I={i_val}, expected {expected_i}"
+                    assert abs(j_val - expected_j) / expected_j < 1e-6, \
+                        f"MM {mm}: J={j_val}, expected {expected_j}"
+                    break
+        wb.close()
+
+    def test_extrapolation_below_range(self, tmp_path):
+        """Energy below table range uses the lowest factor (flat extrapolation)."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'energy_low.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0,
+                       sel_energy=0.1, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        # np.interp clamps below range to first value: 0.98
+        expected = sigma_0 * _ARCSEC_TO_M * 0.98
+        actual = float(df['sigma_rad'].iloc[0])
+        assert abs(actual - expected) / expected < 1e-4, \
+            f"Below range: expected factor=0.98, got sigma={actual:.6e}"
+
+    def test_extrapolation_above_range(self, tmp_path):
+        """Energy above table range uses the highest factor (flat extrapolation)."""
+        sigma_0 = 4.0
+        path = str(tmp_path / 'energy_high.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0,
+                       sel_energy=15.0, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        # np.interp clamps above range to last value: 1.28
+        expected = sigma_0 * _ARCSEC_TO_M * 1.28
+        actual = float(df['sigma_rad'].iloc[0])
+        assert abs(actual - expected) / expected < 1e-4, \
+            f"Above range: expected factor=1.28, got sigma={actual:.6e}"
+
+    def test_scaling_all_mms(self, tmp_path):
+        """Energy scaling should apply uniformly to all MMs."""
+        sigma_0 = 4.0
+        n = 5
+        path = str(tmp_path / 'all_mms.xlsx')
+        _make_workbook(path, n_mm=n, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       sel_energy=7.0, energy_scaling_table=_ENERGY_SCALING_TABLE)
+        df = load_gaussians_from_excel(path)
+        expected = sigma_0 * _ARCSEC_TO_M * 1.18
+        for i in range(n):
+            for col in ('sigma_rad', 'sigma_azi'):
+                actual = float(df[col].iloc[i])
+                assert abs(actual - expected) / expected < 1e-4, \
+                    f"MM {i+1} {col}: expected {expected:.6e}, got {actual:.6e}"
