@@ -3183,58 +3183,6 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     written_ij += 1
                 print(f"HEW_DEG: wrote degraded sigma to MM_PSF cols I/J for {written_ij} MMs")
 
-            # --- Apply energy-dependent sigma scaling from "MM HEW degradation energy" ---
-            # This sheet contains a table of Energy (keV) vs σ scaling factor.
-            # Interpolate to get the factor for sel_energy and multiply I/J by it.
-            _hew_energy_factor = 1.0
-            try:
-                _hew_energy_sname = None
-                for s in wb_hew.sheetnames:
-                    if 'hew' in s.lower() and 'degradation' in s.lower() and 'energy' in s.lower():
-                        _hew_energy_sname = s
-                        break
-                if _hew_energy_sname is not None:
-                    _ws_he = wb_hew[_hew_energy_sname]
-                    _he_energies = []
-                    _he_factors = []
-                    for _he_r in range(2, (_ws_he.max_row or 0) + 1):
-                        _he_e = _ws_he.cell(row=_he_r, column=1).value
-                        _he_f = _ws_he.cell(row=_he_r, column=2).value
-                        if _he_e is not None and _he_f is not None:
-                            try:
-                                _he_energies.append(float(_he_e))
-                                _he_factors.append(float(_he_f))
-                            except (ValueError, TypeError):
-                                pass
-                    if _he_energies and sel_energy is not None:
-                        _he_order = np.argsort(_he_energies)
-                        _he_energies = np.array(_he_energies, dtype=float)[_he_order]
-                        _he_factors = np.array(_he_factors, dtype=float)[_he_order]
-                        _hew_energy_factor = float(np.interp(float(sel_energy), _he_energies, _he_factors))
-                        print(f"HEW_DEG energy: factor={_hew_energy_factor:.4f} for energy={sel_energy} keV")
-            except Exception as e:
-                print(f"HEW_DEG energy: error reading scaling table: {e}")
-
-            # Apply the energy scaling factor to columns I/J and DataFrame sigma
-            if _hew_energy_factor != 1.0 and ws_hew_psf is not None:
-                _scaled_ij = 0
-                for _mm_k, _r_k in mm_to_row_hew.items():
-                    try:
-                        _old_i = ws_hew_psf.cell(row=_r_k, column=9).value
-                        _old_j = ws_hew_psf.cell(row=_r_k, column=10).value
-                        if _old_i is not None:
-                            ws_hew_psf.cell(row=_r_k, column=9, value=float(_old_i) * _hew_energy_factor)
-                        if _old_j is not None:
-                            ws_hew_psf.cell(row=_r_k, column=10, value=float(_old_j) * _hew_energy_factor)
-                        _scaled_ij += 1
-                    except Exception:
-                        pass
-                # Also scale the DataFrame sigma values so the PSF computation uses them
-                for idx_sc, row_sc in df.iterrows():
-                    df.at[idx_sc, 'sigma_rad'] = float(row_sc['sigma_rad']) * _hew_energy_factor
-                    df.at[idx_sc, 'sigma_azi'] = float(row_sc['sigma_azi']) * _hew_energy_factor
-                print(f"HEW_DEG energy: scaled I/J for {_scaled_ij} MMs and DataFrame sigma by {_hew_energy_factor:.4f}")
-
             # Persist base sigma (D/E) as plain numbers in this save cycle too
             if ws_hew_psf is not None and 'sigma_rad [arcsec]' in df.columns:
                 written_de2 = 0
@@ -3269,6 +3217,52 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 pass
         except Exception as e:
             print(f"HEW_DEG: error writing degraded sigma to MM_PSF: {e}")
+
+    # --- Apply energy-dependent sigma scaling from "MM HEW degradation energy" ---
+    # This sheet contains a table of Energy (keV) vs σ scaling factor.
+    # Interpolate to get the factor for sel_energy and multiply df sigma.
+    # Runs unconditionally (outside HEW broadening block) so the scaling
+    # applies even when there is no rotazi/rotrad HEW degradation data.
+    _hew_energy_factor = 1.0
+    if not is_csv and 'sel_energy' in locals() and sel_energy is not None:
+        try:
+            from openpyxl import load_workbook as _load_wb_he
+            _wb_he = _load_wb_he(path, data_only=True)
+            _hew_energy_sname = None
+            for s in _wb_he.sheetnames:
+                if 'hew' in s.lower() and 'degradation' in s.lower() and 'energy' in s.lower():
+                    _hew_energy_sname = s
+                    break
+            if _hew_energy_sname is not None:
+                _ws_he = _wb_he[_hew_energy_sname]
+                _he_energies = []
+                _he_factors = []
+                for _he_r in range(2, (_ws_he.max_row or 0) + 1):
+                    _he_e = _ws_he.cell(row=_he_r, column=1).value
+                    _he_f = _ws_he.cell(row=_he_r, column=2).value
+                    if _he_e is not None and _he_f is not None:
+                        try:
+                            _he_energies.append(float(_he_e))
+                            _he_factors.append(float(_he_f))
+                        except (ValueError, TypeError):
+                            pass
+                if _he_energies:
+                    _he_order = np.argsort(_he_energies)
+                    _he_energies = np.array(_he_energies, dtype=float)[_he_order]
+                    _he_factors = np.array(_he_factors, dtype=float)[_he_order]
+                    _hew_energy_factor = float(np.interp(float(sel_energy), _he_energies, _he_factors))
+                    print(f"HEW_DEG energy: factor={_hew_energy_factor:.4f} for energy={sel_energy} keV")
+            try:
+                _wb_he.close()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"HEW_DEG energy: error reading scaling table: {e}")
+
+    if _hew_energy_factor != 1.0:
+        df['sigma_rad'] = df['sigma_rad'].astype(float) * _hew_energy_factor
+        df['sigma_azi'] = df['sigma_azi'].astype(float) * _hew_energy_factor
+        print(f"HEW_DEG energy: scaled DataFrame sigma by {_hew_energy_factor:.4f}")
 
     # Always write the final per-MM sigma (after any HEW_DEG broadening) to
     # MM_PSF columns I/J so the workbook stays consistent with what PSF
