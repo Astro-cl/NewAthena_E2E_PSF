@@ -1165,48 +1165,75 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
             # Try to detect the selected energy (numeric keV) from several
             # places: preferred sources (in order):
+            # 0) A_eff cell D2 ("Selected energy", e.g. "7 keV"),
             # 1) explicit selection in the vignetting sheet (e.g. cell C2),
             # 2) the A_eff column name (e.g. '7 keV'),
             # 3) a scanned 'keV' token anywhere in the A_eff sheet.
             sel_energy = None
             sel_energy_from_vdf = False
-            
-            # 1) Enhanced: vignette sheet col 'Selected energy [keV]' and C2
+
+            # 0) Preferred: read "Selected energy" from A_eff cell D2
             try:
-                # DataFrame scan first (faster) - vdf_azi/vdf_rad defined later, use vdf_rad for now
-                for vdf_name, sname in [('vdf_rad', 'rotrad'), ('vdf_azi', 'rotazi')]:
-                    vdf = locals().get(vdf_name)
-                    if vdf is not None and vdf.shape[1] > 2:
-                        for r in range(min(3, vdf.shape[0])):
-                            cand = vdf.iloc[r, 2]
-                            if pd.notna(cand):
-                                try:
-                                    sel_energy = float(cand)
-                                    sel_energy_from_vdf = True
-                                    print(f'VIG sel_energy from {sname} col2 row{r}: {sel_energy}')
-                                    break
-                                except:
-                                    pass
+                from openpyxl import load_workbook as _load_wb_d2
+                _wb_d2 = _load_wb_d2(path, data_only=True)
+                if 'A_eff' in _wb_d2.sheetnames:
+                    _d2_val = _wb_d2['A_eff'].cell(row=2, column=4).value
+                    if _d2_val is not None:
+                        import re as _re_d2
+                        if isinstance(_d2_val, (int, float)):
+                            sel_energy = float(_d2_val)
+                        else:
+                            _m_d2 = _re_d2.search(r"(\d+(?:\.\d*)?)", str(_d2_val))
+                            if _m_d2:
+                                sel_energy = float(_m_d2.group(1))
                         if sel_energy is not None:
-                            break
-                if sel_energy is None:
-                    # C2 fallback with openpyxl
-                    from openpyxl import load_workbook
-                    wb_tmp = load_workbook(path, data_only=True)
-                    for sname in list(VIG_ROT_AZI_CANDIDATES) + list(VIG_ROT_RAD_CANDIDATES):
-                        if sname in wb_tmp.sheetnames:
-                            ws_tmp = wb_tmp[sname]
-                            candidate = ws_tmp.cell(row=2, column=3).value
-                            if candidate is not None and not pd.isna(candidate):
-                                try:
-                                    sel_energy = float(candidate)
-                                    sel_energy_from_vdf = True
-                                    print(f'VIG sel_energy from {sname} C2: {sel_energy}')
-                                    break
-                                except:
-                                    pass
+                            sel_energy_from_vdf = True
+                            print(f'VIG sel_energy from A_eff D2: {sel_energy}')
+                try:
+                    _wb_d2.close()
+                except Exception:
+                    pass
             except Exception as e:
-                print(f'VIG sel_energy scan error: {e}')
+                print(f'VIG sel_energy A_eff D2 scan error: {e}')
+            
+            # 1) Fallback: vignette sheet col 'Selected energy [keV]' and C2
+            #    Only used when A_eff D2 did not provide the energy.
+            if sel_energy is None:
+                try:
+                    # DataFrame scan first (faster) - vdf_azi/vdf_rad defined later, use vdf_rad for now
+                    for vdf_name, sname in [('vdf_rad', 'rotrad'), ('vdf_azi', 'rotazi')]:
+                        vdf = locals().get(vdf_name)
+                        if vdf is not None and vdf.shape[1] > 2:
+                            for r in range(min(3, vdf.shape[0])):
+                                cand = vdf.iloc[r, 2]
+                                if pd.notna(cand):
+                                    try:
+                                        sel_energy = float(cand)
+                                        sel_energy_from_vdf = True
+                                        print(f'VIG sel_energy from {sname} col2 row{r}: {sel_energy}')
+                                        break
+                                    except:
+                                        pass
+                            if sel_energy is not None:
+                                break
+                    if sel_energy is None:
+                        # C2 fallback with openpyxl
+                        from openpyxl import load_workbook
+                        wb_tmp = load_workbook(path, data_only=True)
+                        for sname in list(VIG_ROT_AZI_CANDIDATES) + list(VIG_ROT_RAD_CANDIDATES):
+                            if sname in wb_tmp.sheetnames:
+                                ws_tmp = wb_tmp[sname]
+                                candidate = ws_tmp.cell(row=2, column=3).value
+                                if candidate is not None and not pd.isna(candidate):
+                                    try:
+                                        sel_energy = float(candidate)
+                                        sel_energy_from_vdf = True
+                                        print(f'VIG sel_energy from {sname} C2: {sel_energy}')
+                                        break
+                                    except:
+                                        pass
+                except Exception as e:
+                    print(f'VIG sel_energy scan error: {e}')
             
             if sel_energy is None:
                 print('VIG WARNING sel_energy=None - default 0.2')
@@ -1852,6 +1879,26 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             pass
             sys.stdout.flush()
             wb = load_workbook(path)
+
+            # Copy selected energy from A_eff D2 to C2 of vignetting and
+            # HEW degradation sheets so they use the authoritative energy.
+            if sel_energy is not None:
+                try:
+                    _energy_target_sheets = (
+                        list(VIG_ROT_AZI_CANDIDATES) +
+                        list(VIG_ROT_RAD_CANDIDATES) +
+                        list(HEW_DEG_ROT_AZI_CANDIDATES) +
+                        list(HEW_DEG_ROT_RAD_CANDIDATES)
+                    )
+                    for _ets in _energy_target_sheets:
+                        if _ets in wb.sheetnames:
+                            try:
+                                wb[_ets].cell(row=2, column=3).value = float(sel_energy)
+                            except Exception:
+                                pass
+                    print(f"Copied sel_energy={sel_energy} to C2 of vignetting/HEW degradation sheets")
+                except Exception as e:
+                    print(f"Warning: failed to copy sel_energy to C2: {e}")
 
             # Derive per-position vignette factors from the DataFrame to ensure
             # the values written into the vignette sheets exactly reflect the
@@ -3135,6 +3182,58 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     ws_hew_psf.cell(row=r_hew, column=10, value=float(row_hew['sigma_azi']) * _m_to_arcsec)
                     written_ij += 1
                 print(f"HEW_DEG: wrote degraded sigma to MM_PSF cols I/J for {written_ij} MMs")
+
+            # --- Apply energy-dependent sigma scaling from "MM HEW degradation energy" ---
+            # This sheet contains a table of Energy (keV) vs σ scaling factor.
+            # Interpolate to get the factor for sel_energy and multiply I/J by it.
+            _hew_energy_factor = 1.0
+            try:
+                _hew_energy_sname = None
+                for s in wb_hew.sheetnames:
+                    if 'hew' in s.lower() and 'degradation' in s.lower() and 'energy' in s.lower():
+                        _hew_energy_sname = s
+                        break
+                if _hew_energy_sname is not None:
+                    _ws_he = wb_hew[_hew_energy_sname]
+                    _he_energies = []
+                    _he_factors = []
+                    for _he_r in range(2, (_ws_he.max_row or 0) + 1):
+                        _he_e = _ws_he.cell(row=_he_r, column=1).value
+                        _he_f = _ws_he.cell(row=_he_r, column=2).value
+                        if _he_e is not None and _he_f is not None:
+                            try:
+                                _he_energies.append(float(_he_e))
+                                _he_factors.append(float(_he_f))
+                            except (ValueError, TypeError):
+                                pass
+                    if _he_energies and sel_energy is not None:
+                        _he_order = np.argsort(_he_energies)
+                        _he_energies = np.array(_he_energies, dtype=float)[_he_order]
+                        _he_factors = np.array(_he_factors, dtype=float)[_he_order]
+                        _hew_energy_factor = float(np.interp(float(sel_energy), _he_energies, _he_factors))
+                        print(f"HEW_DEG energy: factor={_hew_energy_factor:.4f} for energy={sel_energy} keV")
+            except Exception as e:
+                print(f"HEW_DEG energy: error reading scaling table: {e}")
+
+            # Apply the energy scaling factor to columns I/J and DataFrame sigma
+            if _hew_energy_factor != 1.0 and ws_hew_psf is not None:
+                _scaled_ij = 0
+                for _mm_k, _r_k in mm_to_row_hew.items():
+                    try:
+                        _old_i = ws_hew_psf.cell(row=_r_k, column=9).value
+                        _old_j = ws_hew_psf.cell(row=_r_k, column=10).value
+                        if _old_i is not None:
+                            ws_hew_psf.cell(row=_r_k, column=9, value=float(_old_i) * _hew_energy_factor)
+                        if _old_j is not None:
+                            ws_hew_psf.cell(row=_r_k, column=10, value=float(_old_j) * _hew_energy_factor)
+                        _scaled_ij += 1
+                    except Exception:
+                        pass
+                # Also scale the DataFrame sigma values so the PSF computation uses them
+                for idx_sc, row_sc in df.iterrows():
+                    df.at[idx_sc, 'sigma_rad'] = float(row_sc['sigma_rad']) * _hew_energy_factor
+                    df.at[idx_sc, 'sigma_azi'] = float(row_sc['sigma_azi']) * _hew_energy_factor
+                print(f"HEW_DEG energy: scaled I/J for {_scaled_ij} MMs and DataFrame sigma by {_hew_energy_factor:.4f}")
 
             # Persist base sigma (D/E) as plain numbers in this save cycle too
             if ws_hew_psf is not None and 'sigma_rad [arcsec]' in df.columns:
@@ -7620,9 +7719,18 @@ if __name__ == '__main__':
                         except Exception:
                             pass
 
+                # Write selected energy to A_eff cell D2 so downstream code
+                # (single-file mode child process) picks it up.
+                try:
+                    if 'A_eff' in wb.sheetnames:
+                        _energy_str = f"{energy_val} keV" if energy_val else ''
+                        wb['A_eff'].cell(row=2, column=4).value = _energy_str
+                except Exception:
+                    pass
+
                 # Update A_eff column B based on per-energy mapping listed in
-                # columns D (energy) and E (source column) of the A_eff sheet.
-                # Supported E formats in column E: numeric column index (1-based),
+                # columns F (energy) and G (source column) of the A_eff sheet.
+                # Supported G formats: numeric column index (1-based),
                 # Excel column letter ('L'), or header name to match.
                 try:
                     if 'A_eff' in wb.sheetnames:
@@ -7642,8 +7750,8 @@ if __name__ == '__main__':
                         import re as _re
                         for rr in range(1, max_scan_row + 1):
                             try:
-                                cand_energy = ws_a.cell(row=rr, column=4).value
-                                cand_src = ws_a.cell(row=rr, column=5).value
+                                cand_energy = ws_a.cell(row=rr, column=6).value
+                                cand_src = ws_a.cell(row=rr, column=7).value
                             except Exception:
                                 continue
                             if cand_energy is None or cand_src is None:
@@ -7787,7 +7895,7 @@ if __name__ == '__main__':
                         except Exception:
                             chosen_src = None
 
-                        # Fallback: when no D/E mapping table was found, scan the header
+                        # Fallback: when no F/G mapping table was found, scan the header
                         # row of the A_eff sheet for energy-labelled columns (e.g. "0.5 keV"
                         # or the numeric value 0.5) and pick the column whose energy is
                         # closest to energy_val.  Only applies when row 1 col A is non-numeric

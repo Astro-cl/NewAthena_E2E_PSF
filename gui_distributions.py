@@ -1192,11 +1192,11 @@ class ExtendedGUI:
             self.gravity_standard_presets = {}
 
     def load_standard_aeff_presets(self, df: pd.DataFrame) -> None:
-        """Load A_eff standard presets from the table starting at D1.
+        """Load A_eff standard presets from the table starting at F1.
 
         Expected layout (0-indexed):
-        - Column D (index 3): preset name (row 1..)
-        - Column E (index 4): values expression (row 1..)
+        - Column F (index 5): preset name (row 1..)
+        - Column G (index 6): values expression (row 1..)
           Examples: 'J', 'L+gaussian(0,20%L)', 'J+gaussian(0,5%*J)'
         """
         self.aeff_standard_presets = {}
@@ -1222,11 +1222,11 @@ class ExtendedGUI:
                     if 'value' in s and values_col is None:
                         values_col = c
 
-            # Fallback to original D/E if detection failed
+            # Fallback to original F/G if detection failed
             if name_col is None:
-                name_col = 3
+                name_col = 5
             if values_col is None:
-                values_col = 4
+                values_col = 6
 
             if df.shape[0] <= start_row + 1 or df.shape[1] <= values_col:
                 return
