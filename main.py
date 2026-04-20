@@ -7562,6 +7562,7 @@ if __name__ == '__main__':
 
         skipped_cannot_read = 0
         skipped_empty_prefix = 0
+        _batch_jobs = []
         for rid, crow in combos.iterrows():
             # Read configuration prefix from column B; skip rows where it's missing/NaN
             try:
@@ -8159,68 +8160,109 @@ if __name__ == '__main__':
                 print(f"Failed to modify workbook {new_path}: {e}")
                 continue
 
-            # Run this script on the modified workbook with --export-package.
-            # The child process also prints a JSON metrics block to stdout
-            # (from plot_sum), so we capture its output and parse the metrics
-            # instead of computing them separately — this avoids a redundant
-            # load_gaussians_from_excel + plot_sum cycle per iteration.
-            metrics = {}
+
+            _batch_jobs.append({
+                'rid': rid, 'prefix': prefix, 'new_path': new_path,
+                'new_basename': new_basename, 'run_mode': run_mode,
+                'offaxis_val': offaxis_val, 'energy_val': energy_val,
+                'defocus_val': defocus_val, '_batch_tmp_dir': _batch_tmp_dir,
+            })
+
+
+        # ---- Phase 2: Run child processes in parallel ----
+        _pre_child_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
+
+        def _run_batch_child(_job):
+            """Run export-package subprocess for one batch configuration."""
+            _cmd = [sys.executable, os.path.abspath(__file__),
+                    '--file', _job['new_path'], '--export-package', '--mode', _job['run_mode']]
+            _child_env = os.environ.copy()
+            _child_env['BATCH_NO_FORMULAS'] = '1'
             try:
-                cmd = [sys.executable, os.path.abspath(__file__), '--file', new_path, '--export-package', '--mode', run_mode]
-                print('Running:', ' '.join(cmd))
-
-                # Record existing Exports subfolders so we can detect a new package
-                existing_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
-
-                child_env = os.environ.copy()
-                child_env['BATCH_NO_FORMULAS'] = '1'
-                child_output = subprocess.check_output(cmd, env=child_env, stderr=subprocess.STDOUT, text=True)
-                # Echo child output for visibility
-                print(child_output)
-
-                # Parse metrics JSON from child stdout (last valid JSON block)
-                try:
-                    import json as _json_batch
-                    # Look for lines forming a JSON object
-                    _json_lines = []
-                    _in_json = False
-                    _brace_depth = 0
-                    for _line in child_output.splitlines():
-                        stripped = _line.strip()
-                        if not _in_json and stripped.startswith('{'):
-                            _in_json = True
+                _output = subprocess.check_output(_cmd, env=_child_env, stderr=subprocess.STDOUT, text=True)
+            except subprocess.CalledProcessError as _e:
+                _output = _e.output or ''
+            except Exception:
+                _output = ''
+            # Parse metrics JSON from child stdout (last valid JSON block with hew_origin_arcsec)
+            _metrics = {}
+            try:
+                import json as _json_batch
+                _json_lines = []
+                _in_json = False
+                _brace_depth = 0
+                for _line in _output.splitlines():
+                    _stripped = _line.strip()
+                    if not _in_json and _stripped.startswith('{'):
+                        _in_json = True
+                        _json_lines = []
+                        _brace_depth = 0
+                    if _in_json:
+                        _json_lines.append(_line)
+                        _brace_depth += _stripped.count('{') - _stripped.count('}')
+                        if _brace_depth <= 0:
+                            _in_json = False
+                            try:
+                                _candidate = _json_batch.loads('\n'.join(_json_lines))
+                                if isinstance(_candidate, dict) and 'hew_origin_arcsec' in _candidate:
+                                    _metrics = _candidate
+                            except Exception:
+                                pass
                             _json_lines = []
-                            _brace_depth = 0
-                        if _in_json:
-                            _json_lines.append(_line)
-                            _brace_depth += stripped.count('{') - stripped.count('}')
-                            if _brace_depth <= 0:
-                                _in_json = False
-                                try:
-                                    candidate = _json_batch.loads('\n'.join(_json_lines))
-                                    if isinstance(candidate, dict) and 'hew_origin_arcsec' in candidate:
-                                        metrics = candidate
-                                except Exception:
-                                    pass
-                                _json_lines = []
-                except Exception:
-                    pass
-            except Exception as e:
-                print(f"Failed to run export for {prefix}: {e}")
+            except Exception:
+                pass
+            return _output, _metrics
+
+        _n_workers = min(os.cpu_count() or 4, len(_batch_jobs)) if _batch_jobs else 1
+        print(f"\nLaunching {len(_batch_jobs)} configurations using {_n_workers} parallel workers...")
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=_n_workers) as _executor:
+            _child_results = list(_executor.map(_run_batch_child, _batch_jobs))
+
+        # ---- Phase 3: Post-process results (sequential) ----
+        # Detect all new package directories created by the parallel children
+        _post_child_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
+        _new_pkg_dirs = [d for d in _post_child_dirs - _pre_child_dirs
+                         if os.path.isdir(os.path.join(exports_root, d))]
+        # Build mapping: filename inside package dir -> full package dir path
+        _wb_to_pkg = {}
+        for _d in _new_pkg_dirs:
+            _dp = os.path.join(exports_root, _d)
+            try:
+                for _fn in os.listdir(_dp):
+                    _wb_to_pkg[_fn] = _dp
+            except Exception:
+                pass
+
+        for _job, (_child_output, _metrics) in zip(_batch_jobs, _child_results):
+            rid = _job['rid']
+            prefix = _job['prefix']
+            new_path = _job['new_path']
+            new_basename = _job['new_basename']
+            run_mode = _job['run_mode']
+            offaxis_val = _job['offaxis_val']
+            energy_val = _job['energy_val']
+            defocus_val = _job['defocus_val']
+            _batch_tmp_dir = _job['_batch_tmp_dir']
+            metrics = _metrics
+            child_output = _child_output
+            print(child_output)
+
+            # Resolve package directory for this job using workbook filename
+            pkg_path = _wb_to_pkg.get(new_basename)
+            if pkg_path is None:
+                # Fallback: search new dirs for matching workbook file
+                for _d in _new_pkg_dirs:
+                    _dp = os.path.join(exports_root, _d)
+                    if os.path.exists(os.path.join(_dp, new_basename)):
+                        pkg_path = _dp
+                        break
 
             # Prefer zipping the full export package folder created by the child run.
+            ts = time.strftime('%Y%m%d_%H%M%S')
             try:
-                os.makedirs(exports_root, exist_ok=True)
-                # Look for new subdirectories created during the child run
-                all_dirs = [d for d in os.listdir(exports_root) if os.path.isdir(os.path.join(exports_root, d))]
-                new_dirs = [d for d in all_dirs if d not in existing_dirs]
-                # Build timestamp and safe stem for zip naming (no .xlsx)
-                ts = time.strftime('%Y%m%d_%H%M%S')
-                if new_dirs:
-                    # Prefer the newest created package folder
-                    latest_dir = max(new_dirs, key=lambda d: os.path.getmtime(os.path.join(exports_root, d)))
-                    pkg_path = os.path.join(exports_root, latest_dir)
-
+                if pkg_path is not None:
                     # Attempt to rename specific artifacts inside the package dir
                     try:
                         # Rename helpers: operate on files inside pkg_path
@@ -8796,7 +8838,7 @@ if __name__ == '__main__':
 
             # Clean up the temp directory holding the modified input workbook
             try:
-                if '_batch_tmp_dir' in locals() and _batch_tmp_dir and os.path.isdir(_batch_tmp_dir):
+                if _batch_tmp_dir and os.path.isdir(_batch_tmp_dir):
                     shutil.rmtree(_batch_tmp_dir, ignore_errors=True)
             except Exception:
                 pass

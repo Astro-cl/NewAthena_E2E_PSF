@@ -34,20 +34,26 @@ This file summarizes notable changes across releases (human-readable).
 - **HEW degradation:** new "MM HEW degradation rotazi" / "rotrad" sheets
 	with H–K lookup tables; per-position interpolation of angle → HEW
 	degradation; sigma broadening via √(σ_base² + (HEW/2√(2 ln 2))²).
+- **Energy-dependent sigma scaling:** new "MM HEW degradation energy"
+	sheet with Energy [keV] vs scaling factor table; linear interpolation
+	at selected energy; multiplicative scaling of σ_rad and σ_azi applied
+	after angle-based broadening (runs independently of rotazi/rotrad).
 - **Sigma writeback:** degraded sigma → MM_PSF I/J; sigma_extra → "Extra
 	PSF degradations" B/C; VLOOKUP-resolved base sigma persisted to D/E
 	as plain numbers.
 - **Batch combinations:** `--batch-combinations` CLI for multi-config
 	runs; ZIP packaging per config under Exports/Export_<input>_<ts>/;
-	aggregated results workbook; headless plt.show noop.
+	aggregated results workbook; headless plt.show noop; parallel child
+	subprocess execution via ThreadPoolExecutor.
 - **Preset table shift:** MM_PSF preset distribution table moved from
 	column K to column M to avoid I/J conflict.
 - **A_eff improvements:** robust formula evaluation fallback, dynamic
 	Aeff_loss sums, prefer packaged workbook for aggregation.
 - **Performance:** Pearson4 skipped in coarse/quick mode; default mode
-	set to coarse; extra-fine mode removed.
-- Tests: 71 passed (20 new integration tests for off-axis, defocus, HEW
-	degradation, and batch combinations).
+	set to coarse; extra-fine mode removed; batch formula scan skipped
+	via BATCH_NO_FORMULAS env var; parallel child execution.
+- Tests: 82 passed (31 new integration tests for off-axis, defocus, HEW
+	degradation, energy scaling, and batch combinations).
 
 ## v7 — 2026-04-14
 - Repository reorganization: tests grouped by concern; utilities moved

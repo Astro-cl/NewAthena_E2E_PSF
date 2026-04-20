@@ -1,15 +1,16 @@
 # Feature Documentation — April 2026 Changes
 
-> **Period covered:** 10 – 17 April 2026  
-> **Commits:** `84aa143` through `c73048b` (30+ commits)  
+> **Period covered:** 10 – 20 April 2026  
+> **Commits:** `84aa143` through `3916a9f` (40+ commits)  
 > **Repository:** `NewAthena_E2E_PSF` on GitLab ESA (`origin/main`)
 
-This document provides extensive technical documentation of four major
-features introduced during the week of 10–17 April 2026:
+This document provides extensive technical documentation of the major
+features introduced during 10–20 April 2026:
 
 1. [Off-Axis Pointing Implementation](#1-off-axis-pointing-implementation)
 2. [Defocus Implementation](#2-defocus-implementation)
 3. [HEW Degradation Implementation](#3-hew-degradation-implementation)
+   - Includes [Energy-Dependent Sigma Scaling](#313-energy-dependent-sigma-scaling) (§3.13)
 4. [Batch Combinations Mode](#4-batch-combinations-mode)
 
 ---
@@ -618,6 +619,165 @@ start_col = 12  # M is column 13, 0-indexed = 12
 - `test_broadening_formula_exact`: Exact numeric verification with
   σ₀ = 5 arcsec, HEW = 3.5 arcsec.
 
+### 3.13 Energy-Dependent Sigma Scaling
+
+#### Background and Motivation
+
+The angle-dependent HEW degradation (sections 3.3–3.6) broadens each MM's
+sigma based on its off-axis rotation angle at a single energy. However,
+the PSF width of X-ray optics also depends on photon energy: higher energies
+(shorter wavelengths) experience progressively larger scattering from mirror
+surface roughness and figure errors. To capture this effect, an additional
+**multiplicative energy-dependent scaling factor** is applied to all MM
+sigmas after any angle-based HEW broadening.
+
+This factor is stored in a dedicated sheet and is applied **unconditionally**
+— it runs even when no rotazi/rotrad HEW degradation sheets are present,
+allowing energy dependence to be modelled independently of off-axis
+degradation.
+
+#### Key Commits
+
+| Commit | Date | Description |
+|--------|------|-------------|
+| `66dbd4c` | 18 Apr | Energy-dependent sigma scaling feature |
+| `f312b78` | 18 Apr | Fix: move energy scaling outside HEW block |
+| `bb26046` | 19 Apr | Unit tests for HEW energy-dependent sigma scaling |
+
+#### Sheet: "MM HEW degradation energy"
+
+A new sheet named **"MM HEW degradation energy"** (matched case-insensitively
+by checking for `'hew'`, `'degradation'`, and `'energy'` in the sheet name)
+contains a two-column table:
+
+| Column | Header | Unit | Description |
+|--------|--------|------|-------------|
+| A | `Energy [keV]` | keV | Photon energy |
+| B | `Sigma scaling factor` | — | Multiplicative factor for sigma |
+
+**Example table (from test data):**
+
+| Energy [keV] | Sigma scaling factor |
+|:---:|:---:|
+| 0.2 | 0.98 |
+| 0.35 | 0.98 |
+| 1.0 | 1.00 |
+| 2.0 | 1.03 |
+| 4.0 | 1.09 |
+| 7.0 | 1.18 |
+| 10.0 | 1.23 |
+| 12.0 | 1.28 |
+
+The factor at 1 keV is 1.0 (reference energy — no scaling). Values > 1.0
+indicate increasing PSF broadening at higher energies.
+
+#### Energy Selection
+
+The energy used for the lookup is `sel_energy`, which is determined earlier
+in the pipeline from:
+1. Cell **D2** of the `A_eff` sheet (e.g., `"7.0 keV"`)
+2. Cell **C2** of the vignetting sheets
+3. Cell **C2** of the HEW degradation rotazi/rotrad sheets
+4. Fallback: 0.2 keV
+
+In batch mode, the energy is set from column D of the combinations file
+and propagated to all relevant cells (A_eff D2, vignetting C2, HEW
+degradation C2).
+
+#### Processing Pipeline
+
+The energy-dependent scaling runs in `load_gaussians_from_excel()`
+(`main.py` ~line 3229) **after** any angle-dependent HEW broadening:
+
+1. **Open workbook** and locate the "MM HEW degradation energy" sheet.
+2. **Read columns A and B** into energy/factor arrays.
+3. **Sort by energy** and **interpolate** using `np.interp()` at `sel_energy`.
+4. **Multiply** both `sigma_rad` and `sigma_azi` by the interpolated factor.
+
+```python
+_hew_energy_factor = float(np.interp(float(sel_energy), _he_energies, _he_factors))
+
+if _hew_energy_factor != 1.0:
+    df['sigma_rad'] = df['sigma_rad'].astype(float) * _hew_energy_factor
+    df['sigma_azi'] = df['sigma_azi'].astype(float) * _hew_energy_factor
+```
+
+**Extrapolation behaviour:** `np.interp` clamps to the boundary values —
+energies below 0.2 keV use factor 0.98; energies above 12.0 keV use 1.28.
+
+#### Interaction with Angle-Based HEW Broadening
+
+When both angle-dependent broadening and energy scaling are active, the
+operations are applied **sequentially**:
+
+$$\sigma_{\text{final}} = \underbrace{\sqrt{\sigma_{\text{base}}^2 + \sigma_{\text{extra}}^2}}_{\text{angle broadening}} \;\times\; f(E)$$
+
+where $f(E)$ is the energy-dependent scaling factor. This means:
+- The angle-based broadening adds scatter in quadrature (models
+  off-axis aberration)
+- The energy scaling multiplies uniformly (models wavelength-dependent
+  surface scattering)
+
+#### Writeback to Workbook
+
+After energy scaling, the final sigma values (including the energy factor)
+are written to **MM_PSF columns I/J** (`sigma_rad_deg`, `sigma_azi_deg`)
+as arcseconds. This ensures the workbook always reflects exactly the sigma
+values used in the PSF aggregation.
+
+#### Data Flow Diagram
+
+```
+┌────────────────────────────────────────┐
+│  "MM HEW degradation energy" Sheet      │
+│  Col A: Energy [keV]                     │
+│  Col B: Sigma scaling factor             │
+└────────────────────┬───────────────────┘
+                     │ read & sort
+                     ▼
+┌────────────────────────────────────────┐
+│  np.interp(sel_energy, energies, factors)│
+│  → factor f(E)                           │
+└────────────────────┬───────────────────┘
+                     │
+                     ▼
+┌────────────────────────────────────────┐
+│  σ_rad *= f(E)                           │
+│  σ_azi *= f(E)                           │
+│  (applied to ALL 600 MMs uniformly)      │
+└────────────────────┬───────────────────┘
+                     │
+                     ▼
+┌────────────────────────────────────────┐
+│  Write final σ → MM_PSF cols I/J          │
+│  Copy to sigmax/sigmay for aggregation   │
+└────────────────────────────────────────┘
+```
+
+#### Test Coverage
+
+**File:** `tests/integration/test_hew_degradation.py`
+
+**`TestHEWEnergyScaling`** class — 11 tests:
+- `test_factor_applied_at_7kev`: At 7 keV factor = 1.18 → σ scaled.
+- `test_factor_unity_at_1kev`: At 1 keV factor = 1.0 → σ unchanged.
+- `test_interpolation_at_intermediate_energy`: At 5.5 keV →
+  linearly interpolated between (4, 1.09) and (7, 1.18).
+- `test_no_energy_sheet_no_scaling`: Missing sheet → no scaling applied.
+- `test_energy_scaling_applies_without_hew_broadening`: Works
+  independently of rotazi/rotrad sheets.
+- `test_energy_scaling_combined_with_hew_broadening`: Verifies
+  sequential application (broadening then scaling).
+- `test_sigmax_sigmay_include_energy_scaling`: sigmax/sigmay (used
+  by aggregation) include the energy factor.
+- `test_ij_columns_match_dataframe`: Workbook I/J columns contain
+  the energy-scaled sigma values.
+- `test_extrapolation_below_range`: Energy below table → clamped to
+  lowest factor (0.98).
+- `test_extrapolation_above_range`: Energy above table → clamped to
+  highest factor (1.28).
+- `test_scaling_all_mms`: Factor applied uniformly to all 600 positions.
+
 ---
 
 ## 4. Batch Combinations Mode
@@ -764,10 +924,10 @@ The batch mode ensures no GUI interaction:
 
 | File | Lines Changed | Description |
 |------|---------------|-------------|
-| `main.py` | +1000 / -140 | Core changes: batch loop, Extra PSF shifts read/write, HEW degradation pipeline, VLOOKUP resolver, sigma broadening, I/J writeback, D/E persistence |
+| `main.py` | +1100 / -140 | Core changes: batch loop, Extra PSF shifts read/write, HEW degradation pipeline, energy-dependent sigma scaling, VLOOKUP resolver, sigma broadening, I/J writeback, D/E persistence, batch parallelization |
 | `gui_distributions.py` | +5 / -4 | Preset table column shift K → M |
 | `tests/integration/test_extra_psf_shifts.py` | +373 (new) | Off-axis and defocus integration tests |
-| `tests/integration/test_hew_degradation.py` | +399 (new) | HEW degradation interpolation and broadening tests |
+| `tests/integration/test_hew_degradation.py` | +630 (new) | HEW degradation interpolation, broadening, and energy scaling tests |
 | `tests/test_batch_combinations.py` | +78 (new) | Batch CLI end-to-end test |
 | `.gitignore` | +6 | Exclude `*.zip` and batch artifacts |
 
@@ -779,6 +939,7 @@ The batch mode ensures no GUI interaction:
 | `Extra PSF degradations` | Sigma broadening per position (B:rad, C:azi) |
 | `MM HEW degradation rotazi` | HEW lookup table and per-position results (azimuthal) |
 | `MM HEW degradation rotrad` | HEW lookup table and per-position results (radial) |
+| `MM HEW degradation energy` | Energy vs sigma scaling factor table for energy-dependent broadening |
 
 ### 5.3 New/Modified MM_PSF Columns
 
@@ -792,11 +953,12 @@ The batch mode ensures no GUI interaction:
 
 ### 5.4 Test Suite
 
-71 tests total, all passing. The new features added **20 integration tests**:
+82 tests total, all passing. The new features added **31 integration tests**:
 - 5 off-axis rotation tests
 - 6 defocus tests
 - 3 loader edge-case tests
 - 14 HEW degradation tests (6 interpolation + 8 broadening)
+- 11 energy-dependent sigma scaling tests
 - 1 batch combinations end-to-end test
 
 ### 5.5 Timeline
