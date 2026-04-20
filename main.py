@@ -7517,12 +7517,13 @@ if __name__ == '__main__':
 
             print(f"Processing configuration '{prefix}': offaxis={offaxis_val}, energy={energy_val}, defocus={defocus_val}")
 
-            # Prepare new input workbook path
+            # Prepare new input workbook path in a temp directory to avoid
+            # leaving generated files in the Distributions/ source folder.
             src_path = args.file
-            src_dir = os.path.dirname(src_path) or '.'
             src_basename = os.path.basename(src_path)
             new_basename = f"{prefix}_{src_basename}"
-            new_path = os.path.join(src_dir, new_basename)
+            _batch_tmp_dir = tempfile.mkdtemp(prefix='e2e_batch_')
+            new_path = os.path.join(_batch_tmp_dir, new_basename)
             try:
                 shutil.copy2(src_path, new_path)
             except Exception as e:
@@ -8655,6 +8656,13 @@ if __name__ == '__main__':
                     print(f"Created fallback package (workbook only): {zip_target}")
             except Exception as e:
                 print(f"Failed to create package for {prefix}: {e}")
+
+            # Clean up the temp directory holding the modified input workbook
+            try:
+                if '_batch_tmp_dir' in locals() and _batch_tmp_dir and os.path.isdir(_batch_tmp_dir):
+                    shutil.rmtree(_batch_tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
         # Write aggregated results workbook and copy the combinations file + input workbook into the export folder
         try:
