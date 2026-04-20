@@ -345,6 +345,14 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
             # Allow forcing xlwings paste-values via env var for batch runs
             force_env = os.environ.get('FORCE_PASTE_VALUES', '')
+
+            # Fast path for batch mode: the batch loop already resolves
+            # formulas to literal values, so we can skip the expensive
+            # formula scan and just copy the file directly.
+            if os.environ.get('BATCH_NO_FORMULAS') == '1':
+                shutil.copy2(src_path, dest_path)
+                return dest_path
+
             need_xlwings = (force_env == '1') or _has_uncached_formula(src_path)
 
             if need_xlwings:
@@ -7547,6 +7555,11 @@ if __name__ == '__main__':
         aggregated_rows = []
         agg_columns = None
 
+        # Tell load_gaussians_from_excel to skip the expensive formula scan;
+        # batch-generated workbooks have literal values only (formulas in
+        # MM_PSF D/E are resolved by the batch loop before saving).
+        os.environ['BATCH_NO_FORMULAS'] = '1'
+
         skipped_cannot_read = 0
         skipped_empty_prefix = 0
         for rid, crow in combos.iterrows():
@@ -8146,22 +8159,12 @@ if __name__ == '__main__':
                 print(f"Failed to modify workbook {new_path}: {e}")
                 continue
 
-            # Compute HEW/EEF metrics for this modified workbook (no plotting)
+            # Run this script on the modified workbook with --export-package.
+            # The child process also prints a JSON metrics block to stdout
+            # (from plot_sum), so we capture its output and parse the metrics
+            # instead of computing them separately — this avoids a redundant
+            # load_gaussians_from_excel + plot_sum cycle per iteration.
             metrics = {}
-            try:
-                try:
-                    metrics = compute_hew_eef_metrics(
-                        new_path,
-                        sheet=args.sheet if hasattr(args, 'sheet') else 'MM_PSF',
-                        normalize=getattr(args, 'normalize', True),
-                        fast=(run_mode == 'coarse')
-                    )
-                except Exception:
-                    metrics = compute_hew_eef_metrics(new_path, fast=(run_mode == 'coarse'))
-            except Exception as e:
-                print(f"Warning: failed to compute HEW/EEF metrics for {new_basename}: {e}")
-
-            # Run this script on the modified workbook with --export-package
             try:
                 cmd = [sys.executable, os.path.abspath(__file__), '--file', new_path, '--export-package', '--mode', run_mode]
                 print('Running:', ' '.join(cmd))
@@ -8169,7 +8172,39 @@ if __name__ == '__main__':
                 # Record existing Exports subfolders so we can detect a new package
                 existing_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
 
-                subprocess.check_call(cmd)
+                child_env = os.environ.copy()
+                child_env['BATCH_NO_FORMULAS'] = '1'
+                child_output = subprocess.check_output(cmd, env=child_env, stderr=subprocess.STDOUT, text=True)
+                # Echo child output for visibility
+                print(child_output)
+
+                # Parse metrics JSON from child stdout (last valid JSON block)
+                try:
+                    import json as _json_batch
+                    # Look for lines forming a JSON object
+                    _json_lines = []
+                    _in_json = False
+                    _brace_depth = 0
+                    for _line in child_output.splitlines():
+                        stripped = _line.strip()
+                        if not _in_json and stripped.startswith('{'):
+                            _in_json = True
+                            _json_lines = []
+                            _brace_depth = 0
+                        if _in_json:
+                            _json_lines.append(_line)
+                            _brace_depth += stripped.count('{') - stripped.count('}')
+                            if _brace_depth <= 0:
+                                _in_json = False
+                                try:
+                                    candidate = _json_batch.loads('\n'.join(_json_lines))
+                                    if isinstance(candidate, dict) and 'hew_origin_arcsec' in candidate:
+                                        metrics = candidate
+                                except Exception:
+                                    pass
+                                _json_lines = []
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"Failed to run export for {prefix}: {e}")
 
@@ -8834,6 +8869,7 @@ if __name__ == '__main__':
             pass
 
         # Completed batch processing
+        os.environ.pop('BATCH_NO_FORMULAS', None)
         sys.exit(0)
 
     df = load_gaussians_from_excel(args.file, args.sheet)
