@@ -30,7 +30,19 @@ This document provides a quick reference to the core modules and their purposes.
 - Added module-level documentation to `main.py` and explanatory notes
 - Added `CONTRIBUTING.md` and `DOCS_SUMMARY.md` to guide contributors
 - Documented the new aggregated modified pseudo-Voigt fit and GUI EEF export behavior
+- Documented HEW degradation plus energy-dependent sigma broadening behavior
 - Cleaned up duplicate documentation between DOCS_GUI.md and README.md
+
+## Modeling Notes
+
+- HEW degradation broadening is applied per-position in quadrature:
+	`sigma_broadened = sqrt(sigma_base^2 + sigma_extra^2)`
+- Energy-dependent broadening then scales both `sigma_rad` and `sigma_azi` using the
+	`MM HEW degradation energy` sheet (energy/factor table with linear interpolation):
+	`sigma_final = sigma_broadened * f(E)`
+- Final degraded/scaled sigma values are written to MM_PSF columns I/J and used by
+	the aggregated PSF computation.
+- See [README.md](README.md) section "Energy-Dependent Broadening (v8)" for full details.
 
 ## Recommended Next Steps
 

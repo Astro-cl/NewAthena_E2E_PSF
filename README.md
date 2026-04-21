@@ -107,7 +107,7 @@ The GUI's main role is to configure and export the Excel workbook that `main.py`
 - **Rotation-Invariant HEW**: Polar grid integration eliminates orientation bias
 - **Perturbation Analysis**: Alignment errors, gravity offload effects, and thermal deformations
 - **Off-Axis & Defocus Modeling**: X/Y off-axis decomposition and focus-shift projection to centroid offsets (v8)
-- **HEW Degradation**: Per-position sigma broadening from lookup tables (Row #, angle, energy to HEW arcsec) (v8)
+- **HEW Degradation + Energy Broadening**: Per-position sigma broadening from lookup tables plus energy-dependent sigma scaling from an energy-factor table (v8)
 - **Batch Combinations**: Automated multi-configuration runs (off-axis, energy, defocus) with per-config ZIP packaging (v8)
 - **Fast Mode**: Optimized computation with configurable sampling density
 - **Multi-MM Analysis**: Process multiple mirror modules with different distributions
@@ -679,6 +679,32 @@ sigma_new = sqrt(sigma_base^2 + (HEW / (2*sqrt(2*ln(2))))^2)
 ```
 
 Results are written to the **"Extra PSF degradations"** sheet (`sigma_extra`) and MM_PSF columns I/J (degraded sigma).
+
+#### Energy-Dependent Broadening (v8)
+
+After angle-based HEW broadening, an energy scaling factor is applied to both `sigma_rad` and `sigma_azi`.
+
+The factor is read from the **"MM HEW degradation energy"** sheet:
+- Column A: energy (keV)
+- Column B: sigma scaling factor
+
+At runtime, the selected energy is taken from `A_eff!D2` (and propagated to related sheets in batch mode), then the scaling factor is linearly interpolated:
+
+```
+f(E) = interp(E_sel, energies, factors)
+sigma_final = sigma_broadened * f(E)
+```
+
+Combined with the angle-based term, the full model is:
+
+$$
+\sigma_{\text{final}} = \sqrt{\sigma_{\text{base}}^2 + \sigma_{\text{extra}}^2} \times f(E)
+$$
+
+Notes:
+- The reference factor at 1 keV is typically 1.0 (no additional scaling).
+- `np.interp` boundary behavior is used, so values outside the table range are clamped to the nearest edge factor.
+- MM_PSF columns I/J store the final sigma values used by PSF aggregation (after broadening and energy scaling).
 
 ### Unit Conventions
 
