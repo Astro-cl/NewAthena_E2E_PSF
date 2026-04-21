@@ -5635,8 +5635,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 'eef90_best_arcsec': eef90_arcsec,
                 'hew_x_arcsec': hew_base_x_arcsec,
                 'hew_y_arcsec': hew_base_y_arcsec,
-                'hew_opt_x_arcsec': hew_opt_x_arcsec,
-                'hew_opt_y_arcsec': hew_opt_y_arcsec,
+                'hew_opt_x_arcsec': hew_opt_x_arcsec if 'hew_opt_x_arcsec' in locals() else None,
+                'hew_opt_y_arcsec': hew_opt_y_arcsec if 'hew_opt_y_arcsec' in locals() else None,
                 'hew_opt_arcsec': (2 * opt_radius_50 * m_to_arcsec) if opt_radius_50 is not None else None,
                 'eef90_opt_arcsec': (2 * opt_radius_90 * m_to_arcsec) if opt_radius_90 is not None else None,
             }
@@ -8170,7 +8170,9 @@ if __name__ == '__main__':
 
 
         # ---- Phase 2: Run child processes in parallel ----
-        _pre_child_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
+        # Each child runs with cwd set to its own temp directory so that
+        # CustomPSFs/, Figures/ and Exports/ are isolated per child and
+        # parallel children never overwrite each other's artifacts.
 
         def _run_batch_child(_job):
             """Run export-package subprocess for one batch configuration."""
@@ -8178,8 +8180,13 @@ if __name__ == '__main__':
                     '--file', _job['new_path'], '--export-package', '--mode', _job['run_mode']]
             _child_env = os.environ.copy()
             _child_env['BATCH_NO_FORMULAS'] = '1'
+            _child_cwd = _job['_batch_tmp_dir']
+            # Ensure output directories exist inside the child's isolated cwd
+            # (Figures/ is needed for PNGs including the combined E2E+EEF figure)
+            os.makedirs(os.path.join(_child_cwd, 'Figures'), exist_ok=True)
+            os.makedirs(os.path.join(_child_cwd, 'CustomPSFs'), exist_ok=True)
             try:
-                _output = subprocess.check_output(_cmd, env=_child_env, stderr=subprocess.STDOUT, text=True)
+                _output = subprocess.check_output(_cmd, env=_child_env, stderr=subprocess.STDOUT, text=True, cwd=_child_cwd)
             except subprocess.CalledProcessError as _e:
                 _output = _e.output or ''
             except Exception:
@@ -8211,7 +8218,19 @@ if __name__ == '__main__':
                             _json_lines = []
             except Exception:
                 pass
-            return _output, _metrics
+            # Find the Exports/<ts> package directory inside the child's cwd
+            _child_pkg_path = None
+            try:
+                _child_exports = os.path.join(_child_cwd, 'Exports')
+                if os.path.isdir(_child_exports):
+                    _subdirs = [d for d in os.listdir(_child_exports)
+                                if os.path.isdir(os.path.join(_child_exports, d))]
+                    if _subdirs:
+                        _child_pkg_path = os.path.join(_child_exports,
+                                                        max(_subdirs, key=lambda d: os.path.getmtime(os.path.join(_child_exports, d))))
+            except Exception:
+                pass
+            return _output, _metrics, _child_pkg_path
 
         _n_workers = min(os.cpu_count() or 4, len(_batch_jobs)) if _batch_jobs else 1
         print(f"\nLaunching {len(_batch_jobs)} configurations using {_n_workers} parallel workers...")
@@ -8221,21 +8240,7 @@ if __name__ == '__main__':
             _child_results = list(_executor.map(_run_batch_child, _batch_jobs))
 
         # ---- Phase 3: Post-process results (sequential) ----
-        # Detect all new package directories created by the parallel children
-        _post_child_dirs = set(os.listdir(exports_root)) if os.path.isdir(exports_root) else set()
-        _new_pkg_dirs = [d for d in _post_child_dirs - _pre_child_dirs
-                         if os.path.isdir(os.path.join(exports_root, d))]
-        # Build mapping: filename inside package dir -> full package dir path
-        _wb_to_pkg = {}
-        for _d in _new_pkg_dirs:
-            _dp = os.path.join(exports_root, _d)
-            try:
-                for _fn in os.listdir(_dp):
-                    _wb_to_pkg[_fn] = _dp
-            except Exception:
-                pass
-
-        for _job, (_child_output, _metrics) in zip(_batch_jobs, _child_results):
+        for _job, (_child_output, _metrics, _child_pkg_path) in zip(_batch_jobs, _child_results):
             rid = _job['rid']
             prefix = _job['prefix']
             new_path = _job['new_path']
@@ -8249,15 +8254,8 @@ if __name__ == '__main__':
             child_output = _child_output
             print(child_output)
 
-            # Resolve package directory for this job using workbook filename
-            pkg_path = _wb_to_pkg.get(new_basename)
-            if pkg_path is None:
-                # Fallback: search new dirs for matching workbook file
-                for _d in _new_pkg_dirs:
-                    _dp = os.path.join(exports_root, _d)
-                    if os.path.exists(os.path.join(_dp, new_basename)):
-                        pkg_path = _dp
-                        break
+            # Package directory found by the child worker inside its isolated cwd
+            pkg_path = _child_pkg_path
 
             # Prefer zipping the full export package folder created by the child run.
             ts = time.strftime('%Y%m%d_%H%M%S')
