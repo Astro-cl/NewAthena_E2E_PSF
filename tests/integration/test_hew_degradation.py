@@ -234,6 +234,45 @@ class TestHEWDegradationWriteBack:
         assert abs(val - 0.6) < 0.15, f"Expected ~0.6, got {val}"
         wb.close()
 
+    def test_abs_interpolation_and_signed_total_written_to_col_d(self, tmp_path):
+        """HEW sheets should interpolate from abs(total) while writing signed totals to column D."""
+        table = [
+            (1, 0, 1.0, 0.0),
+            (1, 1, 1.0, 1.2),
+        ]
+        path = str(tmp_path / 'hew_abs_and_totals.xlsx')
+        # With x=1,y=0 geometry: rotrad ~ rotx, rotazi ~ roty.
+        # Use negative totals to verify signed writeback and abs interpolation.
+        _make_workbook(
+            path,
+            n_mm=1,
+            hew_azi_table=table,
+            hew_rad_table=table,
+            extra_rotx=-30.0,
+            extra_roty=-30.0,
+        )
+        load_gaussians_from_excel(path)
+
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws_azi = wb['MM HEW degradation rotazi']
+        ws_rad = wb['MM HEW degradation rotrad']
+
+        # abs(-30) -> 30 arcsec => midpoint interpolation ~0.6
+        v_azi = ws_azi.cell(row=2, column=2).value
+        v_rad = ws_rad.cell(row=2, column=2).value
+        assert v_azi is not None and v_rad is not None
+        assert abs(v_azi - 0.6) < 0.15, f"rotazi expected ~0.6, got {v_azi}"
+        assert abs(v_rad - 0.6) < 0.15, f"rotrad expected ~0.6, got {v_rad}"
+
+        # Column D must store signed totals, not abs values.
+        tot_azi = ws_azi.cell(row=2, column=4).value
+        tot_rad = ws_rad.cell(row=2, column=4).value
+        assert tot_azi == pytest.approx(-30.0)
+        assert tot_rad == pytest.approx(-30.0)
+        assert ws_azi.cell(row=1, column=4).value == 'rotazi_total'
+        assert ws_rad.cell(row=1, column=4).value == 'rotrad_total'
+        wb.close()
+
     def test_no_hew_sheet_no_crash(self, tmp_path):
         """Workbook without HEW degradation sheets should load without error."""
         path = str(tmp_path / 'no_hew.xlsx')
@@ -294,8 +333,10 @@ class TestHEWSigmaBroadening:
     def _expected_sigma(self, sigma_arcsec, hew_arcsec):
         """Compute the expected broadened sigma in meters."""
         sigma_m = sigma_arcsec * _ARCSEC_TO_M
-        sigma_extra_m = (hew_arcsec / _FWHM_TO_SIGMA) * _ARCSEC_TO_M
-        return math.sqrt(sigma_m**2 + sigma_extra_m**2)
+        sigma_extra_m = (abs(hew_arcsec) / _FWHM_TO_SIGMA) * _ARCSEC_TO_M
+        if hew_arcsec >= 0:
+            return math.sqrt(sigma_m**2 + sigma_extra_m**2)
+        return math.sqrt(max(sigma_m**2 - sigma_extra_m**2, 0.0))
 
     def test_positive_hew_broadens_sigma_rad(self, tmp_path):
         """Positive rotrad HEW degradation should increase sigma_rad."""
@@ -327,8 +368,8 @@ class TestHEWSigmaBroadening:
         assert abs(actual - expected) / expected < 1e-4, \
             f"sigma_azi: expected {expected:.6e}, got {actual:.6e}"
 
-    def test_negative_hew_no_broadening(self, tmp_path):
-        """Negative HEW degradation values should NOT modify sigma."""
+    def test_negative_hew_reduces_sigma_in_rss(self, tmp_path):
+        """Negative HEW degradation values should subtract in RSS."""
         sigma_0 = 4.0
         table = [
             (1, 0, 1.0, -0.5),
@@ -338,9 +379,41 @@ class TestHEWSigmaBroadening:
         _make_workbook(path, n_mm=1, sigma_rad=sigma_0, sigma_azi=sigma_0,
                        hew_rad_table=table, hew_azi_table=table)
         df = load_gaussians_from_excel(path)
-        expected = sigma_0 * _ARCSEC_TO_M
-        assert abs(float(df['sigma_rad'].iloc[0]) - expected) < 1e-10
-        assert abs(float(df['sigma_azi'].iloc[0]) - expected) < 1e-10
+        expected = self._expected_sigma(sigma_0, -0.5)
+        assert abs(float(df['sigma_rad'].iloc[0]) - expected) / expected < 1e-4
+        assert abs(float(df['sigma_azi'].iloc[0]) - expected) / expected < 1e-4
+
+    def test_negative_hew_writes_negative_sigma_extra(self, tmp_path):
+        """Negative HEW degradation in column B must produce negative sigma_extra in Extra PSF degradations."""
+        sigma_0 = 4.0
+        table = [
+            (1, 0, 1.0, -0.5),
+            (1, 5, 1.0, -0.5),
+        ]
+        path = str(tmp_path / 'neg_sigma_extra.xlsx')
+        _make_workbook(path, n_mm=1, sigma_rad=sigma_0, sigma_azi=sigma_0,
+                       hew_rad_table=table, hew_azi_table=table)
+
+        wb = openpyxl.load_workbook(path)
+        ws_extra = wb.create_sheet('Extra PSF degradations')
+        ws_extra.cell(row=1, column=1, value='Position #')
+        ws_extra.cell(row=1, column=2, value='sigma_extra_rad [arcsec]')
+        ws_extra.cell(row=1, column=3, value='sigma_extra_azi [arcsec]')
+        ws_extra.cell(row=2, column=1, value=1)
+        wb.save(path)
+        wb.close()
+
+        load_gaussians_from_excel(path)
+
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws_extra = wb['Extra PSF degradations']
+        se_rad = ws_extra.cell(row=2, column=2).value
+        se_azi = ws_extra.cell(row=2, column=3).value
+        wb.close()
+
+        assert se_rad is not None and se_azi is not None
+        assert float(se_rad) < 0.0
+        assert float(se_azi) < 0.0
 
     def test_zero_hew_no_broadening(self, tmp_path):
         """Zero HEW degradation should leave sigma unchanged."""

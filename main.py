@@ -1650,6 +1650,15 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         except Exception:
             pass
 
+        if 'weight' not in df.columns:
+            try:
+                if 'aeff_base' in df.columns:
+                    df['weight'] = df['aeff_base'].astype(float)
+                else:
+                    df['weight'] = 1.0
+            except Exception:
+                df['weight'] = 1.0
+
         if 'weight' in df.columns:
 
             # Helper to find a per-(cfg_row,energy) series robustly. The
@@ -1713,22 +1722,24 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
                 # radial (per-row)
                 if applied_rad and p in rot_rad_map:
-                    rot_val = float(rot_rad_map.get(p, 0.0))
-                    try:
-                        factor = 1.0
-                        if 'rad_mode' in locals() and rad_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
-                            cfg_row = pos_to_cfg_row.get(p)
-                            if cfg_row is not None:
-                                series = _find_series(ys_by_pos_rad, cfg_row, sel_energy, locals().get('aeff_col_name'))
-                                if series is None:
-                                    pass
-                                else:
-                                    xs_use, ys_use = series
-                                    factor = float(np.interp(rot_val, xs_use, ys_use))
-                        df.at[idx, 'aeff_vig_factor_rad'] = factor
-                        df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
-                    except Exception:
-                        factor = 1.0
+                    if not ('rad_mode' in locals() and rad_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals()):
+                        raise RuntimeError('VIG rotrad requires per_row_energy mode and pos_to_cfg_row mapping')
+
+                    cfg_row = pos_to_cfg_row.get(p)
+                    if cfg_row is None:
+                        raise RuntimeError(f'VIG rotrad missing cfg_row for Position # {p}')
+
+                    series = _find_series(ys_by_pos_rad, cfg_row, sel_energy, locals().get('aeff_col_name'))
+                    if series is None:
+                        raise RuntimeError(
+                            f'VIG rotrad missing series for cfg_row={cfg_row}, sel_energy={sel_energy}'
+                        )
+
+                    rot_val = abs(float(rot_rad_map.get(p, 0.0)))
+                    xs_use, ys_use = series
+                    factor = float(np.interp(rot_val, xs_use, ys_use))
+                    df.at[idx, 'aeff_vig_factor_rad'] = factor
+                    df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
 
                     if 'vig_vals_rad' not in locals():
                         vig_vals_rad = {}
@@ -1739,24 +1750,23 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
                 # azimuthal (per-row)
                 if applied_azi and p in rot_azi_map:
-                    try:
-                        used = False
-                        if 'azi_mode' in locals() and azi_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
-                            cfg_row = pos_to_cfg_row.get(p)
-                            if cfg_row is not None:
-                                series = _find_series(ys_by_pos_azi, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
-                                if series is not None:
-                                    xs_use, ys_use = series
-                                    factor = float(np.interp(abs(float(rot_azi_map.get(p, 0.0))), xs_use, ys_use))
-                                    used = True
-                        if not used and 'azi_mode' in locals() and azi_mode == 'per_pos' and p in ys_by_pos_azi:
-                            ys_use = ys_by_pos_azi[p]
-                            rot_val = abs(float(rot_azi_map.get(p, 0.0)))
-                            factor = float(np.interp(rot_val, xs_azi, ys_use, left=ys_use[0], right=ys_use[-1]))
-                        df.at[idx, 'aeff_vig_factor_azi'] = factor
-                        df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
-                    except Exception:
-                        factor = 1.0
+                    if not ('azi_mode' in locals() and azi_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals()):
+                        raise RuntimeError('VIG rotazi requires per_row_energy mode and pos_to_cfg_row mapping')
+
+                    cfg_row = pos_to_cfg_row.get(p)
+                    if cfg_row is None:
+                        raise RuntimeError(f'VIG rotazi missing cfg_row for Position # {p}')
+
+                    series = _find_series(ys_by_pos_azi, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                    if series is None:
+                        raise RuntimeError(
+                            f'VIG rotazi missing series for cfg_row={cfg_row}, sel_energy={locals().get("sel_energy")}'
+                        )
+
+                    xs_use, ys_use = series
+                    factor = float(np.interp(abs(float(rot_azi_map.get(p, 0.0))), xs_use, ys_use))
+                    df.at[idx, 'aeff_vig_factor_azi'] = factor
+                    df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
 
                     if 'vig_vals_azi' not in locals():
                         vig_vals_azi = {}
@@ -1826,7 +1836,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         # Prefer per-position arrays when available (rad_mode == 'per_pos')
                         if cfg is not None and 'rad_mode' in locals() and rad_mode == 'per_pos' and 'ys_by_pos_rad' in locals() and isinstance(ys_by_pos_rad, dict) and pos in ys_by_pos_rad:
                             try:
-                                applied_val = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_by_pos_rad[pos]))
+                                applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_by_pos_rad[pos]))
                                 vig_vals_rad[pos] = float(applied_val)
                                 vig_source_rad[pos] = 'per_pos'
                             except Exception:
@@ -1836,10 +1846,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 series = _find_series(ys_by_pos_rad, cfg, locals().get('sel_energy'), locals().get('aeff_col_name'))
                                 if series is not None:
                                     xsr, ysr = series
-                                    applied_val = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xsr, ysr))
+                                    applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xsr, ysr))
                             if applied_val is None:
                                 if 'xs_rad' in locals() and xs_rad is not None and ys_rad is not None:
-                                    applied_val = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_rad))
+                                    applied_val = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_rad))
                                 else:
                                     applied_val = 1.0
                             vig_vals_rad[pos] = float(applied_val)
@@ -1996,8 +2006,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             _vig_azi_sname = _find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES)
             _vig_rad_sname = _find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES)
             for sname, vig_map in (
-                (_vig_azi_sname, final_vig_vals_azi if final_vig_vals_azi else (vig_vals_azi if 'vig_vals_azi' in locals() else {})),
-                (_vig_rad_sname, final_vig_vals_rad if final_vig_vals_rad else (vig_vals_rad if 'vig_vals_rad' in locals() else {})),
+                (_vig_azi_sname, (vig_vals_azi if 'vig_vals_azi' in locals() and vig_vals_azi else final_vig_vals_azi)),
+                (_vig_rad_sname, (vig_vals_rad if 'vig_vals_rad' in locals() and vig_vals_rad else final_vig_vals_rad)),
             ):
                 if sname is None:
                     continue
@@ -2121,26 +2131,38 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 except Exception:
                     local_pos_to_cfg = locals().get('pos_to_cfg_row', {}) if 'pos_to_cfg_row' in locals() else {}
 
+                # Expose signed per-position totals used before interpolation.
+                # Column D stores rotazi_total/rotrad_total so users can audit
+                # values while interpolation still uses abs(...) as required.
+                try:
+                    if sname.endswith('rotazi'):
+                        ws.cell(row=1, column=4, value='rotazi_total')
+                    else:
+                        ws.cell(row=1, column=4, value='rotrad_total')
+                except Exception:
+                    pass
+
                 for i, (pos_k, row_idx) in enumerate(pos_row_map.items()):
                     if i % 100 == 0:
                         pass
                         sys.stdout.flush()
                     pos_int = int(pos_k)
-                    # prefer per-position values derived from the DataFrame
+                    # Prefer recomputed vignette maps first, then DataFrame-derived
+                    # values only as a fallback for visibility/writeback.
                     val = None
                     try:
-                        if sname.endswith('rotazi'):
-                            if pos_int in per_pos_azi:
-                                val = float(per_pos_azi[pos_int])
-                        else:
-                            if pos_int in per_pos_rad:
-                                val = float(per_pos_rad[pos_int])
+                        if pos_int in vig_map:
+                            val = float(vig_map[pos_int])
                     except Exception:
                         val = None
-                    # fallback to any precomputed vig_map entry
                     try:
-                        if val is None and pos_int in vig_map:
-                            val = float(vig_map[pos_int])
+                        if val is None:
+                            if sname.endswith('rotazi'):
+                                if pos_int in per_pos_azi:
+                                    val = float(per_pos_azi[pos_int])
+                            else:
+                                if pos_int in per_pos_rad:
+                                    val = float(per_pos_rad[pos_int])
                     except Exception:
                         val = None
                     # if missing, attempt to compute from per-(cfg_row,energy) tables
@@ -2177,6 +2199,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             val = 1.0
                     try:
                         ws.cell(row=row_idx, column=2, value=float(val))
+                        if sname.endswith('rotazi'):
+                            ws.cell(row=row_idx, column=4, value=float(rot_azi_map.get(pos_int, 0.0)))
+                        else:
+                            ws.cell(row=row_idx, column=4, value=float(rot_rad_map.get(pos_int, 0.0)))
                         written += 1
                     except Exception:
                         continue
@@ -2512,11 +2538,11 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                                 xsr = xs_rad
                                             else:
                                                 raise ValueError('no xs available for per-pos ys')
-                                        applied_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xsr, ysr, left=ysr[0], right=ysr[-1]))
+                                        applied_rad = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xsr, ysr, left=ysr[0], right=ysr[-1]))
                                     except Exception:
                                         applied_rad = None
                             if applied_rad is None and 'xs_rad' in locals() and xs_rad is not None and 'ys_rad' in locals() and ys_rad is not None:
-                                applied_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_rad))
+                                applied_rad = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_rad))
                             if applied_rad is None:
                                 applied_rad = 1.0
                             final_vig_rad[pos] = float(applied_rad)
@@ -2578,27 +2604,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             except Exception:
                                 continue
                         # write reconciled values
-                        for cfg_or_pos_k, row_idx in pos_row_map2.items():
+                        for pos_k, row_idx in pos_row_map2.items():
                             try:
-                                # The sheet's column A may contain cfg_row identifiers
-                                # rather than Position #. Try to resolve to a
-                                # Position # using pos_to_cfg_row if available.
-                                pos_key = None
-                                try:
-                                    if 'pos_to_cfg_row' in locals():
-                                        # find position whose cfg_row equals this key
-                                        for pp, cfgv in pos_to_cfg_row.items():
-                                            if cfgv == int(cfg_or_pos_k):
-                                                pos_key = pp
-                                                break
-                                except Exception:
-                                    pos_key = None
-                                # fallback: if the cell already contains a Position #
-                                if pos_key is None:
-                                    try:
-                                        pos_key = int(cfg_or_pos_k)
-                                    except Exception:
-                                        pos_key = None
+                                # Column A on MM vignette sheets is Position #.
+                                pos_key = int(pos_k)
                                 val = float(final_map.get(pos_key, 1.0))
                                 ws_w.cell(row=row_idx, column=2, value=val)
                             except Exception:
@@ -2730,6 +2739,16 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                             continue
                         ws_hew = wb[hew_sname]
 
+                        # Persist signed totals for auditability; interpolation
+                        # still uses abs(...) just before table lookup.
+                        try:
+                            if angle_label == 'rotazi':
+                                ws_hew.cell(row=1, column=4, value='rotazi_total')
+                            else:
+                                ws_hew.cell(row=1, column=4, value='rotrad_total')
+                        except Exception:
+                            pass
+
                         # Check C2 for sheet-specific selected energy
                         hew_sheet_energy = _hew_sel_energy
                         try:
@@ -2739,43 +2758,34 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         except Exception:
                             pass
 
-                        # Build per-(cfg_row, energy) series from cols H-K
-                        # using a data-only workbook to resolve cached values
+                        # Build per-(cfg_row, energy) series from cols H-K.
+                        # Read from the in-memory worksheet (already loaded for
+                        # writeback) so processing is not blocked by secondary
+                        # file-open failures.
                         hew_series = {}
-                        try:
-                            from openpyxl import load_workbook as _load_wb_hew
-                            wb_hew_vals = _load_wb_hew(path, data_only=True)
-                            ws_hew_vals = wb_hew_vals[hew_sname]
-                            for rr in range(2, (ws_hew_vals.max_row or 0) + 1):
+                        for rr in range(2, (ws_hew.max_row or 0) + 1):
+                            try:
+                                cfg_row_val = ws_hew.cell(row=rr, column=8).value  # H
+                                if cfg_row_val is None:
+                                    continue
+                                cfg_row_val = int(float(cfg_row_val))
+                                angle_arcmin = ws_hew.cell(row=rr, column=9).value  # I
+                                energy_val_hew = ws_hew.cell(row=rr, column=10).value  # J
+                                hew_val = ws_hew.cell(row=rr, column=11).value  # K
+                                if angle_arcmin is None or hew_val is None:
+                                    continue
+                                xval = float(angle_arcmin) * 60.0  # arcmin -> arcsec
+                                yval = float(hew_val)
                                 try:
-                                    cfg_row_val = ws_hew_vals.cell(row=rr, column=8).value  # H
-                                    if cfg_row_val is None:
-                                        continue
-                                    cfg_row_val = int(float(cfg_row_val))
-                                    angle_arcmin = ws_hew_vals.cell(row=rr, column=9).value  # I
-                                    energy_val_hew = ws_hew_vals.cell(row=rr, column=10).value  # J
-                                    hew_val = ws_hew_vals.cell(row=rr, column=11).value  # K
-                                    if angle_arcmin is None or hew_val is None:
-                                        continue
-                                    xval = float(angle_arcmin) * 60.0  # arcmin -> arcsec
-                                    yval = float(hew_val)
-                                    # Key by (cfg_row, energy_float)
-                                    try:
-                                        key = (cfg_row_val, float(energy_val_hew))
-                                    except Exception:
-                                        continue
-                                    if key not in hew_series:
-                                        hew_series[key] = {'xs': [], 'ys': []}
-                                    hew_series[key]['xs'].append(xval)
-                                    hew_series[key]['ys'].append(yval)
+                                    key = (cfg_row_val, float(energy_val_hew))
                                 except Exception:
                                     continue
-                            try:
-                                wb_hew_vals.close()
+                                if key not in hew_series:
+                                    hew_series[key] = {'xs': [], 'ys': []}
+                                hew_series[key]['xs'].append(xval)
+                                hew_series[key]['ys'].append(yval)
                             except Exception:
-                                pass
-                        except Exception:
-                            pass
+                                continue
 
                         if not hew_series:
                             continue
@@ -2807,7 +2817,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 cfg_row = _hew_local_pos_to_cfg.get(pos_int)
                                 if cfg_row is None:
                                     continue
-                                rot_val = abs(float(rot_map.get(pos_int, 0.0)))
+                                rot_total_signed = float(rot_map.get(pos_int, 0.0))
+                                rot_val = abs(rot_total_signed)
                                 # Find the series for (cfg_row, sel_energy)
                                 series = None
                                 try:
@@ -2834,6 +2845,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 xs_h, ys_h = series
                                 hew_deg_val = float(np.interp(rot_val, xs_h, ys_h))
                                 ws_hew.cell(row=row_idx, column=2, value=hew_deg_val)
+                                ws_hew.cell(row=row_idx, column=4, value=rot_total_signed)
                                 # Store for later sigma broadening
                                 if angle_label == 'rotazi':
                                     hew_deg_per_pos_azi[pos_int] = hew_deg_val
@@ -3087,8 +3099,142 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         df.at[idx, 'mux'] = new_mux
         df.at[idx, 'muy'] = new_muy
     
+    # Ensure HEW degradation sheets are processed even when earlier
+    # A_eff-dependent writeback branches are skipped.
+    if not hew_deg_per_pos_rad and not hew_deg_per_pos_azi:
+        try:
+            from openpyxl import load_workbook as _load_wb_fallback
+            wb_hew_fb = _load_wb_fallback(path)
+
+            # Build Position # -> cfg_row mapping.
+            hew_pos_to_cfg = {}
+            if 'pos_to_cfg_row' in locals() and pos_to_cfg_row:
+                hew_pos_to_cfg = dict(pos_to_cfg_row)
+            if not hew_pos_to_cfg:
+                try:
+                    mmcfg_fb = pd.read_excel(path, sheet_name='MM configuration', engine='openpyxl')
+                    if 'Position #' in mmcfg_fb.columns:
+                        t_fb = mmcfg_fb.copy()
+                        t_fb['Position #'] = pd.to_numeric(t_fb['Position #'], errors='coerce')
+                        t_fb = t_fb[t_fb['Position #'].notna()]
+                        for oi_fb, (_, rr_fb) in enumerate(t_fb.iterrows()):
+                            p_fb = int(rr_fb['Position #'])
+                            rv_fb = rr_fb.get('Row #') if 'Row #' in mmcfg_fb.columns else None
+                            if rv_fb is not None and not pd.isna(rv_fb):
+                                hew_pos_to_cfg[p_fb] = int(float(rv_fb))
+                            else:
+                                hew_pos_to_cfg[p_fb] = oi_fb + 1
+                except Exception:
+                    pass
+
+            for hew_candidates, rot_map, angle_label in (
+                (HEW_DEG_ROT_AZI_CANDIDATES, rot_azi_map, 'rotazi'),
+                (HEW_DEG_ROT_RAD_CANDIDATES, rot_rad_map, 'rotrad'),
+            ):
+                hew_sname = _find_vig_sheet(wb_hew_fb, hew_candidates)
+                if hew_sname is None or hew_sname not in wb_hew_fb.sheetnames:
+                    continue
+                ws_hew = wb_hew_fb[hew_sname]
+
+                # Header for signed total rotation column.
+                if angle_label == 'rotazi':
+                    ws_hew.cell(row=1, column=4, value='rotazi_total')
+                else:
+                    ws_hew.cell(row=1, column=4, value='rotrad_total')
+
+                # Selected energy (sheet C2 overrides global).
+                hew_energy = locals().get('sel_energy') or 1.0
+                try:
+                    c2_fb = ws_hew.cell(row=2, column=3).value
+                    if c2_fb is not None:
+                        hew_energy = float(c2_fb)
+                except Exception:
+                    pass
+
+                # Build per-(cfg_row, energy) interpolation series from H-K.
+                hew_series = {}
+                for rr in range(2, (ws_hew.max_row or 0) + 1):
+                    try:
+                        cfg_row_val = ws_hew.cell(row=rr, column=8).value
+                        if cfg_row_val is None:
+                            continue
+                        cfg_row_val = int(float(cfg_row_val))
+                        angle_arcmin = ws_hew.cell(row=rr, column=9).value
+                        e_val = ws_hew.cell(row=rr, column=10).value
+                        y_val = ws_hew.cell(row=rr, column=11).value
+                        if angle_arcmin is None or y_val is None:
+                            continue
+                        key = (cfg_row_val, float(e_val))
+                        hew_series.setdefault(key, {'xs': [], 'ys': []})
+                        hew_series[key]['xs'].append(float(angle_arcmin) * 60.0)
+                        hew_series[key]['ys'].append(float(y_val))
+                    except Exception:
+                        continue
+                if not hew_series:
+                    continue
+
+                for k_fb, v_fb in list(hew_series.items()):
+                    ord_fb = np.argsort(v_fb['xs'])
+                    hew_series[k_fb] = (
+                        np.array(v_fb['xs'], dtype=float)[ord_fb],
+                        np.array(v_fb['ys'], dtype=float)[ord_fb],
+                    )
+
+                # Position row map from column A.
+                pos_row_fb = {}
+                for rr in range(2, (ws_hew.max_row or 0) + 1):
+                    try:
+                        av_fb = ws_hew.cell(row=rr, column=1).value
+                        if av_fb is None:
+                            continue
+                        pos_row_fb[int(float(av_fb))] = rr
+                    except Exception:
+                        continue
+
+                for pos_int, row_idx in pos_row_fb.items():
+                    cfg_row = hew_pos_to_cfg.get(pos_int)
+                    if cfg_row is None:
+                        continue
+
+                    rot_total_signed = float(rot_map.get(pos_int, 0.0))
+                    rot_abs = abs(rot_total_signed)
+
+                    series = hew_series.get((cfg_row, float(hew_energy)))
+                    if series is None:
+                        best_key = None
+                        best_dist = float('inf')
+                        for k_fb in hew_series:
+                            if k_fb[0] != cfg_row:
+                                continue
+                            d_fb = abs(float(k_fb[1]) - float(hew_energy))
+                            if d_fb < best_dist:
+                                best_dist = d_fb
+                                best_key = k_fb
+                        if best_key is not None:
+                            series = hew_series[best_key]
+                    if series is None:
+                        continue
+
+                    xs_h, ys_h = series
+                    hew_deg_val = float(np.interp(rot_abs, xs_h, ys_h))
+                    ws_hew.cell(row=row_idx, column=2, value=hew_deg_val)
+                    ws_hew.cell(row=row_idx, column=4, value=rot_total_signed)
+
+                    if angle_label == 'rotazi':
+                        hew_deg_per_pos_azi[pos_int] = hew_deg_val
+                    else:
+                        hew_deg_per_pos_rad[pos_int] = hew_deg_val
+
+            wb_hew_fb.save(path)
+            wb_hew_fb.close()
+        except Exception:
+            pass
+
     # Apply HEW degradation broadening to sigma_rad and sigma_azi.
-    # new_sigma = sqrt(sigma^2 + (hew_deg / (2*sqrt(2*ln(2))))^2)
+    # Sign-aware RSS rule:
+    # - HEW_deg > 0: add in RSS  -> sqrt(sigma^2 + sigma_extra^2)
+    # - HEW_deg < 0: subtract in RSS -> sqrt(max(sigma^2 - sigma_extra^2, 0))
+    # where sigma_extra = |HEW_deg| / (2*sqrt(2*ln(2))).
     # The factor 2*sqrt(2*ln(2)) converts FWHM (HEW) to Gaussian sigma.
     # DataFrame sigma values are in metres (arcsec * arcsec_to_m at load);
     # HEW degradation values are in arcsec, so convert to metres first.
@@ -3099,13 +3245,15 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         _sigma_extra_rad_arcsec = {}  # pos -> arcsec
         _sigma_extra_azi_arcsec = {}  # pos -> arcsec
         for pos_int, hew_val in hew_deg_per_pos_rad.items():
-            if hew_val is not None and hew_val > 0:
-                _sigma_extra_rad_arcsec[pos_int] = hew_val / _fwhm_to_sigma
+            if hew_val is not None and hew_val != 0:
+                _sigma_extra_rad_arcsec[pos_int] = float(hew_val) / _fwhm_to_sigma
         for pos_int, hew_val in hew_deg_per_pos_azi.items():
-            if hew_val is not None and hew_val > 0:
-                _sigma_extra_azi_arcsec[pos_int] = hew_val / _fwhm_to_sigma
+            if hew_val is not None and hew_val != 0:
+                _sigma_extra_azi_arcsec[pos_int] = float(hew_val) / _fwhm_to_sigma
         broadened_rad = 0
         broadened_azi = 0
+        reduced_rad = 0
+        reduced_azi = 0
         for idx, row in df.iterrows():
             mm_num = row['MM #']
             pos = mm_to_pos.get(int(mm_num))
@@ -3113,20 +3261,33 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 continue
             # Radial broadening from rotrad HEW degradation
             hew_rad = hew_deg_per_pos_rad.get(pos)
-            if hew_rad is not None and hew_rad > 0:
-                sigma_extra = (hew_rad / _fwhm_to_sigma) * _arcsec_to_m
+            if hew_rad is not None and hew_rad != 0:
+                sigma_extra = (abs(float(hew_rad)) / _fwhm_to_sigma) * _arcsec_to_m
                 old_sigma = float(df.at[idx, 'sigma_rad'])
-                df.at[idx, 'sigma_rad'] = np.sqrt(old_sigma**2 + sigma_extra**2)
-                broadened_rad += 1
+                if hew_rad > 0:
+                    new_sq = old_sigma**2 + sigma_extra**2
+                    broadened_rad += 1
+                else:
+                    new_sq = max(old_sigma**2 - sigma_extra**2, 0.0)
+                    reduced_rad += 1
+                df.at[idx, 'sigma_rad'] = np.sqrt(new_sq)
             # Azimuthal broadening from rotazi HEW degradation
             hew_azi = hew_deg_per_pos_azi.get(pos)
-            if hew_azi is not None and hew_azi > 0:
-                sigma_extra = (hew_azi / _fwhm_to_sigma) * _arcsec_to_m
+            if hew_azi is not None and hew_azi != 0:
+                sigma_extra = (abs(float(hew_azi)) / _fwhm_to_sigma) * _arcsec_to_m
                 old_sigma = float(df.at[idx, 'sigma_azi'])
-                df.at[idx, 'sigma_azi'] = np.sqrt(old_sigma**2 + sigma_extra**2)
-                broadened_azi += 1
-        if broadened_rad or broadened_azi:
-            print(f"HEW_DEG broadening: {broadened_rad} sigma_rad, {broadened_azi} sigma_azi")
+                if hew_azi > 0:
+                    new_sq = old_sigma**2 + sigma_extra**2
+                    broadened_azi += 1
+                else:
+                    new_sq = max(old_sigma**2 - sigma_extra**2, 0.0)
+                    reduced_azi += 1
+                df.at[idx, 'sigma_azi'] = np.sqrt(new_sq)
+        if broadened_rad or broadened_azi or reduced_rad or reduced_azi:
+            print(
+                f"HEW_DEG RSS: +rad={broadened_rad}, -rad={reduced_rad}, "
+                f"+azi={broadened_azi}, -azi={reduced_azi}"
+            )
 
         # Write sigma_extra per position to "Extra PSF degradations" sheet
         # and final degraded sigma per MM to MM_PSF columns I/J.
