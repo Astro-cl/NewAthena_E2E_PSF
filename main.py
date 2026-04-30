@@ -7231,7 +7231,11 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             add_card('EXTEND', True, 'FITS dataset may contain extensions')
             if header_cards:
                 for k, v in header_cards.items():
-                    add_card(k, v)
+                    # Allow either scalar values or (value, comment) tuples.
+                    if isinstance(v, tuple) and len(v) == 2:
+                        add_card(k, v[0], v[1])
+                    else:
+                        add_card(k, v)
             cards.append('END')
             header_str = ''.join(card.ljust(80) for card in cards)
             header_bytes = header_str.encode('ascii')
@@ -7293,12 +7297,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             'DATE': _time.strftime('%Y-%m-%dT%H:%M:%SZ'),
             'TOT_AEFF': total_aeff_local,
             'INTG_Z': integral_local,
-            'CDELT1': float(cdelt1),
-            'CDELT2': float(cdelt2),
-            'PIXAS1': float(pix_as_x),
-            'PIXAS2': float(pix_as_y),
-            'PIXM1': float(pix_m_x),
-            'PIXM2': float(pix_m_y),
+            'CDELT1': (float(cdelt1), 'Axis-1 pixel scale [deg/pixel]'),
+            'CDELT2': (float(cdelt2), 'Axis-2 pixel scale [deg/pixel]'),
+            'PIXAS1': (float(pix_as_x), 'Axis-1 pixel size [arcsec/pixel]'),
+            'PIXAS2': (float(pix_as_y), 'Axis-2 pixel size [arcsec/pixel]'),
+            'PIXM1': (float(pix_m_x), 'Axis-1 pixel size [m/pixel]'),
+            'PIXM2': (float(pix_m_y), 'Axis-2 pixel size [m/pixel]'),
             'AUTHOR': author_local,
             'CONTACT': contact_local,
             'ORCID': orcid_local,
