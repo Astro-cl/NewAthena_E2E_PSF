@@ -106,7 +106,7 @@ The GUI's main role is to configure and export the Excel workbook that `main.py`
 - **Row-Wise MM Optimizer**: Optimize MM# assignments within rows to minimize HEW while keeping physical locations fixed
 - **Rotation-Invariant HEW**: Polar grid integration eliminates orientation bias
 - **Perturbation Analysis**: Alignment errors, gravity offload effects, and thermal deformations
-- **Off-Axis & Defocus Modeling**: X/Y off-axis decomposition and focus-shift projection to centroid offsets (v8)
+- **Off-Axis & Defocus Modeling**: X/Y off-axis decomposition and focus-shift projection to centroid offsets; defocus PSF shape broadening of `sigma_rad`/`sigma_azi` using per-MM physical dimensions (v8/v9)
 - **HEW Degradation + Energy Broadening**: Per-position sigma broadening from lookup tables plus energy-dependent sigma scaling from an energy-factor table (v8)
 - **Batch Combinations**: Automated multi-configuration runs (off-axis, energy, defocus) with per-config ZIP packaging (v8)
 - **Fast Mode**: Optimized computation with configurable sampling density
@@ -670,6 +670,28 @@ These are written to a dedicated **"Extra PSF shifts"** sheet and applied additi
 
 Defocus is written as `d_extra_z [um]` to the same sheet (mm * 1e3 gives um), then projected to centroid shifts via the d_z formula above.
 
+#### Defocusing PSF Shape Broadening (v9)
+
+In addition to the centroid shift, axial defocus broadens the per-MM PSF shape.
+
+**Physical model:** At best focus (`dz = 0`) the PSF geometric size is assumed to be `6 × sigma_initial`. The PSF size grows linearly with `dz` until, at `dz = 12 m` (the telescope focal length), it fills the full physical dimension of the mirror module (`MM_height` or `MM_width`). Converting the resulting geometric size back to a Gaussian sigma (dividing by 6) gives:
+
+```
+PSF_size_rad(dz) = 6·sigma_rad_initial + (MM_height - 6·sigma_rad_initial) / 12 · dz
+PSF_size_azi(dz) = 6·sigma_azi_initial + (MM_width  - 6·sigma_azi_initial) / 12 · dz
+
+sigma_rad_adjusted = sigma_rad_initial + (MM_height - 6·sigma_rad_initial) / 12 · dz / 6
+sigma_azi_adjusted = sigma_azi_initial + (MM_width  - 6·sigma_azi_initial) / 12 · dz / 6
+```
+
+Where:
+- `sigma_rad_initial`, `sigma_azi_initial` — initial spread values in metres (from MM_PSF columns I/J)
+- `MM_height` — read from **column I** of the `MM configuration` sheet (metres)
+- `MM_width` — read from **column J** of the `MM configuration` sheet (metres)
+- `dz` — signed total axial displacement in metres: `d_align_z + d_grav_z + d_therm_z + d_extra_z`, where `d_extra_z` comes from the **"Extra PSF shifts"** sheet (column `d_extra_z [µm]`, converted to metres)
+
+The adjusted values are written back to MM_PSF columns I/J (converted to arcsec). If columns I/J are absent from the `MM configuration` sheet the broadening step is silently skipped for the affected MMs.
+
 #### HEW Sigma Broadening (v8)
 
 Per-position HEW degradation is computed from lookup tables (Row #, angle, energy gives HEW arcsec) by interpolation. The broadened sigma is:
@@ -1015,6 +1037,9 @@ mkdir -p Figures
 ## Release History
 
 Full release notes are in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+### v9
+Defocusing PSF shape broadening: per-MM `sigma_rad` and `sigma_azi` are adjusted using a linear geometric model — the PSF size (6·sigma) grows linearly with `dz` from best focus to the MM physical dimension at `dz = 12 m` (focal length). Formula: `sigma_adjusted = sigma_initial + (MM_dim − 6·sigma_initial) / 12 × dz / 6`, using `MM_height` (col I) and `MM_width` (col J) from the `MM configuration` sheet. `dz` is signed. Adjusted sigmas written back to MM_PSF cols I/J. 13 new unit tests added (`tests/plots/test_defocus_sigma.py`). Full test suite: 94 passed, 4 pre-existing vignetting failures.
 
 ### v8 (2026-04-17)
 Major feature release. Off-axis pointing decomposed into X/Y components; defocus projected to centroid shifts; HEW sigma broadening from per-position lookup tables; Python VLOOKUP resolver for MM_PSF D/E formula values; `--batch-combinations` CLI for automated multi-configuration runs with per-config ZIP packaging and aggregated results workbook; improved A_eff formula evaluation fallback; Pearson4 skipped in coarse mode; preset table shifted from column K to **M** to avoid conflict with new I/J degraded sigma columns. 71 tests pass (20 new integration tests).

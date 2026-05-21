@@ -230,7 +230,7 @@ def load_aeff_weight_map_with_name(path: str) -> tuple[dict, str | None]:
 # and do not attempt best-effort formula parsing/evaluation.
 
 def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics: bool | None = None, **kwargs) -> pd.DataFrame:
-    """Load gaussian parameters from Excel.
+    """Load gaussian parameters from Excel and apply all per-MM perturbations.
 
     Expected columns: m_rad [arcsec], m_azi [arcsec], sigma_rad [arcsec], sigma_azi [arcsec]
     Values are converted from arcsec to meters using: 1 arcsec = 12*π/180/3600 m
@@ -239,9 +239,33 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     - muy = sin(theta)*m_rad + cos(theta)*m_azi
     theta_degrees is calculated from MM configuration: theta = arcsin(x_MM / r_MM)
     weight column is optional and will be overridden by A_eff sheet if present
-    
-    Note: accepts `fast_metrics` kwarg for compatibility with test harnesses; the
-    argument is recognized but not used by the loader.
+
+    Perturbations applied in order
+    --------------------------------
+    1. Centroid shifts (mux, muy) from Alignment / Gravity / Thermal d_x, d_y
+       and z-projection: dm = dz * (x_MM, y_MM) / (12 - z_MM).
+    2. **Defocusing sigma adjustment** (added 2026-05-21):
+       When a mirror module has a net axial displacement dz = d_align_z +
+       d_grav_z + d_therm_z + d_extra_z (all in metres), the PSF widths are broadened
+       according to::
+
+           sigma_rad_adjusted = sigma_rad_initial
+                                 + (MM_height - sigma_rad_initial) / 12 * abs(dz)
+           sigma_azi_adjusted = sigma_azi_initial
+                                 + (MM_width  - sigma_azi_initial) / 12 * abs(dz)
+
+       ``MM_height`` (column I, 0-based index 8) and ``MM_width`` (column J,
+       0-based index 9) are read from the ``MM configuration`` sheet by
+       positional index and must be given in metres.  When either value is
+       absent the adjustment is silently skipped for that MM.
+    3. HEW degradation broadening (RSS, from rotrad / rotazi sheets).
+    4. Energy-dependent sigma scaling ("MM HEW degradation energy" sheet).
+
+    The final per-MM sigma values are written back to columns I / J of the
+    ``MM_PSF`` sheet as ``sigma_rad_deg [arcsec]`` / ``sigma_azi_deg [arcsec]``.
+
+    Note: accepts `fast_metrics` kwarg for compatibility with test harnesses;
+    the argument is recognized but not used by the loader.
     """
     # Support CSV inputs: either when the provided path ends with .csv or when
     # `--input-csv` was used to provide a CSV path. In these cases we read the
@@ -932,11 +956,19 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         pos_to_cfg_row = {}
                     pos_to_cfg_row[pos_for_row] = cfg_row_number
 
+                    # Read MM_height (col I = index 8) and MM_width (col J = index 9)
+                    # from MM configuration by positional index (units: metres).
+                    _col_i_val = mm_config_df.iloc[order_i, 8] if mm_config_df.shape[1] > 8 else None
+                    _col_j_val = mm_config_df.iloc[order_i, 9] if mm_config_df.shape[1] > 9 else None
+                    _mm_height = float(_col_i_val) if _col_i_val is not None and not pd.isna(_col_i_val) else None
+                    _mm_width  = float(_col_j_val) if _col_j_val is not None and not pd.isna(_col_j_val) else None
                     mm_config_map[mm_num_i] = {
                         'x_MM': row.get('x_MM [m]', 0),
                         'y_MM': row.get('y_MM [m]', 0),
                         'z_MM': row.get('z_MM [m]', 0),
-                        'r_MM': row.get('r_MM [m]', 0)
+                        'r_MM': row.get('r_MM [m]', 0),
+                        'mm_height': _mm_height,
+                        'mm_width':  _mm_width,
                     }
         except Exception:
             pass
@@ -3095,6 +3127,28 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 new_mux += dm_x
                 new_muy += dm_y
         
+        # Apply defocusing (dz) PSF shape adjustment.
+        # Physical model: at best focus the PSF 'geometric size' is 6·sigma_initial.
+        # It grows linearly with dz until, at dz = 12 m (focal length), it fills the
+        # full MM physical dimension (MM_height or MM_width).  Converting back to sigma
+        # (dividing by 6) gives:
+        #
+        #   sigma_rad_adjusted = sigma_rad_initial + (MM_height - 6·sigma_rad_initial) / 12 * dz / 6
+        #   sigma_azi_adjusted = sigma_azi_initial + (MM_width  - 6·sigma_azi_initial) / 12 * dz / 6
+        #
+        # dz = d_align_z + d_grav_z + d_therm_z + d_extra_z (from Extra PSF shifts sheet)
+        # MM_height (col I) drives sigma_rad; MM_width (col J) drives sigma_azi.
+        # All quantities are in metres.
+        if d_z_total != 0.0 and mm_num in mm_config_map:
+            _mm_cfg_dz = mm_config_map[mm_num]
+            _mm_h = _mm_cfg_dz.get('mm_height')
+            _mm_w = _mm_cfg_dz.get('mm_width')
+            if _mm_h is not None and _mm_w is not None:
+                _sigma_rad_init = float(df.at[idx, 'sigma_rad'])
+                _sigma_azi_init = float(df.at[idx, 'sigma_azi'])
+                df.at[idx, 'sigma_rad'] = _sigma_rad_init + (_mm_h - 6.0 * _sigma_rad_init) / 12.0 * d_z_total / 6.0
+                df.at[idx, 'sigma_azi'] = _sigma_azi_init + (_mm_w - 6.0 * _sigma_azi_init) / 12.0 * d_z_total / 6.0
+
         # Update the dataframe
         df.at[idx, 'mux'] = new_mux
         df.at[idx, 'muy'] = new_muy
@@ -5446,21 +5500,20 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     min_y = df['muy'].min() - margin_factor * df['sigmay'].max()
     max_y = df['muy'].max() + margin_factor * df['sigmay'].max()
 
-    """ if max_radius and max_radius > 0:
-        xlim = (
-            min(min_x, center_x - 1.1 * max_radius, -1.1 * (radius_50_00 or 0.0)),
-            max(max_x, center_x + 1.1 * max_radius,  1.1 * (radius_50_00 or 0.0)),
-        )
-        ylim = (
-            min(min_y, center_y - 1.1 * max_radius, -1.1 * (radius_50_00 or 0.0)),
-            max(max_y, center_y + 1.1 * max_radius,  1.1 * (radius_50_00 or 0.0)),
-        )
+    # Compute Z-grid display bounds from HEW radii and PSF centroid.
+    # This correctly encompasses the PSF content, the HEW circles, and the
+    # origin regardless of how large defocusing may have made individual sigmas.
+    # Capped at ±30 mm to avoid pathological grids.
+    if max_radius and max_radius > 0:
+        _all_x = [center_x - 1.1 * max_radius, center_x + 1.1 * max_radius,
+                  -1.1 * (radius_50_00 or 0.0), 1.1 * (radius_50_00 or 0.0)]
+        _all_y = [center_y - 1.1 * max_radius, center_y + 1.1 * max_radius,
+                  -1.1 * (radius_50_00 or 0.0), 1.1 * (radius_50_00 or 0.0)]
+        xlim = (max(min(_all_x), -0.030), min(max(_all_x), 0.030))
+        ylim = (max(min(_all_y), -0.030), min(max(_all_y), 0.030))
     else:
-        xlim = (min_x, max_x)
-        ylim = (min_y, max_y) """
-
-    xlim = (-0.015, 0.015)
-    ylim = (-0.015, 0.015)
+        xlim = (max(min_x, -0.015), min(max_x, 0.015))
+        ylim = (max(min_y, -0.015), min(max_y, 0.015))
 
     x = np.linspace(xlim[0], xlim[1], nx)
     y = np.linspace(ylim[0], ylim[1], ny)
@@ -5481,73 +5534,11 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # First subplot: weighted sum of Gaussians (left, wider)
     ax1 = plt.subplot(gs[0, :12])
     # Convert to microns for display (1 m = 1e6 µm)
-    im = plt.imshow(Z, extent=[x.min()*1e6, x.max()*1e6, y.min()*1e6, y.max()*1e6], origin='lower', cmap='viridis', aspect='equal')
-    # Zoom to ~90% containment of the PSF for the display image (does not affect FITS export)
-    try:
-        # Compute radial distances in meters from the weighted center (center_x/center_y defined earlier)
-        cx = center_x if 'center_x' in locals() else 0.0
-        cy = center_y if 'center_y' in locals() else 0.0
-        # X,Y are in meters; Z contains summed flux per grid cell
-        r = np.hypot((X - cx), (Y - cy))
-        flat_idx = np.argsort(r.ravel())
-        zs = Z.ravel()[flat_idx]
-        rs = r.ravel()[flat_idx]
-        total = np.nansum(zs)
-        if total > 0:
-            cumsum = np.cumsum(np.nan_to_num(zs))
-            frac = cumsum / total
-            # find radius enclosing 90% (or fallback to max radius)
-            idx90 = np.searchsorted(frac, 0.90)
-            r90 = float(rs[idx90]) if idx90 < len(rs) else float(rs.max())
-            # add a small margin (5%) to ensure visual context
-            r_vis = r90 * 1.05
-            # Convert to microns for axis limits and cap at +/-1 mm (1000 µm)
-            r_vis_um = min(r_vis * 1e6, 1000.0)
-            ax1.set_xlim(-r_vis_um, r_vis_um)
-            ax1.set_ylim(-r_vis_um, r_vis_um)
-    except Exception:
-        pass
+    im = plt.imshow(Z, extent=[x.min()*1e6, x.max()*1e6, y.min()*1e6, y.max()*1e6], origin='lower', cmap='viridis', aspect='equal', interpolation='antialiased')
     # Smaller, tighter colorbar attached to ax1 to reduce horizontal crowding
     cbar = plt.colorbar(im, ax=ax1, label='counts', pad=0.02, fraction=0.046)
     ax1.set_xlabel('x [µm]')
     ax1.set_ylabel('y [µm]')
-    # Overlay a higher-resolution rendition of the zoomed area for display
-    try:
-        # Use the zoom limits if available (r_vis_um set above), otherwise use full extent
-        if 'r_vis_um' in locals():
-            x0_um, x1_um = -r_vis_um, r_vis_um
-            y0_um, y1_um = -r_vis_um, r_vis_um
-        else:
-            x0_um, x1_um = x.min()*1e6, x.max()*1e6
-            y0_um, y1_um = y.min()*1e6, y.max()*1e6
-
-        # Convert to meters for computation
-        x0_m, x1_m = x0_um * 1e-6, x1_um * 1e-6
-        y0_m, y1_m = y0_um * 1e-6, y1_um * 1e-6
-
-        # Original grid spacing
-        dx = x[1] - x[0]
-        dy = y[1] - y[0]
-
-        # Number of original samples across the zoom area
-        nx_zoom = max(8, int(round((x1_m - x0_m) / max(dx, 1e-12))))
-        ny_zoom = max(8, int(round((y1_m - y0_m) / max(dy, 1e-12))))
-
-        # Increase resolution by factor 12 for display only
-        factor = 12
-        nx_disp = int(np.clip(nx_zoom * factor, 32, 10000))
-        ny_disp = int(np.clip(ny_zoom * factor, 32, 10000))
-
-        # Build fine mesh and evaluate PSF only over zoom area (display-only)
-        x_disp = np.linspace(x0_m, x1_m, nx_disp)
-        y_disp = np.linspace(y0_m, y1_m, ny_disp)
-        Xd, Yd = np.meshgrid(x_disp, y_disp)
-        Zd = _sum_on_grid(Xd, Yd, normalize)
-
-        # Overlay the high-resolution image covering the current zoom limits (in µm)
-        ax1.imshow(Zd, extent=[x0_um, x1_um, y0_um, y1_um], origin='lower', cmap='viridis', aspect='equal', interpolation='nearest')
-    except Exception:
-        pass
     
     # Add secondary axes for arcsec. Use the same project convention as
     # `arcsec_to_m` (1 arcsec = 12*π/180/3600 m), therefore 1 m equals
