@@ -3732,7 +3732,7 @@ def compute_dm_from_dz(mm: dict, row: dict, d_z: float) -> tuple[float, float]:
     return dm_x, dm_y
 
 
-def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None, return_metrics_only: bool = False, debug: bool = False, metrics_n_r_final: int | None = None, metrics_n_theta_final: int | None = None, metrics_r_margin: float | None = None):
+def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, normalize=True, output=None, fast=True, title_suffix: str = "", df_optimized: pd.DataFrame = None, return_metrics_only: bool = False, debug: bool = False, metrics_n_r_final: int | None = None, metrics_n_theta_final: int | None = None, metrics_r_margin: float | None = None, return_fig: bool = False, figsize: tuple = None):
     """Create combined PSF image, compute HEW/EEF metrics, and optionally save output.
 
     This function composes per-MM PSFs (analytic or matrix-based) described
@@ -5523,7 +5523,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Create the plots in a single figure with two subplots
     # Use a reasonable figure size that will fit most screens; enable constrained layout
     # Produce the large PSF+EEF figure (single-window diagnostic).
-    fig = plt.figure(figsize=(16, 8), constrained_layout=True)
+    fig = plt.figure(figsize=(figsize if figsize is not None else (16, 8)), constrained_layout=True)
     # Standard linewidth for EEF marker lines (keep 90% and 80% consistent)
     eef_linewidth = 1.5
     
@@ -5533,6 +5533,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     
     # First subplot: weighted sum of Gaussians (left, wider)
     ax1 = plt.subplot(gs[0, :12])
+    ax1.set_anchor('N')   # align PSF axes to top of its cell so both titles share the same y
     # Convert to microns for display (1 m = 1e6 µm)
     im = plt.imshow(Z, extent=[x.min()*1e6, x.max()*1e6, y.min()*1e6, y.max()*1e6], origin='lower', cmap='viridis', aspect='equal', interpolation='antialiased')
     # Smaller, tighter colorbar attached to ax1 to reduce horizontal crowding
@@ -6252,10 +6253,32 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Add titles at the same y-coordinate
     fig.suptitle('')  # Clear any figure title
     # Nudge titles upward to avoid overlapping the PSF image when using constrained_layout
-    # Nudge titles upward to avoid overlapping other elements
-    ax1.set_title(f'E2E PSF{title_suffix}', fontweight='bold', fontsize=12, y=1.08)
-    ax2.set_title(f'Encircled energy function{title_suffix}', fontweight='bold', fontsize=12, y=1.08)
-    # layout is handled by constrained_layout on the figure
+    # Use fig.text() for titles – positioned in figure (0-1) coordinates,
+    # completely independent of constrained_layout and secondary axes.
+    # They are initially hidden; the draw_event callback below places them
+    # at the same figure-level y after the layout engine has run once.
+    _ft1 = fig.text(0, 0, f'E2E PSF{title_suffix}',
+                    fontweight='bold', fontsize=12, ha='center', va='bottom',
+                    visible=False)
+    _ft2 = fig.text(0, 0, f'Encircled energy function{title_suffix}',
+                    fontweight='bold', fontsize=12, ha='center', va='bottom',
+                    visible=False)
+
+    _ta_done = [False]
+    def _align_titles(event):
+        if _ta_done[0]:
+            return
+        _ta_done[0] = True
+        p1 = ax1.get_position()   # post-layout Bbox in figure (0-1) coords
+        p2 = ax2.get_position()
+        # Place both titles at the same figure y: 2.5% above the taller axes.
+        target_y = max(p1.y1, p2.y1) + 0.025
+        _ft1.set_position(((p1.x0 + p1.x1) / 2, target_y))
+        _ft2.set_position(((p2.x0 + p2.x1) / 2, target_y))
+        _ft1.set_visible(True)
+        _ft2.set_visible(True)
+        fig.canvas.draw_idle()
+    fig.canvas.mpl_connect('draw_event', _align_titles)
     # Rebuild the left subplot legend explicitly to guarantee order and layout
     try:
         # Remove any existing legend and rebuild in a deterministic order
@@ -7454,6 +7477,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     if output:
         plt.savefig(output, dpi=150)  # Save the combined plot
         print(f"Saved combined plot to {output}")
+    if return_fig:
+        return fig
     if not output:
         # No explicit output requested. To avoid blocking in interactive
         # backends (which calls plt.show() and waits for user), save a
@@ -7566,6 +7591,382 @@ def compute_hew_eef_metrics(file: str = 'Distributions/TestDistribution.xlsx', s
     """
     df = load_gaussians_from_excel(file, sheet)
     return plot_sum(df, normalize=normalize, fast=fast, df_optimized=df_optimized, return_metrics_only=True)
+
+
+def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
+                     mm_to_petal: dict = None, **plot_kwargs):
+    """Open a Tkinter window with an MM selector tree (left) and embedded E2E PSF/EEF figure (right).
+
+    The tree shows mirror modules organised as Row → Petal → MM with checkboxes.
+    Clicking a row node toggles all its petals/MMs; clicking a petal toggles
+    all its MMs; clicking an MM toggles that MM.
+    'Update E2E & EEF' re-renders the figure using the checked MMs only.
+
+    Parameters
+    ----------
+    df_full : pd.DataFrame
+        Full data frame as returned by load_gaussians_from_excel.
+    mm_to_row : dict, optional
+        Mapping {mm_num (int): row_num (int)}.  Built from the 'MM configuration' sheet.
+    mm_to_petal : dict, optional
+        Mapping {mm_num (int): petal_num (int)}.  Built from the 'MM configuration' sheet.
+    **plot_kwargs
+        Keyword arguments forwarded to plot_sum (e.g. normalize, fast, nx, ny,
+        title_suffix, df_optimized).  Do NOT pass return_fig — it is set here.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+    except ImportError:
+        print("tkinter not available; falling back to plain plot_sum.")
+        plot_sum(df_full, **plot_kwargs)
+        return
+
+    try:
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+    except Exception:
+        print("TkAgg backend not available; falling back to plain plot_sum.")
+        plot_sum(df_full, **plot_kwargs)
+        return
+
+    if mm_to_row   is None: mm_to_row   = {}
+    if mm_to_petal is None: mm_to_petal = {}
+
+    # ------------------------------------------------------------------
+    # Build MM list and three-level grouping: row -> petal -> [mm_nums]
+    # Only include MMs whose adjusted Aeff is non-zero (when the column
+    # is present); fall back to all MMs if the column is absent.
+    # ------------------------------------------------------------------
+    if 'MM #' in df_full.columns:
+        _mm_col = pd.to_numeric(df_full['MM #'], errors='coerce')
+        if 'aeff_adjusted' in df_full.columns:
+            _aeff = pd.to_numeric(df_full['aeff_adjusted'], errors='coerce').fillna(0.0)
+            _valid = _mm_col[_mm_col.notna() & (_aeff > 0)]
+        else:
+            _valid = _mm_col.dropna()
+        mm_nums = sorted(int(x) for x in _valid.unique())
+    else:
+        mm_nums = []
+
+    grouped = {}  # row_num -> {petal_num -> [mm_nums]}  (0 = ungrouped)
+    for mm in mm_nums:
+        row   = mm_to_row.get(mm, 0)
+        petal = mm_to_petal.get(mm, 0)
+        grouped.setdefault(row, {}).setdefault(petal, []).append(mm)
+    grouped = {r: {p: sorted(mms) for p, mms in sorted(petals.items())}
+               for r, petals in sorted(grouped.items())}
+
+    def _row_mms(row_num):
+        """Flat list of all MM numbers in a row."""
+        return [m for mms in grouped[row_num].values() for m in mms]
+
+    # ------------------------------------------------------------------
+    # Root window
+    # ------------------------------------------------------------------
+    root = tk.Tk()
+    root.withdraw()  # stay hidden until the initial render is complete
+    root.title("E2E PSF Viewer – MM Selector")
+    try:
+        if sys.platform.startswith('win'):
+            root.state('zoomed')
+        else:
+            root.geometry("1600x950")
+    except Exception:
+        pass
+
+    paned = ttk.PanedWindow(root, orient='horizontal')
+    paned.pack(fill='both', expand=True, padx=4, pady=4)
+
+    left = ttk.Frame(paned, width=290)
+    right = ttk.Frame(paned)
+    paned.add(left, weight=0)
+    paned.add(right, weight=1)
+    left.pack_propagate(False)
+
+    # ------------------------------------------------------------------
+    # Left panel: header, buttons, treeview
+    # ------------------------------------------------------------------
+    ttk.Label(left, text="Mirror Modules", font=('TkDefaultFont', 12, 'bold')).pack(
+        anchor='w', padx=6, pady=(8, 2))
+
+    btn_bar = ttk.Frame(left)
+    btn_bar.pack(fill='x', padx=4, pady=2)
+
+    # Per-MM checked state
+    checked_vars = {mm: tk.BooleanVar(value=True) for mm in mm_nums}
+
+    TICK  = '\u2611'   # ☑
+    CROSS = '\u2610'   # ☐
+    PART  = '\u25a3'   # ▣  (partial)
+
+    def _sym(n_chk, n_tot):
+        if n_chk == n_tot: return TICK
+        if n_chk == 0:     return CROSS
+        return PART
+
+    # Treeview
+    tree_outer = ttk.Frame(left)
+    tree_outer.pack(fill='both', expand=True, padx=4, pady=4)
+    tree = ttk.Treeview(tree_outer, selectmode='none', show='tree')
+    vsb = ttk.Scrollbar(tree_outer, orient='vertical', command=tree.yview)
+    tree.configure(yscrollcommand=vsb.set)
+    vsb.pack(side='right', fill='y')
+    tree.pack(side='left', fill='both', expand=True)
+
+    row_items   = {}   # row_num -> tree iid
+    petal_items = {}   # (row_num, petal_num) -> tree iid
+    mm_items    = {}   # mm_num -> tree iid
+
+    def _build_tree():
+        for iid in tree.get_children():
+            tree.delete(iid)
+        row_items.clear()
+        petal_items.clear()
+        mm_items.clear()
+        for row_num, petals in grouped.items():
+            all_mms = _row_mms(row_num)
+            n_r = len(all_mms)
+            n_chk_r = sum(1 for m in all_mms if checked_vars[m].get())
+            row_label = f"Row {row_num}" if row_num > 0 else "Ungrouped"
+            r_iid = tree.insert('', 'end',
+                                text=f"{_sym(n_chk_r, n_r)}  {row_label}  ({n_chk_r}/{n_r} MMs)",
+                                open=False)
+            row_items[row_num] = r_iid
+            for petal_num, mms in petals.items():
+                n_p = len(mms)
+                n_chk_p = sum(1 for m in mms if checked_vars[m].get())
+                p_label = f"Petal {petal_num}" if petal_num > 0 else "Ungrouped"
+                p_iid = tree.insert(r_iid, 'end',
+                                    text=f"  {_sym(n_chk_p, n_p)}  {p_label}  ({n_chk_p}/{n_p} MMs)",
+                                    open=False)
+                petal_items[(row_num, petal_num)] = p_iid
+                for mm in mms:
+                    s = TICK if checked_vars[mm].get() else CROSS
+                    m_iid = tree.insert(p_iid, 'end', text=f"    {s}  MM # {mm}")
+                    mm_items[mm] = m_iid
+
+    def _refresh_tree():
+        for mm, iid in mm_items.items():
+            s = TICK if checked_vars[mm].get() else CROSS
+            tree.item(iid, text=f"    {s}  MM # {mm}")
+        for (row_num, petal_num), iid in petal_items.items():
+            mms = grouped[row_num][petal_num]
+            n_p = len(mms)
+            n_chk_p = sum(1 for m in mms if checked_vars[m].get())
+            p_label = f"Petal {petal_num}" if petal_num > 0 else "Ungrouped"
+            tree.item(iid, text=f"  {_sym(n_chk_p, n_p)}  {p_label}  ({n_chk_p}/{n_p} MMs)")
+        for row_num, iid in row_items.items():
+            all_mms = _row_mms(row_num)
+            n_r = len(all_mms)
+            n_chk_r = sum(1 for m in all_mms if checked_vars[m].get())
+            row_label = f"Row {row_num}" if row_num > 0 else "Ungrouped"
+            tree.item(iid, text=f"{_sym(n_chk_r, n_r)}  {row_label}  ({n_chk_r}/{n_r} MMs)")
+
+    # -----------------------------------------------------------------
+    # Tree interaction
+    # Checkbox toggling is bound to <ButtonRelease-1> so it never
+    # interferes with the native <Button-1> handler that drives
+    # expand/collapse on macOS (including the Aqua disclosure triangle,
+    # whose element name is not reported by identify_element).
+    # <<TreeviewOpen>> / <<TreeviewClose>> fire synchronously during the
+    # <Button-1> processing, before the release event.  We use that to
+    # suppress checkbox toggling when the user clicked the indicator.
+    # -----------------------------------------------------------------
+    _indicator_clicked = [False]
+
+    def _on_tree_expand_collapse(event):
+        _indicator_clicked[0] = True
+
+    tree.bind('<<TreeviewOpen>>',  _on_tree_expand_collapse)
+    tree.bind('<<TreeviewClose>>', _on_tree_expand_collapse)
+
+    def _on_tree_release(event):
+        if _indicator_clicked[0]:
+            _indicator_clicked[0] = False
+            return  # was an indicator press – don’t toggle checkboxes
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return
+        for row_num, r_iid in row_items.items():
+            if iid == r_iid:
+                mms = _row_mms(row_num)
+                all_on = all(checked_vars[m].get() for m in mms)
+                for m in mms: checked_vars[m].set(not all_on)
+                _refresh_tree()
+                return
+        for (row_num, petal_num), p_iid in petal_items.items():
+            if iid == p_iid:
+                mms = grouped[row_num][petal_num]
+                all_on = all(checked_vars[m].get() for m in mms)
+                for m in mms: checked_vars[m].set(not all_on)
+                _refresh_tree()
+                return
+        for mm, m_iid in mm_items.items():
+            if iid == m_iid:
+                checked_vars[mm].set(not checked_vars[mm].get())
+                _refresh_tree()
+                return
+
+    tree.bind('<ButtonRelease-1>', _on_tree_release)
+
+    def _select_all():
+        for v in checked_vars.values(): v.set(True)
+        _refresh_tree()
+
+    def _deselect_all():
+        for v in checked_vars.values(): v.set(False)
+        _refresh_tree()
+
+    ttk.Button(btn_bar, text=f"{TICK} All",  command=_select_all ).pack(side='left', padx=2)
+    ttk.Button(btn_bar, text=f"{CROSS} None", command=_deselect_all).pack(side='left', padx=2)
+
+    _build_tree()
+
+    # Status label
+    status_var = tk.StringVar(value="")
+    ttk.Label(left, textvariable=status_var, wraplength=260,
+              foreground='#0055aa').pack(anchor='w', padx=6, pady=2)
+
+    # Update button
+    update_btn = ttk.Button(left, text="\u25b6  Update E2E & EEF")
+    update_btn.pack(fill='x', padx=6, pady=(6, 10))
+
+    # ------------------------------------------------------------------
+    # Right panel: embedded matplotlib canvas
+    # ------------------------------------------------------------------
+    canvas_frame = ttk.Frame(right)
+    canvas_frame.pack(fill='both', expand=True)
+    canvas_holder  = [None]
+    toolbar_holder = [None]
+
+    def _embed_figure(fig):
+        for w in canvas_frame.winfo_children():
+            w.destroy()
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        toolbar = NavigationToolbar2Tk(canvas, canvas_frame)
+        toolbar.update()
+        toolbar.pack(side='bottom', fill='x')
+        canvas.get_tk_widget().pack(side='top', fill='both', expand=True)
+        canvas.draw()
+        canvas_holder[0]  = canvas
+        toolbar_holder[0] = toolbar
+
+    # Use a fixed width-to-height aspect ratio (≈0.53) so that the square
+    # PSF subplot (aspect='equal') fills the same vertical space as the EEF
+    # subplot, keeping both graphs at equal height with aligned top labels.
+    _FIG_ASPECT = 0.53   # h = aspect × w
+
+    def _pane_figsize():
+        """Return (w_in, h_in) at 100 DPI using the fixed aspect ratio."""
+        right.update_idletasks()
+        w = right.winfo_width()
+        dpi = 100
+        if w > 100:
+            w_in = w / dpi
+            return (w_in, w_in * _FIG_ASPECT)
+        return (14.0, 14.0 * _FIG_ASPECT)
+
+    def _fit_window_height():
+        """Resize the root window so its height snugly fits the figure."""
+        if canvas_holder[0] is None:
+            return
+        fig = canvas_holder[0].figure
+        dpi = fig.get_dpi() or 100
+        h_fig_px = int(fig.get_size_inches()[1] * dpi)
+        toolbar_h = (toolbar_holder[0].winfo_height()
+                     if toolbar_holder[0] is not None else 32)
+        # Add a small buffer (6 px) and the paned-window outer padding (8 px).
+        target_h = h_fig_px + toolbar_h + 14
+        target_h = max(target_h, 400)
+        try:
+            w = root.winfo_width()
+            if abs(root.winfo_height() - target_h) > 10:
+                root.geometry(f"{w}x{target_h}")
+        except Exception:
+            pass
+
+    # Debounced resize: when the user drags the pane divider or resizes
+    # the window, resize the figure while keeping the fixed aspect ratio.
+    _resize_timer = [None]
+
+    def _apply_resize():
+        _resize_timer[0] = None
+        if canvas_holder[0] is None:
+            return
+        fig = canvas_holder[0].figure
+        dpi = fig.get_dpi() or 100
+        w = right.winfo_width()
+        if w < 100:
+            return
+        w_in = w / dpi
+        h_in = w_in * _FIG_ASPECT
+        old_w, old_h = fig.get_size_inches()
+        if abs(w_in - old_w) < 0.15 and abs(h_in - old_h) < 0.15:
+            return
+        fig.set_size_inches(w_in, h_in, forward=False)
+        canvas_holder[0].draw_idle()
+        root.after(60, _fit_window_height)
+
+    def _on_right_resize(event):
+        if _resize_timer[0] is not None:
+            root.after_cancel(_resize_timer[0])
+        _resize_timer[0] = root.after(120, _apply_resize)
+
+    right.bind('<Configure>', _on_right_resize)
+
+    # ------------------------------------------------------------------
+    # Update handler
+    # ------------------------------------------------------------------
+    def _do_update():
+        selected = [mm for mm in mm_nums if checked_vars[mm].get()]
+        if not selected:
+            messagebox.showwarning(
+                "No MMs selected",
+                "Please select at least one mirror module.",
+                parent=root)
+            return
+        n_sel = len(selected)
+        n_tot = len(mm_nums)
+        status_var.set(f"Computing E2E PSF for {n_sel}/{n_tot} MMs…")
+        update_btn.configure(state='disabled')
+        root.update_idletasks()
+
+        try:
+            filtered = df_full[
+                pd.to_numeric(df_full['MM #'], errors='coerce').isin(selected)
+            ].copy()
+
+            suffix = plot_kwargs.get('title_suffix', '')
+            suffix = f"{suffix} [{n_sel}/{n_tot} MMs]" if suffix else f"[{n_sel}/{n_tot} MMs]"
+            kw = dict(plot_kwargs)
+            kw['title_suffix'] = suffix
+            kw.pop('return_fig', None)     # handled here
+            kw.pop('output', None)         # don't auto-save on every update
+
+            plt.close('all')
+            kw['figsize'] = _pane_figsize()
+            fig = plot_sum(filtered, return_fig=True, **kw)
+            if fig is not None:
+                _embed_figure(fig)
+                # Flush pending draw_idle callbacks (title positioning) so the
+                # window appears fully rendered from the very first frame.
+                root.update_idletasks()
+                root.deiconify()         # show (no-op if already visible)
+                root.after(80, _fit_window_height)
+            status_var.set(f"{n_sel}/{n_tot} MMs selected.")
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc), parent=root)
+            status_var.set("Error during computation.")
+        finally:
+            update_btn.configure(state='normal')
+
+    update_btn.configure(command=_do_update)
+
+    # Delay the initial render until the mainloop has shown the window
+    # so that right.winfo_width/height() return the real pane dimensions.
+    root.after(80, _do_update)
+
+    root.mainloop()
 
 
 if __name__ == '__main__':
@@ -9260,8 +9661,43 @@ if __name__ == '__main__':
         sys.exit(0)
 
 
-    plot_sum(
+    # Build MM-to-Row and MM-to-Petal mappings from the 'MM configuration'
+    # sheet so the viewer tree can group modules by row and petal.
+    _mm_to_row: dict   = {}
+    _mm_to_petal: dict = {}
+    try:
+        import openpyxl as _opx_r
+        _wb_r = _opx_r.load_workbook(args.file, read_only=True, data_only=True)
+        _cfg_name = next((s for s in _wb_r.sheetnames
+                          if s.strip().lower() == 'mm configuration'), None)
+        if _cfg_name:
+            _ws_r = _wb_r[_cfg_name]
+            _hdr = [str(c.value).strip() if c.value is not None else ''
+                    for c in next(_ws_r.iter_rows(min_row=1, max_row=1))]
+            _mm_col    = next((i for i, h in enumerate(_hdr) if h.upper() in ('MM #',    'MM#')),           None)
+            _row_col   = next((i for i, h in enumerate(_hdr) if h.upper() in ('ROW #',   'ROW#',   'ROW')), None)
+            _petal_col = next((i for i, h in enumerate(_hdr) if h.upper() in ('PETAL #', 'PETAL#', 'PETAL')), None)
+            if _mm_col is not None:
+                for _r in _ws_r.iter_rows(min_row=2, values_only=True):
+                    try:
+                        _mm_v = _r[_mm_col]
+                        if _mm_v is None:
+                            continue
+                        _mm_i = int(float(_mm_v))
+                        if _row_col is not None and _r[_row_col] is not None:
+                            _mm_to_row[_mm_i]   = int(float(_r[_row_col]))
+                        if _petal_col is not None and _r[_petal_col] is not None:
+                            _mm_to_petal[_mm_i] = int(float(_r[_petal_col]))
+                    except (TypeError, ValueError):
+                        pass
+        _wb_r.close()
+    except Exception:
+        pass
+
+    launch_mm_viewer(
         df,
+        mm_to_row=_mm_to_row,
+        mm_to_petal=_mm_to_petal,
         normalize=args.normalize,
         output=args.output,
         fast=(args.mode == 'coarse'),
