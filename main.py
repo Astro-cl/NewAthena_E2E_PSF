@@ -8022,7 +8022,8 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
             return
         rank_btn.configure(state='disabled')
         rnk_status_var.set("Computing\u2026")
-        rnk_listbox.delete(0, 'end')
+        for _iid in rnk_tv.get_children():
+            rnk_tv.delete(_iid)
 
         _mm_col_num = pd.to_numeric(df_full['MM #'], errors='coerce')
         selected_set = set(selected)
