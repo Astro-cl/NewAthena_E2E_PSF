@@ -7948,10 +7948,13 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     rnk_hdr.pack(fill='x', padx=4, pady=(6, 0))
     ttk.Label(rnk_hdr, text="HEW Contribution Ranking",
               font=('TkDefaultFont', 10, 'bold')).pack(side='left')
-    rank_btn = ttk.Button(rnk_hdr, text="\u25b6 Rank")
-    rank_btn.pack(side='right', padx=2)
-    map_btn = ttk.Button(rnk_hdr, text="Map", state='disabled')
-    map_btn.pack(side='right', padx=2)
+
+    rnk_btn_col = ttk.Frame(rnk_hdr)
+    rnk_btn_col.pack(side='right')
+    rank_btn = ttk.Button(rnk_btn_col, text="\u25b6 Rank")
+    rank_btn.pack(fill='x', padx=2, pady=(0, 1))
+    map_btn = ttk.Button(rnk_btn_col, text="Map", state='disabled')
+    map_btn.pack(fill='x', padx=2)
 
     rnk_status_var = tk.StringVar(value="Click \u25b6 Rank to compute.")
     ttk.Label(ranking_outer, textvariable=rnk_status_var,
