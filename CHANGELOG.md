@@ -2,6 +2,18 @@
 
 This file summarizes notable changes across releases (human-readable).
 
+## v9.1 — 2026-05-22
+- **Vignetting bug fix (single / per_pos modes):** the row-by-row weight
+  application loop and the final reconcile pass now handle all three vignetting
+  table modes (`per_row_energy`, `per_pos`, `single`). Previously only
+  `per_row_energy` was wired up, so `single` and `per_pos` sheets silently
+  produced no effect on weights or `aeff_vig_factor` columns.
+- **Vignetting abs() consistency:** every `np.interp()` call in the vignetting
+  path now receives `abs(rotation_value)`. Vignetting tables are expected to
+  use non-negative delta values; negative and positive rotations of the same
+  magnitude now always yield the same factor.
+- Test suite: 98 tests passing (0 failures).
+
 ## v9 — 2026-05-22
 - **Interactive MM Selector viewer:** launching `main.py` without
 	`--output` / `--export-package` now opens a Tkinter window with a

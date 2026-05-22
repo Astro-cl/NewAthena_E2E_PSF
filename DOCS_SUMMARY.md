@@ -27,6 +27,11 @@ This document provides a quick reference to the core modules and their purposes.
 
 ## Recent Changes
 
+- **(v9.1)** Vignetting `single` and `per_pos` table modes now correctly
+  apply factors in both the row-by-row loop and the final reconcile pass;
+  previously only `per_row_energy` was wired up. 98 tests passing.
+- **(v9.1)** All vignetting `np.interp()` calls now use `abs(rotation_value)`;
+  vignetting tables use non-negative delta values and symmetry is assumed.
 - **(v9)** Interactive MM Selector viewer: `main.py` now opens a Tkinter
   window with a Row → Petal → MM checkbox tree and a live E2E PSF + EEF
   figure; `--export-package` bypasses the GUI for headless runs.

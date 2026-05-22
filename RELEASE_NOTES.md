@@ -2,6 +2,28 @@
 
 This file contains a concise history of notable changes across releases.
 
+## Release v9.1 (2026-05-22)
+
+Bug-fix patch for vignetting factor application.
+
+### Vignetting fixes
+
+- **`single` and `per_pos` modes now applied correctly:** the row-by-row
+  application loop and the final reconcile pass previously only handled the
+  `per_row_energy` table mode. Both passes now include `elif` branches for
+  `per_pos` (per-position curve lookup) and `single` (global curve) modes,
+  so weights and `aeff_vig_factor_rad` / `aeff_vig_factor_azi` columns are
+  correctly populated for all vignetting sheet layouts.
+- **Consistent `abs()` at every interpolation point:** all `np.interp()`
+  calls in the vignetting path now pass `abs(rotation_value)`. Vignetting
+  factor tables should cover non-negative delta values; the sign of a
+  rotation is ignored and symmetry is assumed (a negative rotation produces
+  the same attenuation as the equivalent positive rotation).
+
+### Test suite
+
+- 98 tests passing (0 failures).
+
 ## Release v9 (2026-05-22)
 
 This release adds the interactive MM Selector viewer, making it easy to

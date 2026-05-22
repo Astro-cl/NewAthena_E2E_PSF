@@ -1041,8 +1041,11 @@ mkdir -p Figures
 
 Full release notes are in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+### v9.1 (2026-05-22)
+Vignetting bug-fix patch: `single` and `per_pos` table modes now correctly apply factors in both the row-by-row loop and the final reconcile pass (previously only `per_row_energy` was handled). All `np.interp()` calls in the vignetting path now use `abs(rotation_value)`; tables use non-negative delta values and symmetry is assumed. 98 tests passing (0 failures).
+
 ### v9
-Defocusing PSF shape broadening: per-MM `sigma_rad` and `sigma_azi` are adjusted using a linear geometric model — the PSF size (6·sigma) grows linearly with `dz` from best focus to the MM physical dimension at `dz = 12 m` (focal length). Formula: `sigma_adjusted = sigma_initial + (MM_dim − 6·sigma_initial) / 12 × dz / 6`, using `MM_height` (col I) and `MM_width` (col J) from the `MM configuration` sheet. `dz` is signed. Adjusted sigmas written back to MM_PSF cols I/J. 13 new unit tests added (`tests/plots/test_defocus_sigma.py`). Full test suite: 94 passed, 4 pre-existing vignetting failures.
+Defocusing PSF shape broadening: per-MM `sigma_rad` and `sigma_azi` are adjusted using a linear geometric model — the PSF size (6·sigma) grows linearly with `dz` from best focus to the MM physical dimension at `dz = 12 m` (focal length). Formula: `sigma_adjusted = sigma_initial + (MM_dim − 6·sigma_initial) / 12 × dz / 6`, using `MM_height` (col I) and `MM_width` (col J) from the `MM configuration` sheet. `dz` is signed. Adjusted sigmas written back to MM_PSF cols I/J. 13 new unit tests added (`tests/plots/test_defocus_sigma.py`). Interactive MM Selector viewer (see v9 notes). Full test suite: 98 passed.
 
 ### v8 (2026-04-17)
 Major feature release. Off-axis pointing decomposed into X/Y components; defocus projected to centroid shifts; HEW sigma broadening from per-position lookup tables; Python VLOOKUP resolver for MM_PSF D/E formula values; `--batch-combinations` CLI for automated multi-configuration runs with per-config ZIP packaging and aggregated results workbook; improved A_eff formula evaluation fallback; Pearson4 skipped in coarse mode; preset table shifted from column K to **M** to avoid conflict with new I/J degraded sigma columns. 71 tests pass (20 new integration tests).
