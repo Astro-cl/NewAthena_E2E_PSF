@@ -7756,9 +7756,13 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         if n_chk == 0:     return CROSS
         return PART
 
+    # Vertical split inside left: tree on top, HEW ranking below
+    vpane = ttk.PanedWindow(left, orient='vertical')
+    vpane.pack(fill='both', expand=True, padx=4, pady=(4, 0))
+
     # Treeview
-    tree_outer = ttk.Frame(left)
-    tree_outer.pack(fill='both', expand=True, padx=4, pady=4)
+    tree_outer = ttk.Frame(vpane)
+    vpane.add(tree_outer, weight=3)
     tree = ttk.Treeview(tree_outer, selectmode='none', show='tree')
     vsb = ttk.Scrollbar(tree_outer, orient='vertical', command=tree.yview)
     tree.configure(yscrollcommand=vsb.set)
@@ -7873,6 +7877,125 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     ttk.Button(btn_bar, text=f"{CROSS} None", command=_deselect_all).pack(side='left', padx=2)
 
     _build_tree()
+
+    # ------------------------------------------------------------------
+    # HEW contribution ranking panel (bottom pane of vpane)
+    # ------------------------------------------------------------------
+    import threading as _threading
+
+    ranking_outer = ttk.Frame(vpane)
+    vpane.add(ranking_outer, weight=2)
+
+    rnk_hdr = ttk.Frame(ranking_outer)
+    rnk_hdr.pack(fill='x', padx=4, pady=(6, 0))
+    ttk.Label(rnk_hdr, text="HEW Contribution Ranking",
+              font=('TkDefaultFont', 10, 'bold')).pack(side='left')
+    rank_btn = ttk.Button(rnk_hdr, text="\u25b6 Rank")
+    rank_btn.pack(side='right', padx=2)
+
+    rnk_status_var = tk.StringVar(value="Click \u25b6 Rank to compute.")
+    ttk.Label(ranking_outer, textvariable=rnk_status_var,
+              foreground='gray', wraplength=255,
+              font=('TkDefaultFont', 8)).pack(anchor='w', padx=4, pady=(1, 0))
+
+    rnk_list_frame = ttk.Frame(ranking_outer)
+    rnk_list_frame.pack(fill='both', expand=True, padx=4, pady=(2, 4))
+    rnk_listbox = tk.Listbox(rnk_list_frame, selectmode='single',
+                             font=('Courier', 9), activestyle='none')
+    rnk_vsb = ttk.Scrollbar(rnk_list_frame, orient='vertical',
+                             command=rnk_listbox.yview)
+    rnk_listbox.configure(yscrollcommand=rnk_vsb.set)
+    rnk_vsb.pack(side='right', fill='y')
+    rnk_listbox.pack(side='left', fill='both', expand=True)
+
+    def _on_rank_double_click(event):
+        """Double-click a ranked entry to isolate that MM in the tree."""
+        sel = rnk_listbox.curselection()
+        if not sel:
+            return
+        text = rnk_listbox.get(sel[0])
+        try:
+            mm_num = int(text.split('MM')[1].split()[0])
+        except (IndexError, ValueError):
+            return
+        for v in checked_vars.values():
+            v.set(False)
+        if mm_num in checked_vars:
+            checked_vars[mm_num].set(True)
+        _refresh_tree()
+
+    rnk_listbox.bind('<Double-Button-1>', _on_rank_double_click)
+
+    def _compute_ranking():
+        """Run leave-one-out HEW computation in a background thread and
+        populate rnk_listbox with MMs ordered from most to least degrading.
+        delta = HEW(all_selected \ {MM}) - HEW(all_selected):
+          negative delta  → removing MM reduces HEW → MM was degrading (red)
+          positive delta  → removing MM increases HEW → MM was improving (green)
+        """
+        selected = [mm for mm in mm_nums if checked_vars[mm].get()]
+        if len(selected) < 2:
+            rnk_status_var.set("Select \u2265 2 MMs first.")
+            return
+        rank_btn.configure(state='disabled')
+        rnk_status_var.set("Computing\u2026")
+        rnk_listbox.delete(0, 'end')
+
+        _mm_col_num = pd.to_numeric(df_full['MM #'], errors='coerce')
+        selected_set = set(selected)
+        n_sel = len(selected)
+
+        def _worker():
+            try:
+                # Baseline HEW with all selected MMs
+                df_sel = df_full[_mm_col_num.isin(selected_set)].copy()
+                b = plot_sum(df_sel, return_metrics_only=True,
+                             nx=128, ny=128, fast=True)
+                hew_base = b.get('hew_best_arcsec') or b.get('hew_origin_arcsec')
+                if hew_base is None:
+                    root.after(0, lambda: rnk_status_var.set(
+                        "Could not compute baseline HEW."))
+                    root.after(0, lambda: rank_btn.configure(state='normal'))
+                    return
+
+                results = []
+                for i, mm in enumerate(selected):
+                    if i % 5 == 0:
+                        msg = f"Computing\u2026 {i}/{n_sel}"
+                        root.after(0, lambda m=msg: rnk_status_var.set(m))
+                    df_no = df_full[
+                        _mm_col_num.isin(selected_set - {mm})
+                    ].copy()
+                    m = plot_sum(df_no, return_metrics_only=True,
+                                 nx=128, ny=128, fast=True)
+                    hew_no = m.get('hew_best_arcsec') or m.get('hew_origin_arcsec')
+                    if hew_no is not None:
+                        results.append((mm, hew_no - hew_base))
+
+                # Most degrading first: most negative delta first
+                results.sort(key=lambda x: x[1])
+
+                def _update():
+                    rnk_listbox.delete(0, 'end')
+                    for rank, (mm_n, delta) in enumerate(results, 1):
+                        rnk_listbox.insert(
+                            'end',
+                            f"{rank:>3}. MM {mm_n:>4}  {delta:+.2f}\"")
+                        colour = '#cc3300' if delta < 0 else '#006633'
+                        rnk_listbox.itemconfig(rank - 1, foreground=colour)
+                    rnk_status_var.set(
+                        f"Baseline HEW: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
+                        f"red=degrading  green=improving")
+                    rank_btn.configure(state='normal')
+
+                root.after(0, _update)
+            except Exception as exc:
+                root.after(0, lambda: rnk_status_var.set(f"Error: {exc}"))
+                root.after(0, lambda: rank_btn.configure(state='normal'))
+
+        _threading.Thread(target=_worker, daemon=True).start()
+
+    rank_btn.configure(command=_compute_ranking)
 
     # Status label
     status_var = tk.StringVar(value="")
