@@ -8074,6 +8074,10 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
             except Exception:
                 pass
 
+        # Positions of all MMs in the sheet (used to fix axis limits).
+        _all_xs = np.array([v[0] for v in _pos.values()]) if _pos else np.array([0.0])
+        _all_ys = np.array([v[1] for v in _pos.values()]) if _pos else np.array([0.0])
+
         xs, ys, deltas, labels = [], [], [], []
         for mm_n, delta, row_n, petal_n in _rnk_results:
             if mm_n in _pos:
@@ -8121,7 +8125,14 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         ax.set_xlabel('x\u2009(m)')
         ax.set_ylabel('y\u2009(m)')
         ax.set_title('HEW contribution map \u2014 red\u2009=\u2009degrading  green\u2009=\u2009improving')
-        ax.set_aspect('equal', adjustable='datalim')
+
+        # Fix axes to cover ALL MM locations regardless of the current selection.
+        _pad = max(float((_all_xs.max() - _all_xs.min()) * 0.06),
+                   float((_all_ys.max() - _all_ys.min()) * 0.06),
+                   1e-6)
+        ax.set_xlim(_all_xs.min() - _pad, _all_xs.max() + _pad)
+        ax.set_ylim(_all_ys.min() - _pad, _all_ys.max() + _pad)
+        ax.set_aspect('equal', adjustable='box')
         ax.grid(True, linestyle='--', alpha=0.4)
 
         canvas = _MapCanvas(fig, master=top)
