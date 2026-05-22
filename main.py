@@ -7997,7 +7997,17 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     _rnk_menu.add_command(label='Select in tree', command=_rnk_select_in_tree)
 
     def _rnk_popup(event):
+        # On macOS Ctrl+Click fires <Button-2> with the Control state bit (0x4)
+        # set; treat that as a toggle rather than a context-menu event.
+        ctrl_held = bool(event.state & 0x4)
         iid = rnk_tv.identify_row(event.y)
+        if ctrl_held:
+            if iid:
+                if iid in rnk_tv.selection():
+                    rnk_tv.selection_remove(iid)
+                else:
+                    rnk_tv.selection_add(iid)
+            return
         if iid and iid not in rnk_tv.selection():
             rnk_tv.selection_set(iid)
         if rnk_tv.selection():
@@ -8006,8 +8016,23 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
             finally:
                 _rnk_menu.grab_release()
 
-    rnk_tv.bind('<Button-2>', _rnk_popup)   # macOS
-    rnk_tv.bind('<Button-3>', _rnk_popup)   # Windows / Linux
+    # macOS: Cmd+Click for multi-select toggle (macOS convention mirrors
+    # Ctrl+Click on Windows/Linux).
+    def _rnk_cmd_click(event):
+        iid = rnk_tv.identify_row(event.y)
+        if iid:
+            if iid in rnk_tv.selection():
+                rnk_tv.selection_remove(iid)
+            else:
+                rnk_tv.selection_add(iid)
+        return 'break'   # prevent default Button-1 from clearing the selection
+
+    # Ensure the widget gets keyboard focus on first click so that
+    # Shift+Click range-selection works immediately.
+    rnk_tv.bind('<ButtonPress-1>', lambda e: rnk_tv.focus_set(), add='+')
+    rnk_tv.bind('<Button-2>', _rnk_popup)                   # macOS right-click / Ctrl+Click
+    rnk_tv.bind('<Button-3>', _rnk_popup)                   # Windows / Linux right-click
+    rnk_tv.bind('<Command-ButtonPress-1>', _rnk_cmd_click)  # macOS Cmd+Click toggle
 
     def _compute_ranking():
         """Run leave-one-out HEW computation in a background thread and
