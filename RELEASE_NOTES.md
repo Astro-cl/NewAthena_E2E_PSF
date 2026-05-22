@@ -2,6 +2,48 @@
 
 This file contains a concise history of notable changes across releases.
 
+## Release v9 (2026-05-22)
+
+This release adds the interactive MM Selector viewer, making it easy to
+explore the E2E PSF and EEF for any subset of mirror modules without
+editing the input workbook.
+
+### Interactive MM Selector
+
+- Running `main.py` without `--output` or `--export-package` now opens
+  the **E2E PSF Viewer – MM Selector** window instead of a bare
+  matplotlib figure.
+- A collapsible **Row → Petal → MM** tree on the left lists every mirror
+  module with a checkbox. Only modules with `aeff_adjusted > 0` appear.
+  Row and Petal numbers are read from the "MM configuration" Excel sheet.
+- **Select All** / **None** buttons and a partial-row indicator (▣) make
+  bulk selection quick.
+- **Update E2E & EEF** re-renders the combined PSF map and encircled
+  energy function for the checked subset; the status bar shows
+  `N/total MMs selected`.
+- The window is hidden (`root.withdraw()`) until the first render is
+  complete, so it appears fully populated on first show.
+- Tree starts fully collapsed; expand individual rows/petals as needed.
+
+### Batch / export-package mode
+
+- When `--export-package` is passed (including child processes spawned by
+  `--batch-combinations`), the interactive GUI is bypassed entirely:
+  `plot_sum()` is called directly so no Tkinter window appears.
+
+### plot_sum improvements
+
+- New `return_fig: bool = False` parameter: when `True`, the function
+  returns the `Figure` object instead of calling `plt.show()`.
+- New `figsize: tuple = None` parameter: overrides the default figure
+  size (used by the viewer to match the pane width).
+- `constrained_layout` rect set to `(0, 0, 1, 0.92)` to reserve top
+  margin for subplot titles.
+- Titles now use `fig.text()` objects positioned in figure coordinates
+  via a `draw_event` callback; `get_tightbbox(renderer)` is queried for
+  every axes in each subplot column so the placement clears secondary
+  x-axis tick labels on the PSF subplot.
+
 ## Release v8 (2026-04-17)
 
 This release introduces four major features: off-axis pointing, defocus,
