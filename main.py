@@ -5524,6 +5524,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # Use a reasonable figure size that will fit most screens; enable constrained layout
     # Produce the large PSF+EEF figure (single-window diagnostic).
     fig = plt.figure(figsize=(figsize if figsize is not None else (16, 8)), constrained_layout=True)
+    # Reserve the top ~8% of the figure for the two fig.text() titles so the
+    # constrained_layout engine never pushes axes (and their decorations) all
+    # the way to the top edge, which would cause the titles to overlap the graphs.
+    try:
+        fig.get_layout_engine().set(rect=(0, 0, 1, 0.92))
+    except Exception:
+        pass
     # Standard linewidth for EEF marker lines (keep 90% and 80% consistent)
     eef_linewidth = 1.5
     
@@ -6271,8 +6278,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         _ta_done[0] = True
         p1 = ax1.get_position()   # post-layout Bbox in figure (0-1) coords
         p2 = ax2.get_position()
-        # Place both titles at the same figure y: 2.5% above the taller axes.
-        target_y = max(p1.y1, p2.y1) + 0.025
+        # Place both titles at the same figure y: just above the taller axes.
+        # Axes are constrained to rect y1=0.92 so this never exceeds 1.0.
+        target_y = max(p1.y1, p2.y1) + 0.012
         _ft1.set_position(((p1.x0 + p1.x1) / 2, target_y))
         _ft2.set_position(((p2.x0 + p2.x1) / 2, target_y))
         _ft1.set_visible(True)
