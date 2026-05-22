@@ -8078,6 +8078,8 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         _all_xs = np.array([v[0] for v in _pos.values()]) if _pos else np.array([0.0])
         _all_ys = np.array([v[1] for v in _pos.values()]) if _pos else np.array([0.0])
 
+        # Split into ranked (coloured circles) and unranked (grey crosses).
+        _ranked_mms = {mm_n for mm_n, *_ in _rnk_results}
         xs, ys, deltas, labels = [], [], [], []
         for mm_n, delta, row_n, petal_n in _rnk_results:
             if mm_n in _pos:
@@ -8102,6 +8104,11 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         ys      = np.array(ys)
         deltas  = np.array(deltas)
 
+        # Unranked MM positions (all MMs in the sheet that weren't ranked).
+        _unranked = [(mn, xy) for mn, xy in _pos.items() if mn not in _ranked_mms]
+        _ux = np.array([xy[0] for _, xy in _unranked]) if _unranked else np.empty(0)
+        _uy = np.array([xy[1] for _, xy in _unranked]) if _unranked else np.empty(0)
+
         # Symmetric normalisation: delta = 0 always maps to yellow (neutral).
         abs_max = max(float(np.abs(deltas).max()), 1e-12)
         norm = _mpl.colors.Normalize(vmin=-abs_max, vmax=abs_max)
@@ -8113,6 +8120,11 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
 
         fig = _MapFig(figsize=(6.4, 5.6), dpi=96, tight_layout=True)
         ax  = fig.add_subplot(111)
+
+        # Draw unranked MMs as small black crosses (behind the coloured circles).
+        if _ux.size:
+            ax.scatter(_ux, _uy, marker='+', s=40, c='black',
+                       linewidths=0.8, zorder=2)
 
         sc = ax.scatter(xs, ys, c=deltas, cmap=cmap, norm=norm,
                         s=180, edgecolors='k', linewidths=0.5, zorder=3)
