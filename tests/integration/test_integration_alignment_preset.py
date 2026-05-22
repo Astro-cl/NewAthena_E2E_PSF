@@ -52,8 +52,8 @@ def create_workbook_with_alignment_preset(path):
     # Vignetting polar sheets: rotazi and rotrad
     # rotazi: at delta=2.0 -> 1.2
     vig_azi = pd.DataFrame({'delta_arcsec': [1.0, 2.0, 3.0], '1': [1.0, 1.2, 1.0]})
-    # rotrad: at delta=-1.0 -> 0.8
-    vig_rad = pd.DataFrame({'delta_arcsec': [-2.0, -1.0, 0.0], '1': [0.9, 0.8, 1.0]})
+    # rotrad: at abs(delta)=1.0 -> 0.8 (table uses positive magnitudes)
+    vig_rad = pd.DataFrame({'delta_arcsec': [0.0, 1.0, 2.0], '1': [1.0, 0.8, 0.9]})
 
     with pd.ExcelWriter(path, engine='openpyxl') as w:
         mm_psf.to_excel(w, sheet_name='MM_PSF', index=False)

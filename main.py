@@ -1770,13 +1770,13 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     elif rad_mode == 'per_pos' and p in ys_by_pos_rad:
                         xs_use = xs_rad
                         ys_use = ys_by_pos_rad[p]
-                        rot_val_rad_interp = rot_val_rad_signed
+                        rot_val_rad_interp = abs(rot_val_rad_signed)
                     elif rad_mode == 'single' and xs_rad is not None and ys_rad is not None:
                         xs_use = xs_rad
                         ys_use = ys_rad
-                        rot_val_rad_interp = rot_val_rad_signed
+                        rot_val_rad_interp = abs(rot_val_rad_signed)
                     else:
-                        rot_val_rad_interp = rot_val_rad_signed
+                        rot_val_rad_interp = abs(rot_val_rad_signed)
                     if xs_use is not None and ys_use is not None:
                         factor = float(np.interp(rot_val_rad_interp, xs_use, ys_use))
                         df.at[idx, 'aeff_vig_factor_rad'] = factor
@@ -1807,13 +1807,13 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     elif azi_mode == 'per_pos' and p in ys_by_pos_azi:
                         xs_use = xs_azi
                         ys_use = ys_by_pos_azi[p]
-                        rot_val_azi_interp = rot_val_azi_signed
+                        rot_val_azi_interp = abs(rot_val_azi_signed)
                     elif azi_mode == 'single' and xs_azi is not None and ys_azi is not None:
                         xs_use = xs_azi
                         ys_use = ys_azi
-                        rot_val_azi_interp = rot_val_azi_signed
+                        rot_val_azi_interp = abs(rot_val_azi_signed)
                     else:
-                        rot_val_azi_interp = rot_val_azi_signed
+                        rot_val_azi_interp = abs(rot_val_azi_signed)
                     if xs_use is not None and ys_use is not None:
                         factor = float(np.interp(rot_val_azi_interp, xs_use, ys_use))
                         df.at[idx, 'aeff_vig_factor_azi'] = factor
@@ -2544,14 +2544,14 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                                 xsu = xs_azi
                                             else:
                                                 raise ValueError('no xs available for per-pos ys')
-                                        _azi_rot_val = abs(float(rot_azi_map.get(pos, 0.0))) if isinstance(series, tuple) and len(series) == 2 else float(rot_azi_map.get(pos, 0.0))
+                                        _azi_rot_val = abs(float(rot_azi_map.get(pos, 0.0)))
                                         applied_azi = float(np.interp(_azi_rot_val, xsu, ysu, left=ysu[0], right=ysu[-1]))
                                     except Exception as e:
                                         print(f"VIG_DEBUG: interp error pos={pos} e={e}")
                                         applied_azi = None
                             if applied_azi is None and 'xs_azi' in locals() and xs_azi is not None and 'ys_azi' in locals() and ys_azi is not None:
                                 try:
-                                    applied_azi = float(np.interp(float(rot_azi_map.get(pos, 0.0)), xs_azi, ys_azi))
+                                    applied_azi = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_azi))
                                 except Exception as e:
                                     print(f"VIG_DEBUG: global interp azi error pos={pos} e={e}")
                                     applied_azi = None
@@ -2590,12 +2590,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                                 xsr = xs_rad
                                             else:
                                                 raise ValueError('no xs available for per-pos ys')
-                                        _rad_rot_val = abs(float(rot_rad_map.get(pos, 0.0))) if isinstance(series, tuple) and len(series) == 2 else float(rot_rad_map.get(pos, 0.0))
+                                        _rad_rot_val = abs(float(rot_rad_map.get(pos, 0.0)))
                                         applied_rad = float(np.interp(_rad_rot_val, xsr, ysr, left=ysr[0], right=ysr[-1]))
                                     except Exception:
                                         applied_rad = None
                             if applied_rad is None and 'xs_rad' in locals() and xs_rad is not None and 'ys_rad' in locals() and ys_rad is not None:
-                                applied_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_rad))
+                                applied_rad = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_rad))
                             if applied_rad is None:
                                 applied_rad = 1.0
                             final_vig_rad[pos] = float(applied_rad)
