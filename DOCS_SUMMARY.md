@@ -27,6 +27,11 @@ This document provides a quick reference to the core modules and their purposes.
 
 ## Recent Changes
 
+- **(v9)** Interactive MM Selector viewer: `main.py` now opens a Tkinter
+  window with a Row → Petal → MM checkbox tree and a live E2E PSF + EEF
+  figure; `--export-package` bypasses the GUI for headless runs.
+- **(v9)** `plot_sum()` gains `return_fig` and `figsize` parameters;
+  subplot titles use `fig.text()` + `get_tightbbox` placement.
 - Added module-level documentation to `main.py` and explanatory notes
 - Added `CONTRIBUTING.md` and `DOCS_SUMMARY.md` to guide contributors
 - Documented the new aggregated modified pseudo-Voigt fit and GUI EEF export behavior

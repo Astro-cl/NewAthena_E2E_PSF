@@ -108,6 +108,7 @@ The GUI's main role is to configure and export the Excel workbook that `main.py`
 - **Perturbation Analysis**: Alignment errors, gravity offload effects, and thermal deformations
 - **Off-Axis & Defocus Modeling**: X/Y off-axis decomposition and focus-shift projection to centroid offsets; defocus PSF shape broadening of `sigma_rad`/`sigma_azi` using per-MM physical dimensions (v8/v9)
 - **HEW Degradation + Energy Broadening**: Per-position sigma broadening from lookup tables plus energy-dependent sigma scaling from an energy-factor table (v8)
+- **Interactive MM Selector viewer**: launching `main.py` interactively opens a split window with a collapsible Row → Petal → MM checkbox tree and a live E2E PSF + EEF figure; select any subset of MMs and click *Update E2E & EEF* to re-render instantly (v9)
 - **Batch Combinations**: Automated multi-configuration runs (off-axis, energy, defocus) with per-config ZIP packaging (v8)
 - **Fast Mode**: Optimized computation with configurable sampling density
 - **Multi-MM Analysis**: Process multiple mirror modules with different distributions
@@ -147,6 +148,8 @@ python3 main.py [options]
 | `--optimize` | Enable row-wise MM# assignment optimization |
 | `--batch-combinations` | Automated multi-configuration batch run (v8) |
 | `--log-dz` | Log per-MM dz projections |
+
+> **Interactive mode (no `--output` / `--export-package`)**: the script opens the **E2E PSF Viewer – MM Selector** window. Use the tree on the left to choose a subset of mirror modules, then click *Update E2E & EEF* to recompute.
 
 **Examples:**
 

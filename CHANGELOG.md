@@ -2,6 +2,22 @@
 
 This file summarizes notable changes across releases (human-readable).
 
+## v9 — 2026-05-22
+- **Interactive MM Selector viewer:** launching `main.py` without
+	`--output` / `--export-package` now opens a Tkinter window with a
+	collapsible Row → Petal → MM tree (checkbox-based) on the left and a
+	live-updating E2E PSF + EEF figure on the right.
+- Tree groups modules by Row and Petal (read from the "MM configuration"
+	sheet); only MMs with `aeff_adjusted > 0` are listed.
+- Select All / None buttons; partial-row selection indicated by ▣ symbol.
+- "Update E2E & EEF" re-renders the figure for the checked subset.
+- Window stays hidden until the initial render is complete.
+- Batch / `--export-package` mode bypasses the GUI and calls `plot_sum`
+	directly so no Tkinter window appears during automated runs.
+- `plot_sum()` gains `return_fig` and `figsize` keyword arguments.
+- Figure titles aligned via `fig.text()` + `draw_event` callback using
+	`get_tightbbox` per subplot column so titles clear secondary axes.
+
 ## v5 — 2026-02-07
 - GUI A_eff export: GUI-selected standard presets evaluated per-MM and
 	numeric results written to column B; GUI export clears column C.
