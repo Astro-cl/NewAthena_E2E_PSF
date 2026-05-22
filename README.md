@@ -109,6 +109,8 @@ The GUI's main role is to configure and export the Excel workbook that `main.py`
 - **Off-Axis & Defocus Modeling**: X/Y off-axis decomposition and focus-shift projection to centroid offsets; defocus PSF shape broadening of `sigma_rad`/`sigma_azi` using per-MM physical dimensions (v8/v9)
 - **HEW Degradation + Energy Broadening**: Per-position sigma broadening from lookup tables plus energy-dependent sigma scaling from an energy-factor table (v8)
 - **Interactive MM Selector viewer**: launching `main.py` interactively opens a split window with a collapsible Row → Petal → MM checkbox tree and a live E2E PSF + EEF figure; select any subset of MMs and click *Update E2E & EEF* to re-render instantly (v9)
+- **HEW Contribution Ranking panel**: bottom pane of the MM Selector runs a vectorised leave-one-out analysis on the checked MMs and ranks them by their individual HEW contribution; results shown in a sortable table (rank, MM #, ΔHEW, Row, Petal) coloured red/green for degrading/improving MMs; multi-select with Shift-click and Cmd/Ctrl-click; right-click → *Select in tree* to feed a ranked subset back into the MM tree (v9.2)
+- **HEW Contribution Map**: *Map* button opens a 2-D scatter plot of all MM positions (from `x_MM [m]` / `y_MM [m]` in the MM configuration sheet) colour-coded by ΔHEW (RdYlGn); unranked MMs shown as grey crosses; axis range fixed to the full telescope footprint regardless of selection (v9.2)
 - **Batch Combinations**: Automated multi-configuration runs (off-axis, energy, defocus) with per-config ZIP packaging (v8)
 - **Fast Mode**: Optimized computation with configurable sampling density
 - **Multi-MM Analysis**: Process multiple mirror modules with different distributions
@@ -1040,6 +1042,12 @@ mkdir -p Figures
 ## Release History
 
 Full release notes are in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+### v9.2 (2026-05-22)
+HEW Contribution Ranking panel and Map added to the interactive MM Selector viewer.
+
+- **Ranking panel** (bottom pane): vectorised leave-one-out analysis ranks all checked MMs by individual HEW contribution in typically < 1 s for the full 600-MM set. Results displayed in a `ttk.Treeview` table with columns Rank / MM # / ΔHEW (″) / Row / Petal; rows coloured red (degrading) or green (improving). Multi-select via Shift-click (range) and Cmd/Ctrl-click (toggle); right-click → *Select in tree* syncs the MM tree checkboxes to the highlighted rows.
+- **HEW Contribution Map**: *Map* button opens a `Toplevel` scatter plot of all MM physical positions read from the `x_MM [m]` / `y_MM [m]` columns of the MM configuration sheet (units: metres). Ranked MMs drawn as colour-coded circles (RdYlGn, symmetric around ΔHEW = 0); unranked MMs drawn as small black crosses. Axis limits fixed to the full MM footprint and do not change with the selection. 98 tests passing.
 
 ### v9.1 (2026-05-22)
 Vignetting bug-fix patch: `single` and `per_pos` table modes now correctly apply factors in both the row-by-row loop and the final reconcile pass (previously only `per_row_energy` was handled). All `np.interp()` calls in the vignetting path now use `abs(rotation_value)`; tables use non-negative delta values and symmetry is assumed. 98 tests passing (0 failures).
