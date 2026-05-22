@@ -6278,11 +6278,34 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         _ta_done[0] = True
         p1 = ax1.get_position()   # post-layout Bbox in figure (0-1) coords
         p2 = ax2.get_position()
-        # Place both titles at the same figure y: just above the taller axes.
-        # Axes are constrained to rect y1=0.92 so this never exceeds 1.0.
-        target_y = max(p1.y1, p2.y1) + 0.012
-        _ft1.set_position(((p1.x0 + p1.x1) / 2, target_y))
-        _ft2.set_position(((p2.x0 + p2.x1) / 2, target_y))
+        cx1 = (p1.x0 + p1.x1) / 2
+        cx2 = (p2.x0 + p2.x1) / 2
+        # Use get_tightbbox(renderer) on every axes so that secondary axes
+        # (e.g. ax1_top with its tick labels above ax1) are properly accounted
+        # for.  Each axes is assigned to the subplot whose x-centre is nearest.
+        try:
+            renderer = event.renderer
+            fw = fig.get_size_inches()[0] * fig.dpi
+            fh = fig.get_size_inches()[1] * fig.dpi
+            top1, top2 = p1.y1, p2.y1
+            for _ax in fig.get_axes():
+                try:
+                    bb = _ax.get_tightbbox(renderer)
+                    if bb is None:
+                        continue
+                    ax_cx = (bb.x0 + bb.x1) / 2 / fw
+                    ax_top = bb.y1 / fh
+                    if abs(ax_cx - cx1) <= abs(ax_cx - cx2):
+                        top1 = max(top1, ax_top)
+                    else:
+                        top2 = max(top2, ax_top)
+                except Exception:
+                    pass
+            target_y = min(max(top1, top2) + 0.012, 0.98)
+        except Exception:
+            target_y = max(p1.y1, p2.y1) + 0.015
+        _ft1.set_position((cx1, target_y))
+        _ft2.set_position((cx2, target_y))
         _ft1.set_visible(True)
         _ft2.set_visible(True)
         fig.canvas.draw_idle()
