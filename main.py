@@ -5545,6 +5545,60 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     X, Y = np.meshgrid(x, y)
     Z = _sum_on_grid(X, Y, normalize)
 
+    # Early return for metrics-only callers (e.g. the HEW ranking background
+    # thread). We must exit BEFORE plt.figure() so the TkAgg backend is never
+    # touched from a non-main thread, which would crash the window.
+    if return_metrics_only:
+        _m2a = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)
+        _hew_best    = 2*radius_50   *_m2a if (radius_50    is not None and np.isfinite(radius_50))    else None
+        _hew_origin  = 2*radius_50_00*_m2a if (radius_50_00 is not None and np.isfinite(radius_50_00)) else None
+        _eef80       = 2*radius_80   *_m2a if (radius_80    is not None and np.isfinite(radius_80))    else None
+        _eef90       = 2*radius_90   *_m2a if (radius_90    is not None and np.isfinite(radius_90))    else None
+        _eef90_o     = 2*radius_90_00*_m2a if (radius_90_00 is not None and np.isfinite(radius_90_00)) else None
+        _hx = _hy = _fx = _fy = None
+        try:
+            _px = np.trapezoid(Z, y, axis=0)
+            _py = np.trapezoid(Z, x, axis=1)
+            def _rm_fwhm(_ax, _pr):
+                _pr = np.maximum(_pr.astype(float), 0.0)
+                _mx = _pr.max()
+                if not (np.isfinite(_mx) and _mx > 0): return None
+                _ab = np.where(_pr >= _mx * 0.5)[0]
+                return float(_ax[_ab[-1]] - _ax[_ab[0]]) if _ab.size >= 2 else None
+            def _rm_hew(_ax, _pr):
+                _pr = np.maximum(_pr.astype(float), 0.0)
+                _seg = 0.5*(_pr[:-1]+_pr[1:])*np.diff(_ax)
+                _tot = float(_seg.sum())
+                if not (np.isfinite(_tot) and _tot > 0): return None
+                _pref = np.concatenate([[0.0], np.cumsum(_seg)])
+                _tgt = 0.5*_tot; _best = None; _j = 1
+                for _i in range(len(_ax)-1):
+                    if _j <= _i: _j = _i+1
+                    while _j < len(_ax) and (_pref[_j]-_pref[_i]) < _tgt: _j += 1
+                    if _j >= len(_ax): break
+                    _w = float(_ax[_j]-_ax[_i])
+                    if _best is None or _w < _best: _best = _w
+                return _best
+            _fx = _rm_fwhm(x, _px); _fy = _rm_fwhm(y, _py)
+            _hx = _rm_hew(x, _px);  _hy = _rm_hew(y, _py)
+        except Exception:
+            pass
+        return {
+            'hew_origin_arcsec':   _hew_origin,
+            'hew_best_arcsec':     _hew_best,
+            'eef80_best_arcsec':   _eef80,
+            'eef90_origin_arcsec': _eef90_o,
+            'eef90_best_arcsec':   _eef90,
+            'hew_x_arcsec':        _hx*_m2a if _hx is not None else None,
+            'hew_y_arcsec':        _hy*_m2a if _hy is not None else None,
+            'hew_opt_x_arcsec':    None,
+            'hew_opt_y_arcsec':    None,
+            'fwhm_x_arcsec':       _fx*_m2a if _fx is not None else None,
+            'fwhm_y_arcsec':       _fy*_m2a if _fy is not None else None,
+            'hew_opt_arcsec':      None,
+            'eef90_opt_arcsec':    None,
+        }
+
     # Create the plots in a single figure with two subplots
     # Use a reasonable figure size that will fit most screens; enable constrained layout
     # Produce the large PSF+EEF figure (single-window diagnostic).
