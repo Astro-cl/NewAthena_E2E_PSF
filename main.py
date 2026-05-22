@@ -3766,8 +3766,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     `sigmay`, `weight` and `distribution`/custom PSF references as used by
     the rest of the codebase.
     """
-    # Close any existing matplotlib figures to prevent accumulation
-    plt.close('all')
+    # Close any existing matplotlib figures to prevent accumulation.
+    # Skip when return_metrics_only=True: the function never creates a figure
+    # in that path, and calling plt.close() from a background thread while
+    # TkAgg is active raises "main thread is not in the main loop".
+    if not return_metrics_only:
+        plt.close('all')
 
     """ # Reduce grid resolution in fast mode
     if fast:
