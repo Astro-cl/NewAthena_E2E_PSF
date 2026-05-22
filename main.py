@@ -1754,58 +1754,77 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
 
                 # radial (per-row)
                 if applied_rad and p in rot_rad_map:
-                    if not ('rad_mode' in locals() and rad_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals()):
-                        raise RuntimeError('VIG rotrad requires per_row_energy mode and pos_to_cfg_row mapping')
+                    rot_val_rad_signed = float(rot_rad_map.get(p, 0.0))
+                    xs_use = ys_use = None
+                    if rad_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
+                        cfg_row = pos_to_cfg_row.get(p)
+                        if cfg_row is None:
+                            raise RuntimeError(f'VIG rotrad missing cfg_row for Position # {p}')
+                        series = _find_series(ys_by_pos_rad, cfg_row, sel_energy, locals().get('aeff_col_name'))
+                        if series is None:
+                            raise RuntimeError(
+                                f'VIG rotrad missing series for cfg_row={cfg_row}, sel_energy={sel_energy}'
+                            )
+                        xs_use, ys_use = series
+                        rot_val_rad_interp = abs(rot_val_rad_signed)
+                    elif rad_mode == 'per_pos' and p in ys_by_pos_rad:
+                        xs_use = xs_rad
+                        ys_use = ys_by_pos_rad[p]
+                        rot_val_rad_interp = rot_val_rad_signed
+                    elif rad_mode == 'single' and xs_rad is not None and ys_rad is not None:
+                        xs_use = xs_rad
+                        ys_use = ys_rad
+                        rot_val_rad_interp = rot_val_rad_signed
+                    else:
+                        rot_val_rad_interp = rot_val_rad_signed
+                    if xs_use is not None and ys_use is not None:
+                        factor = float(np.interp(rot_val_rad_interp, xs_use, ys_use))
+                        df.at[idx, 'aeff_vig_factor_rad'] = factor
+                        df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
 
-                    cfg_row = pos_to_cfg_row.get(p)
-                    if cfg_row is None:
-                        raise RuntimeError(f'VIG rotrad missing cfg_row for Position # {p}')
-
-                    series = _find_series(ys_by_pos_rad, cfg_row, sel_energy, locals().get('aeff_col_name'))
-                    if series is None:
-                        raise RuntimeError(
-                            f'VIG rotrad missing series for cfg_row={cfg_row}, sel_energy={sel_energy}'
-                        )
-
-                    rot_val = abs(float(rot_rad_map.get(p, 0.0)))
-                    xs_use, ys_use = series
-                    factor = float(np.interp(rot_val, xs_use, ys_use))
-                    df.at[idx, 'aeff_vig_factor_rad'] = factor
-                    df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
-
-                    if 'vig_vals_rad' not in locals():
-                        vig_vals_rad = {}
-                    if 'vig_source_rad' not in locals():
-                        vig_source_rad = {}
-                    vig_vals_rad[p] = float(factor)
-                    vig_source_rad[p] = ('per_row' if 'rad_mode' in locals() and rad_mode.startswith('per') else 'global')
+                        if 'vig_vals_rad' not in locals():
+                            vig_vals_rad = {}
+                        if 'vig_source_rad' not in locals():
+                            vig_source_rad = {}
+                        vig_vals_rad[p] = float(factor)
+                        vig_source_rad[p] = ('per_row' if rad_mode.startswith('per') else 'global')
 
                 # azimuthal (per-row)
                 if applied_azi and p in rot_azi_map:
-                    if not ('azi_mode' in locals() and azi_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals()):
-                        raise RuntimeError('VIG rotazi requires per_row_energy mode and pos_to_cfg_row mapping')
+                    rot_val_azi_signed = float(rot_azi_map.get(p, 0.0))
+                    xs_use = ys_use = None
+                    if azi_mode == 'per_row_energy' and 'pos_to_cfg_row' in locals():
+                        cfg_row = pos_to_cfg_row.get(p)
+                        if cfg_row is None:
+                            raise RuntimeError(f'VIG rotazi missing cfg_row for Position # {p}')
+                        series = _find_series(ys_by_pos_azi, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
+                        if series is None:
+                            raise RuntimeError(
+                                f'VIG rotazi missing series for cfg_row={cfg_row}, sel_energy={locals().get("sel_energy")}'
+                            )
+                        xs_use, ys_use = series
+                        rot_val_azi_interp = abs(rot_val_azi_signed)
+                    elif azi_mode == 'per_pos' and p in ys_by_pos_azi:
+                        xs_use = xs_azi
+                        ys_use = ys_by_pos_azi[p]
+                        rot_val_azi_interp = rot_val_azi_signed
+                    elif azi_mode == 'single' and xs_azi is not None and ys_azi is not None:
+                        xs_use = xs_azi
+                        ys_use = ys_azi
+                        rot_val_azi_interp = rot_val_azi_signed
+                    else:
+                        rot_val_azi_interp = rot_val_azi_signed
+                    if xs_use is not None and ys_use is not None:
+                        factor = float(np.interp(rot_val_azi_interp, xs_use, ys_use))
+                        df.at[idx, 'aeff_vig_factor_azi'] = factor
+                        df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
 
-                    cfg_row = pos_to_cfg_row.get(p)
-                    if cfg_row is None:
-                        raise RuntimeError(f'VIG rotazi missing cfg_row for Position # {p}')
-
-                    series = _find_series(ys_by_pos_azi, cfg_row, locals().get('sel_energy'), locals().get('aeff_col_name'))
-                    if series is None:
-                        raise RuntimeError(
-                            f'VIG rotazi missing series for cfg_row={cfg_row}, sel_energy={locals().get("sel_energy")}'
-                        )
-
-                    xs_use, ys_use = series
-                    factor = float(np.interp(abs(float(rot_azi_map.get(p, 0.0))), xs_use, ys_use))
-                    df.at[idx, 'aeff_vig_factor_azi'] = factor
-                    df.at[idx, 'weight'] = float(df.at[idx, 'weight']) * float(factor)
-
-                    if 'vig_vals_azi' not in locals():
-                        vig_vals_azi = {}
-                    if 'vig_source_azi' not in locals():
-                        vig_source_azi = {}
-                    vig_vals_azi[p] = float(factor)
-                    vig_source_azi[p] = ('per_row' if 'azi_mode' in locals() and azi_mode.startswith('per') else 'global')
+                        if 'vig_vals_azi' not in locals():
+                            vig_vals_azi = {}
+                        if 'vig_source_azi' not in locals():
+                            vig_source_azi = {}
+                        vig_vals_azi[p] = float(factor)
+                        vig_source_azi[p] = ('per_row' if azi_mode.startswith('per') else 'global')
 
             df.attrs['vignetting_rotrad_applied'] = bool(applied_rad)
         # Post-pass: recompute per-position vignette values from the
@@ -2525,13 +2544,14 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                                 xsu = xs_azi
                                             else:
                                                 raise ValueError('no xs available for per-pos ys')
-                                        applied_azi = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xsu, ysu, left=ysu[0], right=ysu[-1]))
+                                        _azi_rot_val = abs(float(rot_azi_map.get(pos, 0.0))) if isinstance(series, tuple) and len(series) == 2 else float(rot_azi_map.get(pos, 0.0))
+                                        applied_azi = float(np.interp(_azi_rot_val, xsu, ysu, left=ysu[0], right=ysu[-1]))
                                     except Exception as e:
                                         print(f"VIG_DEBUG: interp error pos={pos} e={e}")
                                         applied_azi = None
                             if applied_azi is None and 'xs_azi' in locals() and xs_azi is not None and 'ys_azi' in locals() and ys_azi is not None:
                                 try:
-                                    applied_azi = float(np.interp(abs(float(rot_azi_map.get(pos, 0.0))), xs_azi, ys_azi))
+                                    applied_azi = float(np.interp(float(rot_azi_map.get(pos, 0.0)), xs_azi, ys_azi))
                                 except Exception as e:
                                     print(f"VIG_DEBUG: global interp azi error pos={pos} e={e}")
                                     applied_azi = None
@@ -2570,11 +2590,12 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                                 xsr = xs_rad
                                             else:
                                                 raise ValueError('no xs available for per-pos ys')
-                                        applied_rad = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xsr, ysr, left=ysr[0], right=ysr[-1]))
+                                        _rad_rot_val = abs(float(rot_rad_map.get(pos, 0.0))) if isinstance(series, tuple) and len(series) == 2 else float(rot_rad_map.get(pos, 0.0))
+                                        applied_rad = float(np.interp(_rad_rot_val, xsr, ysr, left=ysr[0], right=ysr[-1]))
                                     except Exception:
                                         applied_rad = None
                             if applied_rad is None and 'xs_rad' in locals() and xs_rad is not None and 'ys_rad' in locals() and ys_rad is not None:
-                                applied_rad = float(np.interp(abs(float(rot_rad_map.get(pos, 0.0))), xs_rad, ys_rad))
+                                applied_rad = float(np.interp(float(rot_rad_map.get(pos, 0.0)), xs_rad, ys_rad))
                             if applied_rad is None:
                                 applied_rad = 1.0
                             final_vig_rad[pos] = float(applied_rad)
