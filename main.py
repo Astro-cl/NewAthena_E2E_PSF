@@ -7950,6 +7950,8 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
               font=('TkDefaultFont', 10, 'bold')).pack(side='left')
     rank_btn = ttk.Button(rnk_hdr, text="\u25b6 Rank")
     rank_btn.pack(side='right', padx=2)
+    map_btn = ttk.Button(rnk_hdr, text="Map", state='disabled')
+    map_btn.pack(side='right', padx=2)
 
     rnk_status_var = tk.StringVar(value="Click \u25b6 Rank to compute.")
     ttk.Label(ranking_outer, textvariable=rnk_status_var,
@@ -8034,6 +8036,83 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     rnk_tv.bind('<Button-3>', _rnk_popup)                   # Windows / Linux right-click
     rnk_tv.bind('<Command-ButtonPress-1>', _rnk_cmd_click)  # macOS Cmd+Click toggle
 
+    # Shared store for the last computed ranking; populated inside _update().
+    _rnk_results = []   # [(mm_n, delta, row_n, petal_n), ...]
+
+    def _open_map_window():
+        """Open a Toplevel with a colour-coded 2-D scatter of MM positions."""
+        if not _rnk_results:
+            return
+        import matplotlib as _mpl
+        from matplotlib.figure import Figure as _MapFig
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _MapCanvas
+
+        _M2ARC = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)   # metres → arcsec
+        _mm_col_num = pd.to_numeric(df_full['MM #'], errors='coerce')
+
+        xs, ys, deltas, labels = [], [], [], []
+        for mm_n, delta, row_n, petal_n in _rnk_results:
+            rows = df_full[_mm_col_num == mm_n]
+            if len(rows) == 0:
+                continue
+            if 'aeff_adjusted' in rows.columns:
+                w = pd.to_numeric(rows['aeff_adjusted'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+            elif 'weight' in rows.columns:
+                w = pd.to_numeric(rows['weight'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+            else:
+                w = np.ones(len(rows), dtype=float)
+            wsum = float(w.sum())
+            mx = rows['mux'].to_numpy(dtype=float)
+            my = rows['muy'].to_numpy(dtype=float)
+            if wsum > 0:
+                cx = float(np.dot(w, mx)) / wsum
+                cy = float(np.dot(w, my)) / wsum
+            else:
+                cx, cy = float(mx.mean()), float(my.mean())
+            xs.append(cx * _M2ARC)
+            ys.append(cy * _M2ARC)
+            deltas.append(delta)
+            labels.append(str(mm_n))
+
+        if not xs:
+            return
+
+        xs      = np.array(xs)
+        ys      = np.array(ys)
+        deltas  = np.array(deltas)
+
+        # Symmetric normalisation: delta = 0 always maps to yellow (neutral).
+        abs_max = max(float(np.abs(deltas).max()), 1e-12)
+        norm = _mpl.colors.Normalize(vmin=-abs_max, vmax=abs_max)
+        cmap = _mpl.cm.RdYlGn
+
+        top = tk.Toplevel(root)
+        top.title("MM HEW Contribution Map")
+        top.geometry("680x600")
+
+        fig = _MapFig(figsize=(6.4, 5.6), dpi=96, tight_layout=True)
+        ax  = fig.add_subplot(111)
+
+        sc = ax.scatter(xs, ys, c=deltas, cmap=cmap, norm=norm,
+                        s=180, edgecolors='k', linewidths=0.5, zorder=3)
+        for xi, yi, lbl in zip(xs, ys, labels):
+            ax.annotate(lbl, (xi, yi), textcoords='offset points',
+                        xytext=(0, 6), ha='center', fontsize=6, zorder=4)
+
+        cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cb.set_label('\u0394HEW (\u2033)')
+        ax.set_xlabel('Azimuthal offset (\u2033)')
+        ax.set_ylabel('Radial offset (\u2033)')
+        ax.set_title('HEW contribution map \u2014 red\u2009=\u2009degrading  green\u2009=\u2009improving')
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.grid(True, linestyle='--', alpha=0.4)
+
+        canvas = _MapCanvas(fig, master=top)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+    map_btn.configure(command=_open_map_window)
+
     def _compute_ranking():
         """Run leave-one-out HEW computation in a background thread and
         populate rnk_listbox with MMs ordered from most to least degrading.
@@ -8046,6 +8125,7 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
             rnk_status_var.set("Select \u2265 2 MMs first.")
             return
         rank_btn.configure(state='disabled')
+        map_btn.configure(state='disabled')
         rnk_status_var.set("Computing\u2026")
         for _iid in rnk_tv.get_children():
             rnk_tv.delete(_iid)
@@ -8245,16 +8325,20 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
                         _pv = petal_n if petal_n else '\u2014'
                         rnk_tv.insert('', 'end', tags=(_tag,), values=(
                             rank, int(mm_n), f'{delta:+.3f}', _rv, _pv))
+                    _rnk_results[:] = results
                     rnk_status_var.set(
                         f"Baseline HEW: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
                         f"red=degrading  green=improving")
                     rank_btn.configure(state='normal')
+                    map_btn.configure(state='normal')
 
                 root.after(0, _update)
             except Exception as exc:
                 import traceback as _tb
                 root.after(0, lambda: rnk_status_var.set(f"Error: {exc}"))
                 root.after(0, lambda: rank_btn.configure(state='normal'))
+                root.after(0, lambda: map_btn.configure(
+                    state='normal' if _rnk_results else 'disabled'))
 
         _threading.Thread(target=_worker, daemon=True).start()
 
