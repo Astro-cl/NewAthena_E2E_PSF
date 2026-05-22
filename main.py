@@ -8043,41 +8043,55 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     _rnk_results = []   # [(mm_n, delta, row_n, petal_n), ...]
 
     def _open_map_window():
-        """Open a Toplevel with a colour-coded 2-D scatter of MM positions."""
+        """Open a Toplevel with a colour-coded 2-D scatter of MM positions.
+
+        Positions are read from the 'MM configuration' sheet columns
+        x_MM [m] / y_MM [m] (physical coordinates in metres).
+        """
         if not _rnk_results:
             return
         import matplotlib as _mpl
         from matplotlib.figure import Figure as _MapFig
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _MapCanvas
 
-        _M2ARC = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)   # metres → arcsec
-        _mm_col_num = pd.to_numeric(df_full['MM #'], errors='coerce')
+        # ── Load x/y positions from MM configuration sheet ───────────────────
+        _pos: dict[int, tuple[float, float]] = {}   # mm_n → (x_m, y_m)
+        _wb_path = df_full.attrs.get('workbook_path', None)
+        if _wb_path:
+            try:
+                _cfg = pd.read_excel(_wb_path, sheet_name='MM configuration',
+                                     engine='openpyxl')
+                if {'MM #', 'x_MM [m]', 'y_MM [m]'}.issubset(_cfg.columns):
+                    for _, _row in _cfg.iterrows():
+                        try:
+                            _mn = int(float(_row['MM #']))
+                            _x  = float(_row['x_MM [m]'])
+                            _y  = float(_row['y_MM [m]'])
+                            if np.isfinite(_x) and np.isfinite(_y):
+                                _pos[_mn] = (_x, _y)
+                        except (TypeError, ValueError):
+                            pass
+            except Exception:
+                pass
 
         xs, ys, deltas, labels = [], [], [], []
         for mm_n, delta, row_n, petal_n in _rnk_results:
-            rows = df_full[_mm_col_num == mm_n]
-            if len(rows) == 0:
-                continue
-            if 'aeff_adjusted' in rows.columns:
-                w = pd.to_numeric(rows['aeff_adjusted'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
-            elif 'weight' in rows.columns:
-                w = pd.to_numeric(rows['weight'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+            if mm_n in _pos:
+                xs.append(_pos[mm_n][0])
+                ys.append(_pos[mm_n][1])
             else:
-                w = np.ones(len(rows), dtype=float)
-            wsum = float(w.sum())
-            mx = rows['mux'].to_numpy(dtype=float)
-            my = rows['muy'].to_numpy(dtype=float)
-            if wsum > 0:
-                cx = float(np.dot(w, mx)) / wsum
-                cy = float(np.dot(w, my)) / wsum
-            else:
-                cx, cy = float(mx.mean()), float(my.mean())
-            xs.append(cx * _M2ARC)
-            ys.append(cy * _M2ARC)
+                continue   # skip MMs with no position data
             deltas.append(delta)
             labels.append(str(mm_n))
 
         if not xs:
+            tk.messagebox.showwarning(
+                "Map unavailable",
+                "No MM positions found.\n"
+                "Make sure the input file contains an 'MM configuration' sheet "
+                "with columns 'x_MM [m]' and 'y_MM [m]'.",
+                parent=root,
+            )
             return
 
         xs      = np.array(xs)
@@ -8104,8 +8118,8 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
 
         cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
         cb.set_label('\u0394HEW (\u2033)')
-        ax.set_xlabel('Azimuthal offset (\u2033)')
-        ax.set_ylabel('Radial offset (\u2033)')
+        ax.set_xlabel('x\u2009(m)')
+        ax.set_ylabel('y\u2009(m)')
         ax.set_title('HEW contribution map \u2014 red\u2009=\u2009degrading  green\u2009=\u2009improving')
         ax.set_aspect('equal', adjustable='datalim')
         ax.grid(True, linestyle='--', alpha=0.4)
