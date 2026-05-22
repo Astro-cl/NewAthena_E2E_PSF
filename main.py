@@ -9694,18 +9694,32 @@ if __name__ == '__main__':
     except Exception:
         pass
 
-    launch_mm_viewer(
-        df,
-        mm_to_row=_mm_to_row,
-        mm_to_petal=_mm_to_petal,
-        normalize=args.normalize,
-        output=args.output,
-        fast=(args.mode == 'coarse'),
-        nx=(2062 if args.mode == 'fine' else None),
-        ny=(2062 if args.mode == 'fine' else None),
-        title_suffix=plot_title_suffix,
-        df_optimized=df_optimized,
-    )
+    if getattr(args, 'export_package', False):
+        # Non-interactive (batch/export) mode: call plot_sum directly so the
+        # export-package logic inside plot_sum runs without opening the GUI tree.
+        plot_sum(
+            df,
+            normalize=args.normalize,
+            output=args.output,
+            fast=(args.mode == 'coarse'),
+            nx=(2062 if args.mode == 'fine' else None),
+            ny=(2062 if args.mode == 'fine' else None),
+            title_suffix=plot_title_suffix,
+            df_optimized=df_optimized,
+        )
+    else:
+        launch_mm_viewer(
+            df,
+            mm_to_row=_mm_to_row,
+            mm_to_petal=_mm_to_petal,
+            normalize=args.normalize,
+            output=args.output,
+            fast=(args.mode == 'coarse'),
+            nx=(2062 if args.mode == 'fine' else None),
+            ny=(2062 if args.mode == 'fine' else None),
+            title_suffix=plot_title_suffix,
+            df_optimized=df_optimized,
+        )
 
     # Always trigger export logic for A_eff sheet after plot_sum
     try:
