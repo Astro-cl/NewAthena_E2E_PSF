@@ -7956,33 +7956,58 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
               foreground='gray', wraplength=255,
               font=('TkDefaultFont', 8)).pack(anchor='w', padx=4, pady=(1, 0))
 
-    rnk_list_frame = ttk.Frame(ranking_outer)
-    rnk_list_frame.pack(fill='both', expand=True, padx=4, pady=(2, 4))
-    rnk_listbox = tk.Listbox(rnk_list_frame, selectmode='single',
-                             font=('Courier', 9), activestyle='none')
-    rnk_vsb = ttk.Scrollbar(rnk_list_frame, orient='vertical',
-                             command=rnk_listbox.yview)
-    rnk_listbox.configure(yscrollcommand=rnk_vsb.set)
-    rnk_vsb.pack(side='right', fill='y')
-    rnk_listbox.pack(side='left', fill='both', expand=True)
+    rnk_table_frame = ttk.Frame(ranking_outer)
+    rnk_table_frame.pack(fill='both', expand=True, padx=4, pady=(2, 4))
 
-    def _on_rank_double_click(event):
-        """Double-click a ranked entry to isolate that MM in the tree."""
-        sel = rnk_listbox.curselection()
+    _rnk_cols = ('rank', 'mm', 'delta', 'row', 'petal')
+    rnk_tv = ttk.Treeview(rnk_table_frame, columns=_rnk_cols,
+                          show='headings', selectmode='extended')
+    rnk_tv.heading('rank',  text='#',         anchor='e')
+    rnk_tv.heading('mm',    text='MM',        anchor='e')
+    rnk_tv.heading('delta', text='\u0394HEW (\u2033)', anchor='e')
+    rnk_tv.heading('row',   text='Row',       anchor='e')
+    rnk_tv.heading('petal', text='Petal',     anchor='e')
+    rnk_tv.column('rank',  width=30, minwidth=24, anchor='e', stretch=False)
+    rnk_tv.column('mm',    width=44, minwidth=36, anchor='e', stretch=False)
+    rnk_tv.column('delta', width=72, minwidth=60, anchor='e', stretch=True)
+    rnk_tv.column('row',   width=36, minwidth=28, anchor='e', stretch=False)
+    rnk_tv.column('petal', width=42, minwidth=32, anchor='e', stretch=False)
+    rnk_tv.tag_configure('deg', foreground='#cc3300')
+    rnk_tv.tag_configure('imp', foreground='#006633')
+    rnk_vsb = ttk.Scrollbar(rnk_table_frame, orient='vertical',
+                            command=rnk_tv.yview)
+    rnk_tv.configure(yscrollcommand=rnk_vsb.set)
+    rnk_vsb.pack(side='right', fill='y')
+    rnk_tv.pack(side='left', fill='both', expand=True)
+
+    def _rnk_select_in_tree():
+        """Check only the MMs currently selected in the ranking table."""
+        sel = rnk_tv.selection()
         if not sel:
             return
-        text = rnk_listbox.get(sel[0])
         try:
-            mm_num = int(text.split('MM')[1].split()[0])
-        except (IndexError, ValueError):
+            mm_set = {int(rnk_tv.set(iid, 'mm')) for iid in sel}
+        except (ValueError, tk.TclError):
             return
-        for v in checked_vars.values():
-            v.set(False)
-        if mm_num in checked_vars:
-            checked_vars[mm_num].set(True)
+        for mm, v in checked_vars.items():
+            v.set(mm in mm_set)
         _refresh_tree()
 
-    rnk_listbox.bind('<Double-Button-1>', _on_rank_double_click)
+    _rnk_menu = tk.Menu(rnk_tv, tearoff=0)
+    _rnk_menu.add_command(label='Select in tree', command=_rnk_select_in_tree)
+
+    def _rnk_popup(event):
+        iid = rnk_tv.identify_row(event.y)
+        if iid and iid not in rnk_tv.selection():
+            rnk_tv.selection_set(iid)
+        if rnk_tv.selection():
+            try:
+                _rnk_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                _rnk_menu.grab_release()
+
+    rnk_tv.bind('<Button-2>', _rnk_popup)   # macOS
+    rnk_tv.bind('<Button-3>', _rnk_popup)   # Windows / Linux
 
     def _compute_ranking():
         """Run leave-one-out HEW computation in a background thread and
@@ -8177,19 +8202,23 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
                         continue
                     _r50_wo = float(np.interp(0.5, _cum_wo / _te_wo, _r))
                     _hew_wo = 2.0 * _r50_wo * _M2ARC
-                    results.append((_mm_nums[_i], _hew_wo - hew_base))
+                    _mmn_i  = int(_mm_nums[_i]) if np.isfinite(_mm_nums[_i]) else 0
+                    results.append((_mmn_i, _hew_wo - hew_base,
+                                    mm_to_row.get(_mmn_i, 0),
+                                    mm_to_petal.get(_mmn_i, 0)))
 
-                # Most degrading first (most negative delta)
-                results.sort(key=lambda x: x[1])
+                # Most degrading first; ties broken by row then petal
+                results.sort(key=lambda x: (x[1], x[2], x[3]))
 
                 def _update():
-                    rnk_listbox.delete(0, 'end')
-                    for rank, (mm_n, delta) in enumerate(results, 1):
-                        rnk_listbox.insert(
-                            'end',
-                            f"{rank:>3}. MM {mm_n:>4}  {delta:+.2f}\"")
-                        colour = '#cc3300' if delta < 0 else '#006633'
-                        rnk_listbox.itemconfig(rank - 1, foreground=colour)
+                    for _iid in rnk_tv.get_children():
+                        rnk_tv.delete(_iid)
+                    for rank, (mm_n, delta, row_n, petal_n) in enumerate(results, 1):
+                        _tag = 'deg' if delta < 0 else 'imp'
+                        _rv = row_n   if row_n   else '\u2014'
+                        _pv = petal_n if petal_n else '\u2014'
+                        rnk_tv.insert('', 'end', tags=(_tag,), values=(
+                            rank, int(mm_n), f'{delta:+.3f}', _rv, _pv))
                     rnk_status_var.set(
                         f"Baseline HEW: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
                         f"red=degrading  green=improving")
