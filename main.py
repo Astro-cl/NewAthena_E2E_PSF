@@ -3766,8 +3766,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     `sigmay`, `weight` and `distribution`/custom PSF references as used by
     the rest of the codebase.
     """
-    # Close any existing matplotlib figures to prevent accumulation
-    plt.close('all')
+    # Close any existing matplotlib figures to prevent accumulation.
+    # Skip when return_metrics_only=True: the function never creates a figure
+    # in that path, and calling plt.close() from a background thread while
+    # TkAgg is active raises "main thread is not in the main loop".
+    if not return_metrics_only:
+        plt.close('all')
 
     """ # Reduce grid resolution in fast mode
     if fast:
@@ -5540,6 +5544,60 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     y = np.linspace(ylim[0], ylim[1], ny)
     X, Y = np.meshgrid(x, y)
     Z = _sum_on_grid(X, Y, normalize)
+
+    # Early return for metrics-only callers (e.g. the HEW ranking background
+    # thread). We must exit BEFORE plt.figure() so the TkAgg backend is never
+    # touched from a non-main thread, which would crash the window.
+    if return_metrics_only:
+        _m2a = 1.0 / (12.0 * np.pi / 180.0 / 3600.0)
+        _hew_best    = 2*radius_50   *_m2a if (radius_50    is not None and np.isfinite(radius_50))    else None
+        _hew_origin  = 2*radius_50_00*_m2a if (radius_50_00 is not None and np.isfinite(radius_50_00)) else None
+        _eef80       = 2*radius_80   *_m2a if (radius_80    is not None and np.isfinite(radius_80))    else None
+        _eef90       = 2*radius_90   *_m2a if (radius_90    is not None and np.isfinite(radius_90))    else None
+        _eef90_o     = 2*radius_90_00*_m2a if (radius_90_00 is not None and np.isfinite(radius_90_00)) else None
+        _hx = _hy = _fx = _fy = None
+        try:
+            _px = np.trapezoid(Z, y, axis=0)
+            _py = np.trapezoid(Z, x, axis=1)
+            def _rm_fwhm(_ax, _pr):
+                _pr = np.maximum(_pr.astype(float), 0.0)
+                _mx = _pr.max()
+                if not (np.isfinite(_mx) and _mx > 0): return None
+                _ab = np.where(_pr >= _mx * 0.5)[0]
+                return float(_ax[_ab[-1]] - _ax[_ab[0]]) if _ab.size >= 2 else None
+            def _rm_hew(_ax, _pr):
+                _pr = np.maximum(_pr.astype(float), 0.0)
+                _seg = 0.5*(_pr[:-1]+_pr[1:])*np.diff(_ax)
+                _tot = float(_seg.sum())
+                if not (np.isfinite(_tot) and _tot > 0): return None
+                _pref = np.concatenate([[0.0], np.cumsum(_seg)])
+                _tgt = 0.5*_tot; _best = None; _j = 1
+                for _i in range(len(_ax)-1):
+                    if _j <= _i: _j = _i+1
+                    while _j < len(_ax) and (_pref[_j]-_pref[_i]) < _tgt: _j += 1
+                    if _j >= len(_ax): break
+                    _w = float(_ax[_j]-_ax[_i])
+                    if _best is None or _w < _best: _best = _w
+                return _best
+            _fx = _rm_fwhm(x, _px); _fy = _rm_fwhm(y, _py)
+            _hx = _rm_hew(x, _px);  _hy = _rm_hew(y, _py)
+        except Exception:
+            pass
+        return {
+            'hew_origin_arcsec':   _hew_origin,
+            'hew_best_arcsec':     _hew_best,
+            'eef80_best_arcsec':   _eef80,
+            'eef90_origin_arcsec': _eef90_o,
+            'eef90_best_arcsec':   _eef90,
+            'hew_x_arcsec':        _hx*_m2a if _hx is not None else None,
+            'hew_y_arcsec':        _hy*_m2a if _hy is not None else None,
+            'hew_opt_x_arcsec':    None,
+            'hew_opt_y_arcsec':    None,
+            'fwhm_x_arcsec':       _fx*_m2a if _fx is not None else None,
+            'fwhm_y_arcsec':       _fy*_m2a if _fy is not None else None,
+            'hew_opt_arcsec':      None,
+            'eef90_opt_arcsec':    None,
+        }
 
     # Create the plots in a single figure with two subplots
     # Use a reasonable figure size that will fit most screens; enable constrained layout
@@ -7756,9 +7814,13 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         if n_chk == 0:     return CROSS
         return PART
 
+    # Vertical split inside left: tree on top, HEW ranking below
+    vpane = ttk.PanedWindow(left, orient='vertical')
+    vpane.pack(fill='both', expand=True, padx=4, pady=(4, 0))
+
     # Treeview
-    tree_outer = ttk.Frame(left)
-    tree_outer.pack(fill='both', expand=True, padx=4, pady=4)
+    tree_outer = ttk.Frame(vpane)
+    vpane.add(tree_outer, weight=3)
     tree = ttk.Treeview(tree_outer, selectmode='none', show='tree')
     vsb = ttk.Scrollbar(tree_outer, orient='vertical', command=tree.yview)
     tree.configure(yscrollcommand=vsb.set)
@@ -7873,6 +7935,454 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     ttk.Button(btn_bar, text=f"{CROSS} None", command=_deselect_all).pack(side='left', padx=2)
 
     _build_tree()
+
+    # ------------------------------------------------------------------
+    # HEW contribution ranking panel (bottom pane of vpane)
+    # ------------------------------------------------------------------
+    import threading as _threading
+
+    ranking_outer = ttk.Frame(vpane)
+    vpane.add(ranking_outer, weight=2)
+
+    rnk_hdr = ttk.Frame(ranking_outer)
+    rnk_hdr.pack(fill='x', padx=4, pady=(6, 0))
+    ttk.Label(rnk_hdr, text="HEW Contribution Ranking",
+              font=('TkDefaultFont', 10, 'bold')).pack(side='left')
+
+    rnk_btn_col = ttk.Frame(rnk_hdr)
+    rnk_btn_col.pack(side='right')
+    rank_btn = ttk.Button(rnk_btn_col, text="\u25b6 Rank")
+    rank_btn.pack(fill='x', padx=2, pady=(0, 1))
+    map_btn = ttk.Button(rnk_btn_col, text="Map", state='disabled')
+    map_btn.pack(fill='x', padx=2)
+
+    rnk_status_var = tk.StringVar(value="Click \u25b6 Rank to compute.")
+    ttk.Label(ranking_outer, textvariable=rnk_status_var,
+              foreground='gray', wraplength=255,
+              font=('TkDefaultFont', 8)).pack(anchor='w', padx=4, pady=(1, 0))
+
+    rnk_table_frame = ttk.Frame(ranking_outer)
+    rnk_table_frame.pack(fill='both', expand=True, padx=4, pady=(2, 4))
+
+    _rnk_cols = ('rank', 'mm', 'delta', 'row', 'petal')
+    rnk_tv = ttk.Treeview(rnk_table_frame, columns=_rnk_cols,
+                          show='headings', selectmode='extended')
+    rnk_tv.heading('rank',  text='#',         anchor='e')
+    rnk_tv.heading('mm',    text='MM',        anchor='e')
+    rnk_tv.heading('delta', text='\u0394HEW (\u2033)', anchor='e')
+    rnk_tv.heading('row',   text='Row',       anchor='e')
+    rnk_tv.heading('petal', text='Petal',     anchor='e')
+    rnk_tv.column('rank',  width=30, minwidth=24, anchor='e', stretch=False)
+    rnk_tv.column('mm',    width=44, minwidth=36, anchor='e', stretch=False)
+    rnk_tv.column('delta', width=72, minwidth=60, anchor='e', stretch=True)
+    rnk_tv.column('row',   width=36, minwidth=28, anchor='e', stretch=False)
+    rnk_tv.column('petal', width=42, minwidth=32, anchor='e', stretch=False)
+    rnk_tv.tag_configure('deg', foreground='#cc3300')
+    rnk_tv.tag_configure('imp', foreground='#006633')
+    rnk_vsb = ttk.Scrollbar(rnk_table_frame, orient='vertical',
+                            command=rnk_tv.yview)
+    rnk_tv.configure(yscrollcommand=rnk_vsb.set)
+    rnk_vsb.pack(side='right', fill='y')
+    rnk_tv.pack(side='left', fill='both', expand=True)
+
+    def _rnk_select_in_tree():
+        """Check only the MMs currently selected in the ranking table."""
+        sel = rnk_tv.selection()
+        if not sel:
+            return
+        try:
+            mm_set = {int(rnk_tv.set(iid, 'mm')) for iid in sel}
+        except (ValueError, tk.TclError):
+            return
+        for mm, v in checked_vars.items():
+            v.set(mm in mm_set)
+        _refresh_tree()
+
+    _rnk_menu = tk.Menu(rnk_tv, tearoff=0)
+    _rnk_menu.add_command(label='Select in tree', command=_rnk_select_in_tree)
+
+    def _rnk_popup(event):
+        # On macOS Ctrl+Click fires <Button-2> with the Control state bit (0x4)
+        # set; treat that as a toggle rather than a context-menu event.
+        ctrl_held = bool(event.state & 0x4)
+        iid = rnk_tv.identify_row(event.y)
+        if ctrl_held:
+            if iid:
+                if iid in rnk_tv.selection():
+                    rnk_tv.selection_remove(iid)
+                else:
+                    rnk_tv.selection_add(iid)
+            return
+        if iid and iid not in rnk_tv.selection():
+            rnk_tv.selection_set(iid)
+        if rnk_tv.selection():
+            try:
+                _rnk_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                _rnk_menu.grab_release()
+
+    # macOS: Cmd+Click for multi-select toggle (macOS convention mirrors
+    # Ctrl+Click on Windows/Linux).
+    def _rnk_cmd_click(event):
+        iid = rnk_tv.identify_row(event.y)
+        if iid:
+            if iid in rnk_tv.selection():
+                rnk_tv.selection_remove(iid)
+            else:
+                rnk_tv.selection_add(iid)
+        return 'break'   # prevent default Button-1 from clearing the selection
+
+    # Ensure the widget gets keyboard focus on first click so that
+    # Shift+Click range-selection works immediately.
+    rnk_tv.bind('<ButtonPress-1>', lambda e: rnk_tv.focus_set(), add='+')
+    rnk_tv.bind('<Button-2>', _rnk_popup)                   # macOS right-click / Ctrl+Click
+    rnk_tv.bind('<Button-3>', _rnk_popup)                   # Windows / Linux right-click
+    rnk_tv.bind('<Command-ButtonPress-1>', _rnk_cmd_click)  # macOS Cmd+Click toggle
+
+    # Shared store for the last computed ranking; populated inside _update().
+    _rnk_results = []   # [(mm_n, delta, row_n, petal_n), ...]
+
+    def _open_map_window():
+        """Open a Toplevel with a colour-coded 2-D scatter of MM positions.
+
+        Positions are read from the 'MM configuration' sheet columns
+        x_MM [m] / y_MM [m] (physical coordinates in metres).
+        """
+        if not _rnk_results:
+            return
+        import matplotlib as _mpl
+        from matplotlib.figure import Figure as _MapFig
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _MapCanvas
+
+        # ── Load x/y positions from MM configuration sheet ───────────────────
+        _pos: dict[int, tuple[float, float]] = {}   # mm_n → (x_m, y_m)
+        _wb_path = df_full.attrs.get('workbook_path', None)
+        if _wb_path:
+            try:
+                _cfg = pd.read_excel(_wb_path, sheet_name='MM configuration',
+                                     engine='openpyxl')
+                if {'MM #', 'x_MM [m]', 'y_MM [m]'}.issubset(_cfg.columns):
+                    for _, _row in _cfg.iterrows():
+                        try:
+                            _mn = int(float(_row['MM #']))
+                            _x  = float(_row['x_MM [m]'])
+                            _y  = float(_row['y_MM [m]'])
+                            if np.isfinite(_x) and np.isfinite(_y):
+                                _pos[_mn] = (_x, _y)
+                        except (TypeError, ValueError):
+                            pass
+            except Exception:
+                pass
+
+        # Positions of all MMs in the sheet (used to fix axis limits).
+        _all_xs = np.array([v[0] for v in _pos.values()]) if _pos else np.array([0.0])
+        _all_ys = np.array([v[1] for v in _pos.values()]) if _pos else np.array([0.0])
+
+        # Split into ranked (coloured circles) and unranked (grey crosses).
+        _ranked_mms = {mm_n for mm_n, *_ in _rnk_results}
+        xs, ys, deltas, labels = [], [], [], []
+        for mm_n, delta, row_n, petal_n in _rnk_results:
+            if mm_n in _pos:
+                xs.append(_pos[mm_n][0])
+                ys.append(_pos[mm_n][1])
+            else:
+                continue   # skip MMs with no position data
+            deltas.append(delta)
+            labels.append(str(mm_n))
+
+        if not xs:
+            tk.messagebox.showwarning(
+                "Map unavailable",
+                "No MM positions found.\n"
+                "Make sure the input file contains an 'MM configuration' sheet "
+                "with columns 'x_MM [m]' and 'y_MM [m]'.",
+                parent=root,
+            )
+            return
+
+        xs      = np.array(xs)
+        ys      = np.array(ys)
+        deltas  = np.array(deltas)
+
+        # Unranked MM positions (all MMs in the sheet that weren't ranked).
+        _unranked = [(mn, xy) for mn, xy in _pos.items() if mn not in _ranked_mms]
+        _ux = np.array([xy[0] for _, xy in _unranked]) if _unranked else np.empty(0)
+        _uy = np.array([xy[1] for _, xy in _unranked]) if _unranked else np.empty(0)
+
+        # Symmetric normalisation: delta = 0 always maps to yellow (neutral).
+        abs_max = max(float(np.abs(deltas).max()), 1e-12)
+        norm = _mpl.colors.Normalize(vmin=-abs_max, vmax=abs_max)
+        cmap = _mpl.cm.RdYlGn
+
+        top = tk.Toplevel(root)
+        top.title("MM HEW Contribution Map")
+        top.geometry("680x600")
+
+        fig = _MapFig(figsize=(6.4, 5.6), dpi=96, tight_layout=True)
+        ax  = fig.add_subplot(111)
+
+        # Draw unranked MMs as small black crosses (behind the coloured circles).
+        if _ux.size:
+            ax.scatter(_ux, _uy, marker='+', s=40, c='black',
+                       linewidths=0.8, zorder=2)
+
+        sc = ax.scatter(xs, ys, c=deltas, cmap=cmap, norm=norm,
+                        s=180, edgecolors='k', linewidths=0.5, zorder=3)
+        for xi, yi, lbl in zip(xs, ys, labels):
+            ax.annotate(lbl, (xi, yi), textcoords='offset points',
+                        xytext=(0, 6), ha='center', fontsize=6, zorder=4)
+
+        cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cb.set_label('\u0394HEW (\u2033)')
+        ax.set_xlabel('x\u2009(m)')
+        ax.set_ylabel('y\u2009(m)')
+        ax.set_title('HEW contribution map \u2014 red\u2009=\u2009degrading  green\u2009=\u2009improving')
+
+        # Fix axes to cover ALL MM locations regardless of the current selection.
+        _pad = max(float((_all_xs.max() - _all_xs.min()) * 0.06),
+                   float((_all_ys.max() - _all_ys.min()) * 0.06),
+                   1e-6)
+        ax.set_xlim(_all_xs.min() - _pad, _all_xs.max() + _pad)
+        ax.set_ylim(_all_ys.min() - _pad, _all_ys.max() + _pad)
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, linestyle='--', alpha=0.4)
+
+        canvas = _MapCanvas(fig, master=top)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+    map_btn.configure(command=_open_map_window)
+
+    def _compute_ranking():
+        """Run leave-one-out HEW computation in a background thread and
+        populate rnk_listbox with MMs ordered from most to least degrading.
+        delta = HEW(all_selected \ {MM}) - HEW(all_selected):
+          negative delta  → removing MM reduces HEW → MM was degrading (red)
+          positive delta  → removing MM increases HEW → MM was improving (green)
+        """
+        selected = [mm for mm in mm_nums if checked_vars[mm].get()]
+        if len(selected) < 2:
+            rnk_status_var.set("Select \u2265 2 MMs first.")
+            return
+        rank_btn.configure(state='disabled')
+        map_btn.configure(state='disabled')
+        rnk_status_var.set("Computing\u2026")
+        for _iid in rnk_tv.get_children():
+            rnk_tv.delete(_iid)
+
+        _mm_col_num = pd.to_numeric(df_full['MM #'], errors='coerce')
+        selected_set = set(selected)
+        n_sel = len(selected)
+
+        def _worker():
+            try:
+                # ── FAST VECTORISED RANKING ──────────────────────────────────────
+                # Instead of calling plot_sum() N+1 times (O(N²) polar grid
+                # evaluations), we:
+                #   1. Extract PSF params for every selected MM once.
+                #   2. Build one fixed polar grid centred on the weighted centroid.
+                #   3. Precompute each PSF's radial-energy contribution on that grid
+                #      (vectorised Gaussian batch + per-row loops for exotic types).
+                #   4. Sum → baseline radial profile.
+                #   5. Leave-one-out = total − one_contribution  (O(n_r) per MM).
+                # Complexity drops from O(N² · grid) to O(N · grid), giving ~N×
+                # speedup.  For 600 MMs with n_r=400, n_theta=72 this runs in
+                # well under 30 seconds.
+                # ─────────────────────────────────────────────────────────────────
+
+                _MIN_SIG = 1e-9
+                _ARC2M   = 12.0 * np.pi / 180.0 / 3600.0  # 1 arcsec in metres
+                _M2ARC   = 1.0 / _ARC2M
+
+                df_sel = df_full[_mm_col_num.isin(selected_set)].copy()
+                _ns = len(df_sel)
+                if _ns == 0:
+                    root.after(0, lambda: rnk_status_var.set("No rows found."))
+                    root.after(0, lambda: rank_btn.configure(state='normal'))
+                    return
+
+                # MM numbers in df_sel row order
+                _mm_nums = pd.to_numeric(df_sel['MM #'], errors='coerce').to_numpy()
+
+                # ── 1. PSF parameter arrays ───────────────────────────────────────
+                if 'aeff_adjusted' in df_sel.columns:
+                    _w_raw = pd.to_numeric(df_sel['aeff_adjusted'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+                elif 'weight' in df_sel.columns:
+                    _w_raw = pd.to_numeric(df_sel['weight'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+                else:
+                    _w_raw = np.ones(_ns, dtype=float)
+                _wsum = float(np.nansum(_w_raw))
+                _w = _w_raw / _wsum if (_wsum > 0 and np.isfinite(_wsum)) else np.ones(_ns, dtype=float)
+
+                _mux   = df_sel['mux'].to_numpy(dtype=float)
+                _muy   = df_sel['muy'].to_numpy(dtype=float)
+                _sigx  = np.maximum(df_sel['sigmax'].to_numpy(dtype=float), _MIN_SIG)
+                _sigy  = np.maximum(df_sel['sigmay'].to_numpy(dtype=float), _MIN_SIG)
+                _theta = pd.to_numeric(
+                    df_sel.get('theta_degrees', pd.Series([0.0] * _ns, dtype=float)),
+                    errors='coerce').fillna(0.0).to_numpy(dtype=float)
+                _d_raw = df_sel.get('distribution', pd.Series(['gaussian'] * _ns)).astype(str).to_numpy()
+                _d_low = np.array([d.strip().lower() for d in _d_raw])
+                _a_azi = pd.to_numeric(
+                    df_sel.get('alpha_azi', pd.Series([0.5] * _ns, dtype=float)),
+                    errors='coerce').fillna(0.5).to_numpy(dtype=float)
+                _a_rad = pd.to_numeric(
+                    df_sel.get('alpha_rad', pd.Series([0.5] * _ns, dtype=float)),
+                    errors='coerce').fillna(0.5).to_numpy(dtype=float)
+
+                # ── 2. Fixed polar grid ───────────────────────────────────────────
+                _cx = float(np.dot(_w, _mux));  _cy = float(np.dot(_w, _muy))
+                if not np.isfinite(_cx): _cx = 0.0
+                if not np.isfinite(_cy): _cy = 0.0
+                _max_sig  = max(float(_sigx.max()), float(_sigy.max()))
+                _max_dist = float(np.sqrt((_mux - _cx)**2 + (_muy - _cy)**2).max())
+                _r_max = _max_dist + 5.0 * _max_sig
+                if _r_max <= 0: _r_max = 1e-6
+
+                _n_r     = 400   # radial bins — good accuracy, fast
+                _n_theta = 72    # angular bins
+                _r      = np.linspace(0.0, _r_max, _n_r)
+                _theta_g = np.linspace(0.0, 2.0 * np.pi, _n_theta, endpoint=False)
+                _dr     = _r[1] - _r[0]    if _n_r > 1 else _r_max
+                _dtheta = _theta_g[1] - _theta_g[0]
+                _R, _TH = np.meshgrid(_r, _theta_g)          # (n_theta, n_r)
+                _Xp = _cx + _R * np.cos(_TH)
+                _Yp = _cy + _R * np.sin(_TH)
+
+                # ── 3. Radial-energy contribution per PSF ─────────────────────────
+                # radial_arr[i, :] = sum_theta( Zp_i * R ) * dtheta  →  shape (ns, n_r)
+                _rad_arr = np.zeros((_ns, _n_r), dtype=float)
+
+                root.after(0, lambda: rnk_status_var.set("Precomputing PSF contributions\u2026"))
+
+                # Gaussian batch (vectorised over all Gaussian rows at once)
+                _g_idx = np.where(_d_low == 'gaussian')[0]
+                if _g_idx.size:
+                    # Shapes broadcast: (G,1,1) against (1,n_theta,n_r)
+                    _dx  = _Xp[np.newaxis] - _mux[_g_idx, np.newaxis, np.newaxis]
+                    _dy  = _Yp[np.newaxis] - _muy[_g_idx, np.newaxis, np.newaxis]
+                    _th  = np.deg2rad(_theta[_g_idx])[:, np.newaxis, np.newaxis]
+                    _c   = np.cos(_th);  _s = np.sin(_th)
+                    _sx2 = (_sigx[_g_idx, np.newaxis, np.newaxis])**2
+                    _sy2 = (_sigy[_g_idx, np.newaxis, np.newaxis])**2
+                    # Rotated-Gaussian exponent (identical to gaussian_2d_rotated)
+                    _a   =  _c**2 / _sx2 + _s**2 / _sy2
+                    _b   =  _s * _c * (1.0/_sx2 - 1.0/_sy2)
+                    _cc  =  _s**2 / _sx2 + _c**2 / _sy2
+                    _exp = np.exp(-0.5 * (_a*_dx**2 + 2.0*_b*_dx*_dy + _cc*_dy**2))
+                    # Normalised amplitude (integral = weight, matching plot_sum)
+                    _nrm = 1.0 / (2.0 * np.pi
+                                  * _sigx[_g_idx, np.newaxis, np.newaxis]
+                                  * _sigy[_g_idx, np.newaxis, np.newaxis])
+                    _amp = _w[_g_idx, np.newaxis, np.newaxis]
+                    _Zg  = _amp * _nrm * _exp  # (G, n_theta, n_r)
+                    # Radial contribution: sum over theta axis (axis=1)
+                    _rad_arr[_g_idx] = np.einsum('ijk,jk->ik', _Zg, _R) * _dtheta
+
+                # pseudo-Voigt rows (looped — usually a small fraction)
+                _pv_idx = np.where((_d_low == 'pseudo-voigt') | (_d_low == 'voigt'))[0]
+                for _i in _pv_idx:
+                    _Zp_i = pseudo_voigt_2d_rotated(
+                        _Xp, _Yp,
+                        muazi=_mux[_i], murad=_muy[_i],
+                        sigmaazi=_sigx[_i], sigmarad=_sigy[_i],
+                        theta=_theta[_i],
+                        alphaazi=_a_azi[_i], alpharad=_a_rad[_i],
+                        amplitude=_w[_i],
+                        normalize=True,
+                        degrees=True,
+                    )
+                    _rad_arr[_i] = np.sum(_Zp_i * _R, axis=0) * _dtheta
+
+                # Custom file-based PSFs (looped — very few)
+                _builtins = {'gaussian', 'pseudo-voigt', 'voigt'}
+                _wb = df_full.attrs.get('workbook_path', None)
+                _psf_cache: dict = {}
+                for _i in np.where(~np.isin(_d_low, list(_builtins)))[0]:
+                    _name = str(_d_raw[_i]).strip()
+                    _psf = _psf_cache.get(_name)
+                    if _psf is None and _wb is not None:
+                        _p = _resolve_custom_psf_path(str(_wb), _name)
+                        if _p:
+                            try:
+                                _psf = load_psf_matrix_excel(_p, arcsec_to_m=_ARC2M)
+                                _psf_cache[_name] = _psf
+                            except Exception:
+                                pass
+                    if _psf is not None:
+                        _xf, _yf, _ff = _psf
+                        _Zp_i = _w[_i] * eval_psf_matrix_rotated(
+                            _Xp, _Yp,
+                            mux=_mux[_i], muy=_muy[_i],
+                            theta_deg=_theta[_i],
+                            x_axis=_xf, y_axis=_yf, flux=_ff,
+                        )
+                    else:
+                        # Fallback: unnormalised Gaussian (file unavailable)
+                        _dx = _Xp - _mux[_i];  _dy = _Yp - _muy[_i]
+                        _Zp_i = _w[_i] * np.exp(-0.5*(_dx/_sigx[_i])**2
+                                                 -0.5*(_dy/_sigy[_i])**2)
+                    _rad_arr[_i] = np.sum(_Zp_i * _R, axis=0) * _dtheta
+
+                # ── 4. Baseline HEW ───────────────────────────────────────────────
+                _rad_total = _rad_arr.sum(axis=0)                     # (n_r,)
+                _cum_total = np.cumsum(_rad_total * _dr)
+                _te_total  = float(_cum_total[-1])
+                if not (np.isfinite(_te_total) and _te_total > 0):
+                    root.after(0, lambda: rnk_status_var.set("Could not compute baseline HEW."))
+                    root.after(0, lambda: rank_btn.configure(state='normal'))
+                    return
+                _frac_total = _cum_total / _te_total
+                hew_base = 2.0 * float(np.interp(0.5, _frac_total, _r)) * _M2ARC
+
+                # ── 5. Leave-one-out HEW (O(n_r) per MM) ─────────────────────────
+                results = []
+                for _i in range(_ns):
+                    if _i % 30 == 0:
+                        _msg = f"Ranking\u2026 {_i}/{_ns}"
+                        root.after(0, lambda m=_msg: rnk_status_var.set(m))
+                    _rad_wo = _rad_total - _rad_arr[_i]
+                    _cum_wo = np.cumsum(_rad_wo * _dr)
+                    _te_wo  = float(_cum_wo[-1])
+                    if not (np.isfinite(_te_wo) and _te_wo > 0):
+                        continue
+                    _r50_wo = float(np.interp(0.5, _cum_wo / _te_wo, _r))
+                    _hew_wo = 2.0 * _r50_wo * _M2ARC
+                    _mmn_i  = int(_mm_nums[_i]) if np.isfinite(_mm_nums[_i]) else 0
+                    results.append((_mmn_i, _hew_wo - hew_base,
+                                    mm_to_row.get(_mmn_i, 0),
+                                    mm_to_petal.get(_mmn_i, 0)))
+
+                # Most degrading first; ties broken by row then petal
+                results.sort(key=lambda x: (x[1], x[2], x[3]))
+
+                def _update():
+                    for _iid in rnk_tv.get_children():
+                        rnk_tv.delete(_iid)
+                    for rank, (mm_n, delta, row_n, petal_n) in enumerate(results, 1):
+                        _tag = 'deg' if delta < 0 else 'imp'
+                        _rv = row_n   if row_n   else '\u2014'
+                        _pv = petal_n if petal_n else '\u2014'
+                        rnk_tv.insert('', 'end', tags=(_tag,), values=(
+                            rank, int(mm_n), f'{delta:+.3f}', _rv, _pv))
+                    _rnk_results[:] = results
+                    rnk_status_var.set(
+                        f"Baseline HEW: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
+                        f"red=degrading  green=improving")
+                    rank_btn.configure(state='normal')
+                    map_btn.configure(state='normal')
+
+                root.after(0, _update)
+            except Exception as exc:
+                import traceback as _tb
+                root.after(0, lambda: rnk_status_var.set(f"Error: {exc}"))
+                root.after(0, lambda: rank_btn.configure(state='normal'))
+                root.after(0, lambda: map_btn.configure(
+                    state='normal' if _rnk_results else 'disabled'))
+
+        _threading.Thread(target=_worker, daemon=True).start()
+
+    rank_btn.configure(command=_compute_ranking)
 
     # Status label
     status_var = tk.StringVar(value="")

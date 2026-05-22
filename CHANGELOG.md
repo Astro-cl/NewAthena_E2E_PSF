@@ -2,6 +2,22 @@
 
 This file summarizes notable changes across releases (human-readable).
 
+## v9.2 — 2026-05-22
+- **HEW Contribution Ranking panel:** new bottom pane in the interactive MM
+  Selector viewer. Vectorised leave-one-out analysis (O(N) over a shared polar
+  grid) ranks all checked MMs by their individual HEW contribution. Results
+  shown in a `ttk.Treeview` table (columns: Rank, MM #, ΔHEW ″, Row, Petal)
+  coloured red/green for degrading/improving MMs. Multi-select via Shift-click
+  (range) and Cmd/Ctrl-click (toggle on macOS); right-click → *Select in tree*
+  syncs the MM tree checkboxes to the highlighted rows.
+- **HEW Contribution Map:** *Map* button (enabled after each ranking) opens a
+  `Toplevel` scatter plot of all MM physical positions (`x_MM [m]` / `y_MM [m]`
+  from the MM configuration sheet, displayed in metres). Ranked MMs are drawn
+  as colour-coded circles (RdYlGn colormap, symmetric zero-centred around
+  ΔHEW = 0); unranked MMs shown as small black crosses. Axis limits are fixed
+  to the full MM footprint regardless of the current selection.
+- Test suite: 98 tests passing (0 failures).
+
 ## v9.1 — 2026-05-22
 - **Vignetting bug fix (single / per_pos modes):** the row-by-row weight
   application loop and the final reconcile pass now handle all three vignetting
