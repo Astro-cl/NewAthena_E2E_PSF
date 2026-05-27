@@ -1088,6 +1088,33 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 tmp = thermal_df.copy()
                 tmp['Position #'] = pd.to_numeric(tmp['Position #'], errors='coerce')
                 tmp = tmp[tmp['Position #'].notna()]
+                # Resolve formula aliases: if primary d_therm_* columns are all NaN
+                # (uncached Excel formula cells), inspect the formula text to find the
+                # referenced TC column (e.g. =U2 → TC01 disX) and use its data instead.
+                _primary_therm_cols = [
+                    'd_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]',
+                    'd_therm_rotx [arcsec]', 'd_therm_roty [arcsec]', 'd_therm_rotz [arcsec]',
+                ]
+                if ('d_therm_x [µm]' in tmp.columns and
+                        pd.to_numeric(tmp['d_therm_x [µm]'], errors='coerce').isna().all()):
+                    try:
+                        import openpyxl as _opxl_th
+                        import re as _re_th
+                        _wb_th = _opxl_th.load_workbook(path, data_only=False)
+                        _ws_th = _wb_th['Thermal']
+                        _hdr_idx = {cell.value: cell.column for cell in _ws_th[1] if cell.value}
+                        from openpyxl.utils import column_index_from_string as _col2idx
+                        for _fc in _primary_therm_cols:
+                            if _fc not in _hdr_idx:
+                                continue
+                            _formula = _ws_th.cell(2, _hdr_idx[_fc]).value
+                            _m = _re_th.match(r'^=([A-Z]+)\d+$', str(_formula or ''))
+                            if _m:
+                                _ref_hdr = _ws_th.cell(1, _col2idx(_m.group(1))).value
+                                if _ref_hdr and _ref_hdr in tmp.columns:
+                                    tmp[_fc] = pd.to_numeric(tmp[_ref_hdr], errors='coerce')
+                    except Exception:
+                        pass
                 for c in ['d_therm_x [µm]', 'd_therm_y [µm]', 'd_therm_z [µm]', 'd_therm_rotz [arcsec]', 'd_therm_rotx [arcsec]', 'd_therm_roty [arcsec]']:
                     if c in tmp.columns:
                         tmp[c] = pd.to_numeric(tmp[c], errors='coerce').fillna(0.0)
@@ -3033,6 +3060,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         pass
     
     # Apply deltas to m_rad and m_azi, and rotz effect to m_azi (deltas are per position)
+    # _bd_map accumulates per-MM centroid breakdown contributions while we loop.
+    _bd_map: dict = {}
     for idx, row in df.iterrows():
         mm_num = row['MM #']
         pos = mm_to_pos.get(int(mm_num))
@@ -3059,7 +3088,47 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             r_MM = mm_config_map[mm_num].get('r_MM', 0)
             d_rotz_rad = np.radians(d_rotz_total_arcsec / 3600.0)  # arcsec -> degrees -> radians
             new_m_azi += r_MM * d_rotz_rad  # Both in meters
-        
+
+        # --- Accumulate breakdown: alignment trans/rotz and all-source rotz ---
+        if mm_num in mm_config_map:
+            _cfg_bd = mm_config_map[mm_num]
+            _x_bd = _cfg_bd['x_MM']; _y_bd = _cfg_bd['y_MM']
+            _r_bd = _cfg_bd.get('r_MM', float(np.hypot(_x_bd, _y_bd)))
+            if _r_bd == 0:
+                _r_bd = 1e-12
+            _ux_bd = _x_bd / _r_bd;  _uy_bd = _y_bd / _r_bd   # radial
+            _ax_bd = -_y_bd / _r_bd; _ay_bd = _x_bd / _r_bd   # azimuthal
+            _b = _bd_map.setdefault(mm_num, {
+                'MM #': mm_num, 'Position #': pos if pos is not None else '',
+                '_ux': _ux_bd, '_uy': _uy_bd, '_ax': _ax_bd, '_ay': _ay_bd,
+                'mux_align_trans': 0.0, 'muy_align_trans': 0.0,
+                'mux_align_rotz':  0.0, 'muy_align_rotz':  0.0,
+                'mux_align_z':     0.0, 'muy_align_z':     0.0,
+                'mux_grav_trans':  0.0, 'muy_grav_trans':  0.0,
+                'mux_grav_rotz':   0.0, 'muy_grav_rotz':   0.0,
+                'mux_grav_z':      0.0, 'muy_grav_z':      0.0,
+                'mux_therm_trans': 0.0, 'muy_therm_trans': 0.0,
+                'mux_therm_rotz':  0.0, 'muy_therm_rotz':  0.0,
+                'mux_therm_z':     0.0, 'muy_therm_z':     0.0,
+                'mux_extra_z':     0.0, 'muy_extra_z':     0.0,
+            })
+            if pos is not None and pos in alignment_by_pos:
+                _al_bd = alignment_by_pos[pos]
+                _dr = _al_bd.get('d_align_rad', 0.0); _da = _al_bd.get('d_align_azi', 0.0)
+                _b['mux_align_trans'] = _ux_bd * _dr + _ax_bd * _da
+                _b['muy_align_trans'] = _uy_bd * _dr + _ay_bd * _da
+                _drot_m = float(np.radians(_al_bd.get('d_align_rotz', 0.0) / 3600.0)) * _r_bd
+                _b['mux_align_rotz'] = _ax_bd * _drot_m
+                _b['muy_align_rotz'] = _ay_bd * _drot_m
+            if pos is not None and pos in gravity_by_pos:
+                _drot_m = float(np.radians(gravity_by_pos[pos].get('d_grav_rotz', 0.0) / 3600.0)) * _r_bd
+                _b['mux_grav_rotz'] = _ax_bd * _drot_m
+                _b['muy_grav_rotz'] = _ay_bd * _drot_m
+            if pos is not None and pos in thermal_by_pos:
+                _drot_m = float(np.radians(thermal_by_pos[pos].get('d_therm_rotz', 0.0) / 3600.0)) * _r_bd
+                _b['mux_therm_rotz'] = _ax_bd * _drot_m
+                _b['muy_therm_rotz'] = _ay_bd * _drot_m
+
         df.at[idx, 'm_rad'] = new_m_rad
         df.at[idx, 'm_azi'] = new_m_azi
     
@@ -3119,6 +3188,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             new_mux += gravity_by_pos[pos]['d_grav_x']
             new_muy += gravity_by_pos[pos]['d_grav_y']
             d_grav_z = gravity_by_pos[pos]['d_grav_z']
+            if mm_num in _bd_map:
+                _bd_map[mm_num]['mux_grav_trans'] = gravity_by_pos[pos]['d_grav_x']
+                _bd_map[mm_num]['muy_grav_trans'] = gravity_by_pos[pos]['d_grav_y']
         
         # Get thermal d_z
         d_therm_z = 0
@@ -3126,6 +3198,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             new_mux += thermal_by_pos[pos]['d_therm_x']
             new_muy += thermal_by_pos[pos]['d_therm_y']
             d_therm_z = thermal_by_pos[pos]['d_therm_z']
+            if mm_num in _bd_map:
+                _bd_map[mm_num]['mux_therm_trans'] = thermal_by_pos[pos]['d_therm_x']
+                _bd_map[mm_num]['muy_therm_trans'] = thermal_by_pos[pos]['d_therm_y']
         
         # Get extra d_z (defocus, etc.)
         d_extra_z = 0
@@ -3147,6 +3222,18 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 dm_y = d_z_total * y_MM / denominator
                 new_mux += dm_x
                 new_muy += dm_y
+
+            # Accumulate per-source z-projection breakdown
+            if mm_num in _bd_map and denominator != 0:
+                _b = _bd_map[mm_num]
+                _b['mux_align_z']  = d_align_z  * x_MM / denominator
+                _b['muy_align_z']  = d_align_z  * y_MM / denominator
+                _b['mux_grav_z']   = d_grav_z   * x_MM / denominator
+                _b['muy_grav_z']   = d_grav_z   * y_MM / denominator
+                _b['mux_therm_z']  = d_therm_z  * x_MM / denominator
+                _b['muy_therm_z']  = d_therm_z  * y_MM / denominator
+                _b['mux_extra_z']  = d_extra_z  * x_MM / denominator
+                _b['muy_extra_z']  = d_extra_z  * y_MM / denominator
         
         # Apply defocusing (dz) PSF shape adjustment.
         # Physical model: at best focus the PSF 'geometric size' is 6·sigma_initial.
@@ -3173,7 +3260,58 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # Update the dataframe
         df.at[idx, 'mux'] = new_mux
         df.at[idx, 'muy'] = new_muy
-    
+
+    # --- Build per-MM centroid breakdown dataframe from accumulated _bd_map ---
+    _bd_rows = []
+    for _bd_idx, _bd_row in df.iterrows():
+        _mm = _bd_row['MM #']
+        _b = _bd_map.get(_mm, {})
+        _bd_rows.append({
+            'MM #':                    _mm,
+            'Position #':              _b.get('Position #', ''),
+            'mux_align_trans [um]':    _b.get('mux_align_trans', 0.0) * 1e6,
+            'muy_align_trans [um]':    _b.get('muy_align_trans', 0.0) * 1e6,
+            'mux_align_rotz [um]':     _b.get('mux_align_rotz',  0.0) * 1e6,
+            'muy_align_rotz [um]':     _b.get('muy_align_rotz',  0.0) * 1e6,
+            'mux_align_z [um]':        _b.get('mux_align_z',     0.0) * 1e6,
+            'muy_align_z [um]':        _b.get('muy_align_z',     0.0) * 1e6,
+            'mux_grav_trans [um]':     _b.get('mux_grav_trans',  0.0) * 1e6,
+            'muy_grav_trans [um]':     _b.get('muy_grav_trans',  0.0) * 1e6,
+            'mux_grav_rotz [um]':      _b.get('mux_grav_rotz',   0.0) * 1e6,
+            'muy_grav_rotz [um]':      _b.get('muy_grav_rotz',   0.0) * 1e6,
+            'mux_grav_z [um]':         _b.get('mux_grav_z',      0.0) * 1e6,
+            'muy_grav_z [um]':         _b.get('muy_grav_z',      0.0) * 1e6,
+            'mux_therm_trans [um]':    _b.get('mux_therm_trans', 0.0) * 1e6,
+            'muy_therm_trans [um]':    _b.get('muy_therm_trans', 0.0) * 1e6,
+            'mux_therm_rotz [um]':     _b.get('mux_therm_rotz',  0.0) * 1e6,
+            'muy_therm_rotz [um]':     _b.get('muy_therm_rotz',  0.0) * 1e6,
+            'mux_therm_z [um]':        _b.get('mux_therm_z',     0.0) * 1e6,
+            'muy_therm_z [um]':        _b.get('muy_therm_z',     0.0) * 1e6,
+            'mux_extra_z [um]':        _b.get('mux_extra_z',     0.0) * 1e6,
+            'muy_extra_z [um]':        _b.get('muy_extra_z',     0.0) * 1e6,
+            'mux_total [um]':          float(_bd_row['mux']) * 1e6,
+            'muy_total [um]':          float(_bd_row['muy']) * 1e6,
+        })
+    try:
+        _centroid_breakdown_df = pd.DataFrame(_bd_rows)
+        # Write breakdown directly into the input workbook as an additional sheet
+        try:
+            import openpyxl as _opxl
+            _BDSHEET = 'Centroid_breakdown'
+            _wb_bd = _opxl.load_workbook(path)
+            if _BDSHEET in _wb_bd.sheetnames:
+                del _wb_bd[_BDSHEET]
+            _ws_bd = _wb_bd.create_sheet(_BDSHEET)
+            _ws_bd.append(list(_centroid_breakdown_df.columns))
+            for _, _brow in _centroid_breakdown_df.iterrows():
+                _ws_bd.append([round(v, 6) if isinstance(v, float) else v for v in _brow])
+            _wb_bd.save(path)
+            print(f'Wrote Centroid_breakdown sheet to {path}')
+        except Exception as _bd_e:
+            print(f'Warning: could not write Centroid_breakdown sheet: {_bd_e}')
+    except Exception:
+        pass
+
     # Ensure HEW degradation sheets are processed even when earlier
     # A_eff-dependent writeback branches are skipped.
     if not hew_deg_per_pos_rad and not hew_deg_per_pos_azi:
@@ -5642,6 +5780,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1_right.set_ylabel('y [arcsec]', rotation=270, va='bottom')
     
     
+    # Mark the center of each MM PSF with a small black cross
+    ax1.plot(mux_arr * 1e6, muy_arr * 1e6, 'k+', markersize=4, markeredgewidth=0.7,
+             linewidth=0, label='MM PSF centres', zorder=5)
     # Mark the minimum with a green cross and coordinates (label updated)
     plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='center for minimum HEW')
     plt.text(center_x*1e6, center_y*1e6, f'({center_x*1e6:.2f}, {center_y*1e6:.2f})', color='green', ha='left', va='bottom')
