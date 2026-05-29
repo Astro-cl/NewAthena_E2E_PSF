@@ -2,24 +2,32 @@
 
 [![Python CI](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml/badge.svg)](https://github.com/Astro-cl/NewAthena_E2E_PSF/actions/workflows/python-ci.yml)
 
-A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of mirror module configurations with support for multiple distribution types, perturbation analysis, and an interactive GUI.
+End-to-end PSF simulation and analysis tool for the NewAthena X-ray telescope mirror module assembly. Reads a configured Excel workbook describing mirror module (MM) PSF parameters, alignment, gravity, and thermal perturbations, then computes the aggregate E2E PSF, encircled energy function, HEW metrics, and radial profile fits.
 
-> **Documentation, comments and Unit tests written by AI.**
+> **Note:** Documentation, comments and unit tests were written with AI assistance.
 
 ---
 
-## Documentation Index
+## Contents
 
-| Document | Description |
-|----------|-------------|
-| [README.md](README.md) | This file — main project overview and guide |
-| [QUICKSTART.txt](QUICKSTART.txt) | Quick start instructions for common tasks |
-| [DOCS_GUI.md](DOCS_GUI.md) | GUI user manual with screenshots and workflows |
-| [DOCS_SUMMARY.md](DOCS_SUMMARY.md) | Summary of core modules and API reference |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Guidelines for contributors |
-| [RELEASE_NOTES.md](RELEASE_NOTES.md) | Full release history and change log |
-| [DOCS_FEATURES_APRIL2026.md](DOCS_FEATURES_APRIL2026.md) | v8 feature documentation (off-axis, defocus, HEW degradation, batch) |
-| [SENSITIVITY_QUICKSTART.txt](SENSITIVITY_QUICKSTART.txt) | Sensitivity pipeline guide |
+- [Installation](#installation)
+- [Workflow Overview](#workflow-overview)
+- [Command-Line Interface](#command-line-interface)
+- [GUI Application](#gui-application)
+- [Distribution Types](#distribution-types)
+- [Perturbation Model](#perturbation-model)
+- [PSF Fitting Pipeline](#psf-fitting-pipeline)
+- [Row-Wise MM Optimizer](#row-wise-mm-optimizer)
+- [Batch Combinations](#batch-combinations)
+- [Sensitivity Pipeline](#sensitivity-pipeline)
+- [Export Packages](#export-packages)
+- [A_eff and Vignetting](#aeff-and-vignetting)
+- [Excel File Format](#excel-file-format)
+- [Directory Structure](#directory-structure)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [Author](#author)
+- [Release History](#release-history)
 
 ---
 
@@ -28,171 +36,122 @@ A comprehensive toolkit for PSF (Point Spread Function) modeling and analysis of
 ### Requirements
 
 - Python 3.8 or higher
-- pip (Python package manager)
+- pip
 
 ### Setup
 
-1. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+# Create and activate a virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-   Required packages:
-   - `numpy`
-   - `pandas`
-   - `matplotlib`
-   - `openpyxl`
+# Install dependencies
+pip install -r requirements.txt
+```
 
-2. **Verify installation**:
-   ```bash
-   python3 --version   # Should be 3.8 or higher
-   python3 -c "import numpy, pandas, matplotlib, openpyxl; print('All dependencies installed successfully')"
-   ```
+Required packages: `numpy`, `pandas`, `matplotlib`, `openpyxl`, `scipy`, `lmfit`.
+
+### Tkinter (GUI)
+
+The GUI uses `tkinter`. This is included with CPython but requires the underlying Tcl/Tk libraries on the host. It is **not** installed via pip.
+
+| Platform | Installation |
+|----------|-------------|
+| **macOS** | Install Python from python.org (bundles Tcl/Tk), or: `brew install tcl-tk` |
+| **Debian/Ubuntu** | `sudo apt install python3-tk` |
+| **Fedora/RHEL** | `sudo dnf install python3-tkinter` |
+| **Arch Linux** | `sudo pacman -S tk` |
+| **Windows** | Use the official installer from python.org |
 
 ---
 
-## Quick Start
+## Workflow Overview
 
-The **core engine** is `main.py` (CLI). It reads a fully-configured Excel workbook and produces PSF plots, metrics, and export packages. The **GUI** (`gui_distributions.py`) is a helper tool whose primary purpose is to build and populate that Excel workbook — once the file is ready, the CLI drives all analysis.
+The typical workflow is:
 
-### Using the Command Line
+1. **GUI** (`gui_distributions.py`) — configure MM PSF parameters and export a populated Excel workbook
+2. **CLI** (`main.py`) — read the workbook and run the full PSF analysis, metric computation, and export
+
+The GUI is a configuration helper; `main.py` is the analysis engine. Once the workbook is prepared, all analysis is driven from the CLI.
+
+```
+GUI (gui_distributions.py)
+  └─ Export Excel workbook  →  CLI (main.py)
+                                  └─ Figures, FITS, export packages
+```
+
+---
+
+## Command-Line Interface
 
 ```bash
-python3 main.py -f Distributions/your_file.xlsx
+python3 main.py -f Distributions/your_file.xlsx [options]
 ```
 
-If `--output` is not passed, an interactive window opens with plot export shortcuts. If `--output` is passed, the figure is saved and the script exits without opening a window.
-
-### Using the GUI — to prepare the input file
-
-The GUI's main role is to configure and export the Excel workbook that `main.py` requires. Once the file is exported, hand it to the CLI for analysis.
-
-1. **Launch the GUI**:
-   ```bash
-   python3 gui_distributions.py
-   ```
-   > **macOS trackpad note:** If you use tap-to-click, button activation is lenient (does not require a perfectly stationary press/release). For dropdowns (comboboxes), clicking anywhere on the field opens the list.
-
-2. **Load your Excel file**:
-   - Click **"Load Excel File"**
-   - Navigate to the `Distributions/` folder
-   - Select an Excel file with MM configuration
-
-3. **Select Mirror Modules**:
-   - In the **MM Configuration** tab, check/uncheck MMs to include
-   - Use row/MM number filters to select specific subsets
-
-4. **Generate PSF Data**:
-   - Go to **PSF → Generate** tab
-   - Choose distribution type (gaussian or pseudo-voigt)
-   - Set parameters for each MM characteristic
-   - Click **"Generate PSF Data"**
-
-5. **Export Results**:
-   - Go to the **Export** tab
-   - Choose export mode (new file or update current)
-   - Click **"Export to Excel"** — this produces the workbook consumed by `main.py`
-   - Files are saved in `Distributions/`
-   - Right-click on plots for: Export PSF / Encircled Energy / FITS / EEF CSV / Fit Parameters CSV
-
----
-
-## Features
-
-### Core Capabilities
-
-- **Multiple Distribution Types**: Gaussian and Pseudo-Voigt (mixture of Gaussian and Lorentzian) with independent azimuthal and radial alpha parameters
-- **Standard PSF Presets**: Load predefined MM_PSF distributions from the Excel preset table with automatic parameter derivation for variable presets
-- **Row-Wise MM Optimizer**: Optimize MM# assignments within rows to minimize HEW while keeping physical locations fixed
-- **Rotation-Invariant HEW**: Polar grid integration eliminates orientation bias
-- **Perturbation Analysis**: Alignment errors, gravity offload effects, and thermal deformations
-- **Off-Axis & Defocus Modeling**: X/Y off-axis decomposition and focus-shift projection to centroid offsets; defocus PSF shape broadening of `sigma_rad`/`sigma_azi` using per-MM physical dimensions (v8/v9)
-- **HEW Degradation + Energy Broadening**: Per-position sigma broadening from lookup tables plus energy-dependent sigma scaling from an energy-factor table (v8)
-- **Interactive MM Selector viewer**: launching `main.py` interactively opens a split window with a collapsible Row → Petal → MM checkbox tree and a live E2E PSF + EEF figure; select any subset of MMs and click *Update E2E & EEF* to re-render instantly (v9)
-- **HEW Contribution Ranking panel**: bottom pane of the MM Selector runs a vectorised leave-one-out analysis on the checked MMs and ranks them by their individual HEW contribution; results shown in a sortable table (rank, MM #, ΔHEW, Row, Petal) coloured red/green for degrading/improving MMs; multi-select with Shift-click and Cmd/Ctrl-click; right-click → *Select in tree* to feed a ranked subset back into the MM tree (v9.2)
-- **HEW Contribution Map**: *Map* button opens a 2-D scatter plot of all MM positions (from `x_MM [m]` / `y_MM [m]` in the MM configuration sheet) colour-coded by ΔHEW (RdYlGn); unranked MMs shown as grey crosses; axis range fixed to the full telescope footprint regardless of selection (v9.2)
-- **Batch Combinations**: Automated multi-configuration runs (off-axis, energy, defocus) with per-config ZIP packaging (v8)
-- **Fast Mode**: Optimized computation with configurable sampling density
-- **Multi-MM Analysis**: Process multiple mirror modules with different distributions
-- **Excel Integration**: Load/save configurations with full parameter support and formula preservation
-- **Interactive GUI**: User-friendly interface for parameter generation and configuration with standard/free preset modes
-- **Figure Export**: High-resolution PNG exports of PSF and encircled energy plots
-
-### Distribution Features
-
-- **Fixed Values**: All mirror modules use identical parameters
-- **Gaussian Distribution**: Parameters vary across MMs using normal distribution N(mu, sigma^2)
-- **Uniform Distribution**: Parameters vary across MMs using uniform distribution U(min, max)
-- **Alpha Parameter Control**: For Pseudo-Voigt, `alpha_rad` and `alpha_azi` can be fixed or vary per MM (automatically clamped to [0, 1])
-- **Standard Presets**: Load predefined PSF distributions from the Excel preset table (MM_PSF sheet, starting at cell **M1**) with automatic variable parameter derivation
-- **Free Mode**: Full manual control over all PSF parameters
-
----
-
-## Usage
-
-The typical workflow is: **GUI → export Excel → CLI**. The GUI builds the input workbook; the CLI reads it and performs all PSF analysis, metric calculation, and export packaging.
-
-### Command-Line Interface (CLI)
-
-```
-python3 main.py [options]
-```
+### Options
 
 | Option | Description |
 |--------|-------------|
 | `-f / --file` | Path to input Excel workbook |
-| `--mode {coarse,fine}` | Computation mode (default: coarse) |
-| `--output PATH` | Save combined figure to PATH and exit (no GUI window) |
+| `--mode {coarse,fine}` | Computation resolution (default: coarse) |
+| `--output PATH` | Save combined figure to PATH and exit without opening a window |
 | `--normalize` | Normalize PSF for plot comparison |
 | `--export-package` | Package figures, FITS, and workbook into `Exports/<TIMESTAMP>/` |
-| `--single-config N` | Only run configuration index N (useful for debugging) |
+| `--single-config N` | Only run configuration index N (for debugging) |
 | `--optimize` | Enable row-wise MM# assignment optimization |
-| `--batch-combinations` | Automated multi-configuration batch run (v8) |
+| `--placement STRATEGY` | Placement strategy seed for optimizer (cross, x_axis, elliptical) |
+| `--batch-combinations FILE` | Automated multi-configuration batch run |
 | `--log-dz` | Log per-MM dz projections |
 
-> **Interactive mode (no `--output` / `--export-package`)**: the script opens the **E2E PSF Viewer – MM Selector** window. Use the tree on the left to choose a subset of mirror modules, then click *Update E2E & EEF* to recompute.
+### Interactive Mode
 
-**Examples:**
+Running without `--output` or `--export-package` opens the **E2E PSF Viewer - MM Selector** window. A collapsible **Row -> Petal -> MM** checkbox tree on the left lets you select any subset of mirror modules; clicking **Update E2E & EEF** re-renders the PSF and encircled energy function for the selection. A **HEW Contribution Ranking** panel at the bottom ranks checked MMs by individual HEW contribution (leave-one-out analysis), displayed in a sortable table with colour coding. A **Map** button shows a 2D scatter plot of MM positions colour-coded by delta-HEW.
+
+**Keyboard / context menu shortcuts (interactive window):**
+- `p` — export PSF PNG to `Figures/`
+- `e` — export EEF PNG to `Figures/`
+- `f` — export PSF to FITS in `CustomPSFs/`
+- `4` or `c` — export EEF CSV to `CustomPSFs/`
+- Right-click on a plot for all of the above plus fit parameters CSV
+
+### Examples
 
 ```bash
-# Quick coarse analysis, interactive window
+# Interactive analysis
 python3 main.py -f Distributions/my_config.xlsx
 
-# Save figure directly, no window
+# Save figure without opening a window
 python3 main.py -f Distributions/my_config.xlsx --output Figures/result.png
 
-# Coarse export package
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode coarse
+# Export package (coarse)
+python3 main.py -f Distributions/my_config.xlsx --export-package --mode coarse
 
-# Fine-resolution export package (compute-intensive)
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
+# Export package (fine resolution, compute-intensive)
+python3 main.py -f Distributions/my_config.xlsx --export-package --mode fine
 
-# Debug: run only config index 1
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --single-config 1
+# Debug: run only configuration index 1
+python3 main.py -f Distributions/my_config.xlsx --export-package --single-config 1
 
-# Batch combinations (off-axis, energy, defocus permutations)
-python3 main.py --file Distributions/YourWorkbook.xlsx --batch-combinations --mode coarse
+# Batch: sweep over off-axis / energy / defocus combinations
+python3 main.py -f Distributions/my_config.xlsx --batch-combinations combinations.xlsx
 
-# Optimize MM# row assignments
+# Optimize MM# assignments within rows
 python3 main.py -f Distributions/my_config.xlsx --optimize
 ```
 
 **Background / unattended runs:**
 
 ```bash
-nohup python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine &
+nohup python3 main.py -f Distributions/my_config.xlsx --export-package --mode fine &
 # or with screen:
 screen -S e2e_run
-python3 main.py --file Distributions/YourWorkbook.xlsx --export-package --mode fine
-# detach with Ctrl-A D
+python3 main.py -f Distributions/my_config.xlsx --export-package --mode fine
+# detach: Ctrl-A D
 ```
 
 ---
 
-### GUI Application — building the input workbook
-
-The GUI's primary purpose is to configure mirror-module PSF parameters and export them into the Excel workbook that `main.py` expects. It is **not** the analysis engine — once the workbook is ready, run the CLI. The GUI also provides a live PSF preview and right-click export shortcuts.
+## GUI Application
 
 Launch with:
 
@@ -200,709 +159,474 @@ Launch with:
 python3 gui_distributions.py
 ```
 
-**Main Window Layout:**
-```
-+------------------------------------------------------------------+
-|  New Athena E2E - PSF Configuration Tool              [_][O][x] |
-+------------------------------------------------------------------+
-|  [Load Excel File]  Current: None                                |
-+------------------------------------------------------------------+
-|  +------------------------------------------------------------+  |
-|  | [MM Configuration] [PSF] [Other Data Types] [Export]      |  |
-|  |                                                            |  |
-|  |                  (Tab content area)                        |  |
-|  |                                                            |  |
-|  +------------------------------------------------------------+  |
-+------------------------------------------------------------------+
-```
+> **macOS trackpad note:** Tap-to-click is supported. Clicking anywhere on a combobox field opens the dropdown list.
 
-#### MM Configuration Tab
+The GUI has four main tabs: **MM Configuration**, **PSF**, **Other Data Types**, and **Export**.
 
-Shows all MMs from your Excel file in a scrollable table.
+### MM Configuration Tab
 
-**Features:**
-- **Checkboxes**: Select which MMs to include in PSF generation
-- **Select/Deselect All**: Toggle all checkboxes at once
-- **Filters**: Show only specific rows or MM numbers; filter combinations (Row# = 1, MM# = All gives all MMs in row 1)
-- **Sortable columns**: Click column headers to sort
-- **Apply Selection**: Must click to confirm selection changes
+Displays all MMs from the loaded Excel file in a scrollable, sortable table.
 
-#### PSF Tab — Standard Mode
+- **Checkboxes** — select which MMs to include in PSF generation
+- **Select/Deselect All** — toggle all at once
+- **Filters** — filter by Row # or MM # (e.g. Row=1 shows all MMs in row 1)
+- **Apply Selection** — must be clicked to confirm changes
 
-Use standard presets for quick, consistent PSF generation.
+### PSF Tab
 
-**Sub-tabs:** `[Select]` `[Generate]`
+Two modes are available via radio buttons: **Standard** and **Free**.
 
-**Steps:**
-1. Ensure **"Standard"** radio button is selected (default)
-2. Click dropdown labelled **"Load from Excel (M1):"** to see available presets
-3. Select desired preset
-4. Click **"Load Standard Distribution"**
-5. Switch to the **Generate** sub-tab to see auto-filled parameters
-6. Click **"Generate PSF Data"**
+#### Standard Mode
 
-**Preset Types:**
-- **Fixed presets** (no %): All MMs get identical values
-- **Variable presets** (with %): Parameters vary per MM using Gaussian distribution; sigma_mean derived from HEW, sigma_sigma = sigma_mean × percent
-- **Pseudo-Voigt presets** (with ratio): Include `alpha_rad`/`alpha_azi` values
+Loads predefined PSF parameter sets from the `MM_PSF` sheet preset table (starting at cell **M1** of the workbook).
 
-In Standard mode, parameters are read-only (grayed out) in the Generate tab. Click **"Generate PSF Data"** to apply to selected MMs.
+1. Select **Standard** radio button
+2. Choose a preset from the dropdown **"Load from Excel (M1):"**
+3. Click **Load Standard Distribution**
+4. Switch to the **Generate** sub-tab and click **Generate PSF Data**
 
-#### PSF Tab — Free Mode
+In Standard mode, parameters are read-only. Preset types:
+- **Fixed presets** — all MMs receive identical values
+- **Variable presets** (contain `%`) — parameters vary per MM using a Gaussian distribution; sigma_mean is derived from HEW, sigma_sigma = sigma_mean x percent
+- **Pseudo-Voigt presets** — include `alpha_rad`/`alpha_azi` values
+
+#### Free Mode
 
 Full manual control over all parameters.
 
-1. In **PSF → Select**, choose **"Free"** radio button
-2. In **PSF → Generate**, select distribution type (gaussian / pseudo-voigt)
-3. For each parameter, choose distribution (fixed / gaussian / uniform) and set values:
-   - **Fixed**: 1 field (value)
-   - **Gaussian**: 2 fields (mean, sigma)
-   - **Uniform**: 2 fields (min, max)
-4. Alpha parameters only appear for pseudo-voigt; values are auto-clamped to [0, 1]
-5. Click **"Generate PSF Data"**
+1. Select **Free** radio button
+2. Choose distribution type (gaussian / pseudo-voigt)
+3. For each parameter, set distribution type and values:
+   - **Fixed**: single value
+   - **Gaussian**: mean and sigma
+   - **Uniform**: min and max
+4. Alpha parameters appear only for pseudo-voigt; values are clamped to [0, 1]
+5. Click **Generate PSF Data**
 
-**Example configurations:**
+#### Preset Table Format (MM_PSF sheet, cell M1)
 
-| Goal | Settings |
-|------|---------|
-| All MMs identical | All parameters: fixed |
-| Varying widths only | m_rad, m_azi: fixed=0; sigma_*: gaussian |
-| Asymmetric pseudo-voigt | Type: pseudo-voigt; alpha_rad: fixed=0.8; alpha_azi: fixed=0.2 |
+Each row defines one preset. Columns (left to right):
 
-#### Other Data Types Tab
+| Column | Content |
+|--------|---------|
+| 1 | Preset name |
+| 2 | `sigma_rad` spec |
+| 3 | `sigma_azi` spec |
+| 4 | `alpha_rad` spec (pseudo-voigt; use `-` or blank for Gaussian) |
+| 5 | `alpha_azi` spec |
 
-Generate additional perturbation data alongside the PSF.
+Spec cell formats: plain number (fixed), `gaussian(mean, sigma)`, `uniform(min, max)`. All values in **arcsec**.
 
-**Available Types:**
-- **MM_alignement**: Manufacturing/assembly errors (dz, dx, dy, rotations)
-- **MM_gravity**: Gravity-induced deformations
-- **MM_thermal**: Thermal expansion/contraction
+**Reference sigma values for common presets:**
 
-Each type uses the same fixed/gaussian/uniform parameter scheme. Click **"Generate Selected Data"** for each type needed. All generated data accumulates for a single export operation.
+| Preset | sigma_rad | sigma_azi |
+|--------|-----------|-----------|
+| Symmetric Gaussian, 4.3 arcsec HEW | 1.826058874 | 1.826058874 |
+| Symmetric Gaussian, 8.0 arcsec HEW | 3.397323952 | 3.397323952 |
+| Asymmetric Gaussian, 4.3 arcsec HEW, ratio 4:1 | 2.963740901 | 0.740935225 |
+| Asymmetric Gaussian, 8.0 arcsec HEW, ratio 7:1 | 5.797205089 | 0.828172156 |
 
-#### Export Tab
+> Note: For asymmetric Gaussians, `sigma = HEW / 2.355` does **not** apply. Use sigma values that reproduce the correct 50% encircled-energy diameter (see table above).
+
+**Common pitfalls:**
+- Reload the workbook in the GUI after editing the preset table in Excel
+- Use dot decimals (`3.397`, not `3,397`)
+- Alpha columns for Gaussian presets should be `-` or blank
+- Do not put units in cells -- values are always in arcsec
+
+### Other Data Types Tab
+
+Generate perturbation data alongside the PSF:
+- **MM_alignment** — manufacturing/assembly errors (dx, dy, dz, rotations)
+- **MM_gravity** — gravity-induced deformations
+- **MM_thermal** — thermal expansion/contraction
+
+Each type uses the same fixed/Gaussian/uniform parameter scheme. Click **Generate Selected Data** for each type needed.
+
+### Export Tab
 
 **Export Modes:**
-- **Update Current File**: Overwrites generated sheets; preserves formulas, formatting, and other sheets; creates a backup before writing.
-- **Create New File**: Saves to a new filename; original file unchanged; auto-suggests name `original_name_new.xlsx`.
+- **Update Current File** — overwrites generated sheets; preserves formulas, formatting, and other sheets; creates a backup before writing
+- **Create New File** — saves to a new filename; auto-suggests `original_name_new.xlsx`
 
-**A_eff export behavior (GUI vs CLI):**
-- GUI export evaluates standard A_eff presets per-MM and writes numeric values into column B of the `A_eff` sheet; column C is cleared.
-- CLI (`main.py`) preserves legacy behavior: adjusted/derived A_eff is written to column C.
+**A_eff export behavior:**
+- GUI export evaluates standard A_eff presets per-MM and writes numeric values into column B of the `A_eff` sheet; column C is cleared
+- CLI (`main.py`) preserves legacy behavior: adjusted/derived A_eff is written to column C
 
----
+**Vignetting export:**
+- The A_eff tab includes an **"Apply vignetting factors when exporting"** checkbox
+- When enabled with a standard preset, the export copies the chosen preset column from the `Vignetting rotazi` and `Vignetting rotrad` sheets into column B
 
-### Keyboard Shortcuts & Plot Context Menu
-
-**GUI navigation:**
-- `Tab` — navigate between fields
-- `Enter` — activate focused button
-- `Esc` — close dialogs
-- Click column headers to sort tables
-- Scroll with mouse wheel or trackpad
-
-**Plot context menu (right-click on plot):**
-- Export PSF PNG (high-resolution)
-- Export Encircled Energy (EEF) PNG
-- Export EEF CSV (saved to `CustomPSFs/E2E_EEF_YYYYMMDD_HHMMSS.csv`)
-- Export Fit Parameters CSV
-- Export FITS (PSF matrix)
-
----
-
-### Row-Wise MM Optimizer
-
-The optimizer finds the best MM# assignment within each physical row of the mirror while keeping MM positions fixed, minimizing the aggregate HEW.
-
-**Placement strategies** (controls how ranked MMs are placed in angular slots):
-
-- `random` — random assignment (baseline)
-- `best_center` — places the best MMs closest to the optical axis center
-- `worst_center` — places the worst MMs at center; best MMs at edges
-- `alternating` — alternates best/worst from center outward
-- `cross` — places the best MMs on a 90-degree cross-like pattern (+-x/+-y) to reduce anisotropy
-- `x_axis` — places best MMs preferentially near the +-x direction, alternating above/below to avoid clustering
-- `elliptical` — within each row assigns best MMs to slots closer to the x-axis and worst to slots closer to y-axis
-
-**Usage:**
+**Precomputing A_eff values (for formula-heavy workbooks):**
 
 ```bash
-python3 main.py -f Distributions/input.xlsx --mode coarse --optimize
+python3 tools/compute_aeff_values.py path/to/your_workbook.xlsx
 ```
 
-Output files:
-- Optimized workbook: `Distributions/my_data_optimised.xlsx`
-- Plots: `Figures/E2E_PSF_*_optimised_*.png`
-
-**Example workflow:**
-
-```bash
-# Baseline analysis
-python3 main.py -f Distributions/my_config.xlsx
-# HEW: 15.2 arcsec (baseline)
-
-# Optimize MM# assignments
-python3 main.py -f Distributions/my_config.xlsx --optimize
-# HEW: 14.1 arcsec (optimized)
-```
-
-When to use: when different MM# have different PSF characteristics, when MMs within a row must stay in that row but can swap positions, and when you want to minimize HEW without redesigning the system.
+This writes numeric A_eff into the `A_eff` sheet so downstream runs do not depend on Excel formula evaluation.
 
 ---
 
 ## Distribution Types
 
-### Gaussian Distribution
+### Gaussian
 
-Standard 2D Gaussian function:
-
-```
-G(x,y) = A * exp(-0.5 * r^2)
-```
-
-where `r^2` is the rotated squared distance from the center.
-
-**Characteristics:**
-- Sharp central peak; exponential decay in tails
-- Suitable for well-aligned, stable systems
-
-### Pseudo-Voigt Distribution
-
-Product of two independent 1D Pseudo-Voigt functions (azimuthal x radial):
+Standard rotated 2D Gaussian:
 
 ```
-PV(azi, rad) = PV_azi(azi) x PV_rad(rad)
-PV_1D(x) = (1-alpha) * G(x) + alpha * L(x)
+dx = x - mu_x;  dy = y - mu_y
+c = cos(theta); s = sin(theta)
+
+a     = c^2/sx^2 + s^2/sy^2
+b     = s*c*(1/sx^2 - 1/sy^2)
+cc    = s^2/sx^2 + c^2/sy^2
+
+G(x,y) = A * coeff * exp(-0.5*(a*dx^2 + 2*b*dx*dy + cc*dy^2))
 ```
 
-where:
-- `alpha` is the mixing parameter in [0, 1]
-- `alpha = 0`: Pure Gaussian (sharp peak)
-- `alpha = 0.5`: Balanced mix
-- `alpha = 1`: Pure Lorentzian (heavy tails)
-- Independent `alpha_rad` and `alpha_azi` for asymmetric PSFs
+where `coeff = 1/(2*pi*sx*sy)` when `normalize=True`, else `1`.
 
-**Alpha values guide:**
+Parameters: `mux`, `muy` (center, m); `sigmax`, `sigmay` (principal sigmas, m); `theta` (rotation, rad); `amplitude`.
 
-```
-alpha = 0.0  Pure Gaussian (sharp core)
-alpha = 0.2  Mostly Gaussian
-alpha = 0.5  Balanced (50/50 mix)
-alpha = 0.7  More tails (scattering effects)
-alpha = 1.0  Pure Lorentzian (heavy tails)
-```
+### Pseudo-Voigt
 
-**Use cases:**
-- **Low alpha (0.0 to 0.3)**: Good alignment, minimal scattering
-- **Medium alpha (0.3 to 0.7)**: Moderate scattering effects
-- **High alpha (0.7 to 1.0)**: Significant scattering, degraded optics
-- **Asymmetric (alpha_rad != alpha_azi)**: Directional scattering or optical aberrations
-
-### Modified Pseudo-Voigt (Aggregated Radial Fit)
-
-The end-to-end fit in `main.py` applies a modified pseudo-Voigt model to the azimuthal-average radial intensity profile of the aggregated PSF. This combines a narrow Gaussian core with a broader wing-shaped term:
+Separable product of two 1D Pseudo-Voigt functions:
 
 ```
-G(r; Gamma_c) = exp(-4 ln2 (r / Gamma_c)^2)
-C(r; Gamma_w) = [1 + a (2r / Gamma_w)^2]^{-beta}    where a = 2^(1/beta) - 1
-mix  = (1 - eta) G(r; Gamma_c) + eta * scalar * C(r; Gamma_w)
-norm = (1 - eta) + eta * scalar
-I(r) = A * mix / norm
+PV(azi, rad) = PV_azi(azi/sigma_azi) * PV_rad(rad/sigma_rad)
+PV_1D(u) = (1 - alpha) * G(u) + alpha * L(u)
 ```
 
-**Parameters:**
+where `G(u) = (1/sqrt(2*pi)) * exp(-u^2/2)` and `L(u) = (1/pi)/(1 + u^2)`.
 
-| Symbol | Name | Description |
-|--------|------|-------------|
-| `A` | Amplitude | Overall intensity scale of the radial profile |
-| `Gamma_c` | `Gamma_core` | Core width (arcsec); controls the narrow Gaussian-like peak |
-| `Gamma_w` | `Gamma_wing` | Wing width (arcsec); controls the broader tail scale |
-| `eta` | eta | Mixing fraction; `eta = 0` gives pure core, `eta = 1` gives wing-dominated |
-| `beta` | beta | Wing shape exponent; `beta = 1` gives Lorentzian-like, larger values give faster-decaying |
-| `scalar` | — | Additional scaling of the wing component before normalization |
+- `alpha = 0` -- pure Gaussian (sharp core)
+- `alpha = 0.5` -- balanced mix
+- `alpha = 1` -- pure Lorentzian (heavy tails)
+- Independent `alpha_rad` and `alpha_azi` are supported for directional asymmetry
 
-Normalization by `(1 - eta) + eta * scalar` preserves the overall amplitude. The fit result is saved as `Figures/E2E_fit.png`.
+### Modified Pseudo-Voigt (Aggregate Radial Fit)
 
----
-
-## Physical Model & Formulas
-
-### Rotated 2D Gaussian
-
-Let `(x, y)` be evaluation coordinates and `(mu_x, mu_y)` the center, with principal standard deviations `sigma_x`, `sigma_y` and rotation angle `theta` (radians):
+Used to fit the azimuthal-average radial intensity profile of the aggregated PSF:
 
 ```
-dx = x - mu_x;    dy = y - mu_y
-c = cos(theta);   s = sin(theta)
-
-a     = c^2/sigma_x^2 + s^2/sigma_y^2
-b     = s*c*(1/sigma_x^2 - 1/sigma_y^2)
-ccoef = s^2/sigma_x^2 + c^2/sigma_y^2
-
-E      = -0.5 * (a*dx^2 + 2*b*dx*dy + ccoef*dy^2)
-Output = A * coeff * exp(E)
+G(r; Gc) = exp(-4*ln2*(r/Gc)^2)
+a         = 2^(1/beta) - 1
+C(r; Gw) = [1 + a*(2r/Gw)^2]^(-beta)
+I(r)      = A * [(1-eta)*G + eta*scalar*C] / [(1-eta) + eta*scalar]
 ```
 
-where `coeff = 1/(2*pi*sigma_x*sigma_y)` if `normalize=True`, else `coeff = 1`.
-
-**Parameters:** `mux`, `muy` (center, meters); `sigmax`, `sigmay` (principal sigmas, meters); `theta` (rotation, radians); `amplitude`; `normalize`.
-
-Rotation conventions are consistent across `gaussian_2d_rotated`, `pseudo_voigt_2d_rotated`, and `eval_psf_matrix_rotated` so analytic and discrete PSF evaluations align.
-
-Public APIs use **meters**; the loader converts arcsec using `1 arcsec = 12 * pi / 180 / 3600` meters.
-
-### Separable Pseudo-Voigt
-
-Each axis uses a 1D Pseudo-Voigt:
-
-```
-PV(u; sigma, alpha) = (1 - alpha) * G(u; sigma) + alpha * L(u; sigma)
-```
-
-where `G(u; sigma) = (1/sqrt(2*pi)) * exp(-u^2/2)` and `L(u; sigma) = (1/pi) * 1/(1 + u^2)`.
-
-The 2D shape is `PV_azi(azi_rot/sigma_azi) * PV_rad(rad_rot/sigma_rad)` evaluated in the rotated principal-axis frame.
-
-- `alpha` may be specified per-axis (`alpha_azi`, `alpha_rad`) or a single `eta` mixing parameter may be used as fallback.
-- `normalize=True` divides by `(sigma_azi * sigma_rad)` to account for the change of variables.
+| Parameter | Description |
+|-----------|-------------|
+| `A` | Amplitude |
+| `Gamma_core` | Core FWHM (arcsec) |
+| `Gamma_wing` | Wing width (arcsec) |
+| `eta` | Core-to-wing mixing fraction |
+| `beta` | Wing shape exponent |
+| `scalar` | Wing amplitude scale |
 
 ### Pearson Type IV
 
-The 1D unnormalized profile is:
+1D profile fitted to the radial aggregate:
 
 ```
-P(u) proportional to (1 + (u/sigma)^2)^{-m} * exp(nu * atan(u/sigma)),    u = x - mu
+P(u) proportional to (1 + (u/sigma)^2)^(-m) * exp(nu * atan(u/sigma)),   u = x - mu
 ```
 
-**Parameters:** `mu` (center, meters); `sigma` (scale, meters); `m` (tail-shape, > 0); `nu` (skew/asymmetry; `nu = 0` gives symmetric).
+Parameters: `mu` (center), `sigma` (scale), `m` (tail shape, `m > 1`), `nu` (skew; `nu = 0` is symmetric). Skipped in coarse mode for performance.
 
-In 2D the implementation uses separable azimuthal/radial forms or a radial-only fit depending on the target data; normalization constants are computed numerically when required.
+### Unit Conventions
 
-> Note: Pearson 4 is skipped in coarse/quick mode for performance.
-
-### King / Moffat-like Profile
-
-Radial form:
-
-```
-K(r) = A * (1 + (r/alpha)^2)^{-beta}
-```
-
-**Parameters:** `A` (amplitude); `alpha` (core scale, meters); `beta` (wing exponent, > 1).
-
-Supports rotationally symmetric 2D evaluation; normalization computed analytically or numerically as appropriate.
+- **Arcsec to meters:** `1 arcsec = 12 * pi / 180 / 3600 m` (focal length f = 12 m)
+- **HEW to sigma (symmetric Gaussian):** `sigma = HEW / (2*sqrt(2*ln2)) approx HEW / 2.3548`
+- All public APIs use **meters**; the loader converts arcsec on read
 
 ---
 
-### Fitting Pipeline
+## Perturbation Model
 
-The end-to-end fitting routine in `main.py` runs automatically after PSF aggregation and proceeds in the stages below.
+Perturbation contributions from four sources are combined additively to compute centroid offsets for each MM:
 
-#### Stage 1 — PSF Aggregation
+| Source | Sheet name | Columns |
+|--------|-----------|---------|
+| Alignment | `Alignment` | `d_align_x/y/z [um]`, `d_align_rotx/y/z [arcsec]` |
+| Gravity offload | `Gravity offload` | `d_grav_x/y/z [um]`, `d_grav_rotx/y/z [arcsec]` |
+| Thermal | `Thermal` | `d_therm_x/y/z [um]`, `d_therm_rotx/y/z [arcsec]` |
+| Extra (off-axis / defocus) | `Extra PSF shifts` | `d_extra_rotx/y [arcsec]`, `d_extra_z [um]` |
 
-Individual mirror-module (MM) PSFs are co-added on a shared 2D Cartesian grid:
+### d_z to Centroid Shift
 
-```
-Z(x, y) = sum_i  w_i * PSF_i(x - mu_xi, y - mu_yi)
-```
-
-where `w_i` is the optional weight and `(mu_xi, mu_yi)` is the centroid of module `i`. All coordinates are in meters; the chosen distribution type (Gaussian, Pseudo-Voigt, …) determines the shape of each `PSF_i`.
-
-#### Stage 2 — Best-focus Minimisation
-
-The optimal focal-plane centre `(cx, cy)` minimising the HEW is located by a discrete gradient search starting from the nominal centre, using 1 μm steps and up to 30 iterations (or 20 in fast mode). The search is seeded from multiple candidate starts.
-
-#### Stage 3 — Rotation-invariant Radial Profile
-
-The azimuthally averaged radial intensity profile `I(r)` is computed by polar-grid sampling centred at `(cx, cy)`:
+Axial displacement `d_z` (sum of all four sources) projects to a focal-plane centroid shift:
 
 ```
-E(r_k) = sum_{j} Z(cx + r_k cos theta_j, cy + r_k sin theta_j) * r_k * Delta_theta
-
-Phi(r)  = cumsum_k  E(r_k) * Delta_r          (cumulative radial energy)
-
-I(r)    = E(r) / (2 * pi * r)                  (mean radial intensity)
+dm_x = d_z_total * x_MM / (f - z_MM)
+dm_y = d_z_total * y_MM / (f - z_MM)
 ```
 
-Default grid: `N_r = 400`, `N_theta = 360`, `r_max = r_centres + 5 * max(sigma)`.
+where `f = 12 m` is the focal length and `x_MM`, `y_MM`, `z_MM` are the MM geometric coordinates from the `MM configuration` sheet.
 
-The profile is adaptive: if less than 99.95 % of the total energy is enclosed in `r_max`, the grid expands up to 3 times (factor 1.5 per iteration) to capture heavy tails.
+### Off-Axis Pointing
 
-#### Stage 4 — Encircled Energy Function (EEF) and HEW
+An off-axis angle specified in arcminutes is decomposed equally into X and Y rotation components and written to the `Extra PSF shifts` sheet:
 
-The normalised Encircled Energy Function is:
+```
+d_extra_rotx [arcsec] = offaxis_arcmin * 60 / sqrt(2)
+d_extra_roty [arcsec] = offaxis_arcmin * 60 / sqrt(2)
+```
+
+These are added to the total rotation in `compute_total_rot_polar()` alongside alignment, gravity, and thermal contributions.
+
+### Defocus
+
+Defocus (in mm) is converted to um and written to `d_extra_z [um]` in the `Extra PSF shifts` sheet, then loaded as metres (* 1e-6) and added to the total `d_z` before projection.
+
+Unit chain: `defocus [mm]` -> `* 1e3` -> `[um]` (sheet) -> `* 1e-6` -> `[m]` (code)
+
+### HEW Sigma Broadening
+
+Two optional sheets provide per-position HEW degradation as a function of off-axis angle and energy:
+
+- `MM HEW degradation rotazi` -- azimuthal HEW degradation, broadens `sigma_azi`
+- `MM HEW degradation rotrad` -- radial HEW degradation, broadens `sigma_rad`
+
+Each sheet has:
+- **Columns A-C**: per-position output (`Position #`, `HEW degradation (arcsec)`, `Selected energy [keV]` in C2)
+- **Columns H-K**: lookup table (`Row #`, `angle [arcmin]`, `energy [keV]`, `HEW [arcsec]`)
+
+Processing: MM rotation angle (arcsec) -> `np.interp` against table -> HEW degradation per position -> sigma broadening in quadrature:
+
+```
+sigma_extra = HEW_deg / (2*sqrt(2*ln2)) * arcsec_to_m
+sigma_new   = sqrt(sigma_base^2 + sigma_extra^2)
+```
+
+Results written to `Extra PSF degradations` sheet (cols B/C: sigma_extra_rad/azi in arcsec) and MM_PSF columns I/J (final degraded sigma).
+
+### Energy-Dependent Sigma Scaling
+
+After angle-based broadening, a multiplicative energy scaling factor is applied from the `MM HEW degradation energy` sheet:
+
+| Column A | Column B |
+|----------|----------|
+| Energy [keV] | Sigma scaling factor |
+
+The factor at the selected energy is linearly interpolated (boundary-clamped) and applied to both `sigma_rad` and `sigma_azi` for all MMs:
+
+```
+sigma_final = sigma_broadened * f(E)
+```
+
+The selected energy comes from cell `A_eff!D2` (propagated to other sheets in batch mode). This step runs even when no HEW degradation sheets are present.
+
+Combined model: sigma_final = sqrt(sigma_base^2 + sigma_extra^2) * f(E)
+
+### Defocus PSF Shape Broadening
+
+Axial defocus also broadens the per-MM PSF shape. The PSF size (6*sigma) grows linearly with dz from its initial value at best focus to the full MM physical dimension at `dz = 12 m`:
+
+```
+sigma_rad_adj = sigma_rad_init + (MM_height - 6*sigma_rad_init) / 12 * dz / 6
+sigma_azi_adj = sigma_azi_init + (MM_width  - 6*sigma_azi_init) / 12 * dz / 6
+```
+
+`MM_height` and `MM_width` are read from columns I and J of the `MM configuration` sheet. `dz` is the signed total axial displacement in metres. Adjusted values are written back to MM_PSF columns I/J.
+
+### VLOOKUP Resolver
+
+When `main.py` saves and reloads a workbook, openpyxl strips cached Excel formula values. If MM_PSF columns D/E (base sigma) contain `VLOOKUP` formulas with no cached values, a Python fallback resolves them: MM# -> Row# (via `MM configuration` column C) -> (sigma_rad, sigma_azi) from the preset table at MM_PSF rows M30:Q45. Resolved values are written back as plain numbers.
+
+---
+
+## PSF Fitting Pipeline
+
+### Stage 1 -- PSF Aggregation
+
+Individual MM PSFs are co-added on a shared 2D Cartesian grid:
+
+```
+Z(x, y) = sum_i w_i * PSF_i(x - mu_xi, y - mu_yi)
+```
+
+where `w_i` is the A_eff weight and `(mu_xi, mu_yi)` is the centroid after perturbation projection.
+
+### Stage 2 -- Best-Focus Minimisation
+
+The focal-plane centre `(cx, cy)` minimising the HEW is found by a discrete gradient search starting from the nominal centre (1 um steps, up to 30 iterations, multiple candidate starts).
+
+### Stage 3 -- Radial Profile
+
+The azimuthally averaged radial intensity is computed on a polar grid centred at `(cx, cy)`:
+
+```
+E(r_k) = sum_j Z(cx + r_k*cos(t_j), cy + r_k*sin(t_j)) * r_k * dt
+Phi(r) = cumsum_k E(r_k) * dr      (cumulative radial energy)
+I(r)   = E(r) / (2*pi*r)           (mean radial intensity)
+```
+
+Default grid: N_r = 400, N_theta = 360. The grid expands automatically (up to 3x, factor 1.5 per iteration) if less than 99.95% of total energy is enclosed.
+
+### Stage 4 -- EEF and HEW
 
 ```
 EEF(d) = Phi(d/2) / Phi(r_max)
 ```
 
-Radii enclosing 50%, 80%, and 90% of the energy are located by local cubic interpolation of the EEF curve. The corresponding diameters are:
+Radii enclosing 50%, 80%, 90% of energy are located by cubic interpolation:
 
-```
-HEW    = 2 * r_50%     (Half-Energy Width)
-EEF-80 = 2 * r_80%
-EEF-90 = 2 * r_90%
-```
+| Metric | Definition |
+|--------|-----------|
+| `HEW` | 2 * r_50% (half-energy diameter, arcsec) |
+| `EEF-80` | 2 * r_80% |
+| `EEF-90` | 2 * r_90% |
 
-All diameters are converted to arcsec using `1 arcsec = 12 * pi / 180 / 3600 m`.
+### Stage 5 -- Modified Pseudo-Voigt Radial Fit
 
-#### Stage 5 — Modified Pseudo-Voigt Radial Fit
+Fitted in two stages:
+1. **Seed**: Gaussian fit to the core region gives initial `A` and `Gamma_core`
+2. **Full fit**: Modified pseudo-Voigt minimising EEF residuals via `scipy.optimize.least_squares` with `soft_l1` loss and 36 multi-start perturbations (+/-12% random offsets)
 
-The intensity profile `I(r)` is fitted in two stages.
-
-**Stage 5a — Core Gaussian (seed estimate):** A simple Gaussian is fitted to the core region (`r <= 2 * Gamma_0`) to give robust initial values for amplitude `A` and core width `Gamma_c`:
-
-```
-I_G(r) = A * exp(-4 ln 2 * (r / Gamma_c)^2) + b
-```
-
-**Stage 5b — Full core + wing fit:** The modified pseudo-Voigt model is fitted to the full profile:
-
-```
-G(r; Gamma_c)  = exp(-4 ln 2 * (r / Gamma_c)^2)
-
-a              = 2^(1/beta) - 1
-C(r; Gamma_w)  = [1 + a * (2r / Gamma_w)^2]^{-beta}
-
-mix            = (1 - eta) * G(r; Gamma_c) + eta * scalar * C(r; Gamma_w)
-norm           = (1 - eta) + eta * scalar
-
-I(r)           = A * mix / norm
-```
-
-The **objective** minimises EEF residuals (not intensity directly):
-
-```
-EEF_model(r) = cumsum(2 pi r I_model(r) dr) / total_energy_model
-
-residual(r)  = EEF_model(r) - EEF_data(r)
-```
-
-The optimisation uses `scipy.optimize.least_squares` with `soft_l1` robust loss and **36 multi-start** perturbations (±12 % random offsets about the seed). Parameter bounds:
+Parameter bounds:
 
 | Parameter | Lower | Upper |
 |-----------|-------|-------|
-| `A` | 0.5 × A₀ | ∞ |
-| `Gamma_c` | 0.2 × Γ_c,0 | 3 × Γ_c,0 |
-| `Gamma_w` | 1.2 × Γ_c,0 | 25 × Γ_c,0 |
+| `A` | 0.5 * A0 | inf |
+| `Gamma_core` | 0.2 * Gc0 | 3 * Gc0 |
+| `Gamma_wing` | 1.2 * Gc0 | 25 * Gc0 |
 | `eta` | 0.05 | 0.50 |
 | `beta` | 1.0 | 5.0 |
 | `scalar` | 0.2 | 12.0 |
 
-Fit results (A, Gamma_core, Gamma_wing, eta, beta, scalar) are exported to CSV via `export_fit_params_csv()`.
+### Stage 6 -- Pearson Type IV Fit
 
-#### Stage 6 — Pearson Type IV Fit
+Fitted with an EEF-objective least-squares using 36 multi-starts (lmfit). Bounds: `m in [1, 8]`, `nu in [-2, 2]`. Skipped in coarse mode.
 
-A Pearson Type IV model (`lmfit.models.Pearson4Model`) is fitted using the same EEF-objective framework:
-
-```
-P(x; mu, sigma, m, nu)  proportional to
-    (1 + ((x - mu)/sigma)^2)^{-m}  *  exp(-nu * atan((x - mu)/sigma))
-```
-
-| Symbol | Parameter | Description |
-|--------|-----------|-------------|
-| `mu` | center | Profile centre (arcsec) |
-| `sigma` | sigma | Scale width (arcsec) |
-| `m` | expon | Tail exponent (m > 1; larger = faster decay) |
-| `nu` | skew | Asymmetry; `nu = 0` gives a symmetric profile |
-
-Bounds: `m ∈ [1, 8]`, `nu ∈ [-2, 2]`. The same 36-start EEF least-squares strategy is applied. A quick intensity-only `lmfit` fit seeds the multi-start. Pearson IV is **skipped in quick/coarse mode**.
-
-#### Stage 7 — FWHM from 1D Marginals
-
-FWHM is extracted from the 1D marginal profiles of the aggregated 2D PSF:
+### Stage 7 -- FWHM from 1D Marginals
 
 ```
-prof_x(x) = integral_y  Z(x, y) dy
-prof_y(y) = integral_x  Z(x, y) dx
-
-FWHM_x = x_{half-max, right} - x_{half-max, left}
-FWHM_y = y_{half-max, right} - y_{half-max, left}
+prof_x(x) = integral Z(x,y) dy
+FWHM_x    = x_right_half_max - x_left_half_max
 ```
 
-#### Stage 8 — Directional HEW from Marginals
+### Stage 8 -- Directional HEW from Marginals
 
-`HEW_x` and `HEW_y` are the minimum-width intervals of each 1D marginal containing exactly 50 % of the total marginal energy:
+Minimum-width interval of each 1D marginal enclosing exactly 50% of total marginal energy.
 
-```
-HEW_x = min{ |b - a| : integral_a^b prof_x(x) dx >= 0.5 * integral prof_x dx }
-```
-
-and equivalently for `HEW_y`.
-
-#### Output Metrics Summary
+### Output Metrics
 
 | Metric | Description |
 |--------|-------------|
-| `HEW` | Half-Energy Width diameter (arcsec), rotation-invariant |
-| `HEW @(0,0)` | HEW at the focal-plane origin |
-| `EEF-80` | Diameter enclosing 80 % of energy (arcsec) |
-| `EEF-90` | Diameter enclosing 90 % of energy (arcsec) |
-| `FWHM_x` / `FWHM_y` | Half-maximum width of each marginal (arcsec) |
+| `HEW` | Half-energy diameter (arcsec), rotation-invariant |
+| `EEF-80` / `EEF-90` | Diameters enclosing 80%/90% of energy (arcsec) |
+| `FWHM_x` / `FWHM_y` | Half-maximum widths from 1D marginals (arcsec) |
 | `HEW_x` / `HEW_y` | Marginal half-energy widths (arcsec) |
-| `Gamma_core` | Modified PV core FWHM parameter, arcsec |
-| `Gamma_wing` | Modified PV wing width parameter, arcsec |
-| `eta` | PV core-to-wing mixing fraction |
-| `beta` | PV wing shape exponent |
-| `scalar` | PV wing amplitude scale |
+| `Gamma_core` / `Gamma_wing` | Modified PV core and wing FWHM parameters (arcsec) |
+| `eta` / `beta` / `scalar` | Modified PV mixing and shape parameters |
 
 ---
 
-### Perturbation Model
+## Row-Wise MM Optimizer
 
-#### d_z to Centroid Shift Projection
-
-An axial displacement `d_z` of a mirror module produces a centroid shift in the focal plane via:
-
-```
-Delta = d_z * x_MM / (f - z_MM)
-```
-
-where `f = 12 m` is the focal length and `x_MM`, `z_MM` are the mirror module coordinates.
-This projection is applied to alignment, gravity, thermal, and defocus perturbations.
-
-#### Off-Axis Decomposition (v8)
-
-Off-axis pointing is decomposed into equal X and Y rotation components:
-
-```
-off_x = off_axis_deg * 60 / sqrt(2)   [arcsec]
-off_y = off_axis_deg * 60 / sqrt(2)   [arcsec]
-```
-
-These are written to a dedicated **"Extra PSF shifts"** sheet and applied additively in `compute_total_rot_polar()`.
-
-Defocus is written as `d_extra_z [um]` to the same sheet (mm * 1e3 gives um), then projected to centroid shifts via the d_z formula above.
-
-#### Defocusing PSF Shape Broadening (v9)
-
-In addition to the centroid shift, axial defocus broadens the per-MM PSF shape.
-
-**Physical model:** At best focus (`dz = 0`) the PSF geometric size is assumed to be `6 × sigma_initial`. The PSF size grows linearly with `dz` until, at `dz = 12 m` (the telescope focal length), it fills the full physical dimension of the mirror module (`MM_height` or `MM_width`). Converting the resulting geometric size back to a Gaussian sigma (dividing by 6) gives:
-
-```
-PSF_size_rad(dz) = 6·sigma_rad_initial + (MM_height - 6·sigma_rad_initial) / 12 · dz
-PSF_size_azi(dz) = 6·sigma_azi_initial + (MM_width  - 6·sigma_azi_initial) / 12 · dz
-
-sigma_rad_adjusted = sigma_rad_initial + (MM_height - 6·sigma_rad_initial) / 12 · dz / 6
-sigma_azi_adjusted = sigma_azi_initial + (MM_width  - 6·sigma_azi_initial) / 12 · dz / 6
-```
-
-Where:
-- `sigma_rad_initial`, `sigma_azi_initial` — initial spread values in metres (from MM_PSF columns I/J)
-- `MM_height` — read from **column I** of the `MM configuration` sheet (metres)
-- `MM_width` — read from **column J** of the `MM configuration` sheet (metres)
-- `dz` — signed total axial displacement in metres: `d_align_z + d_grav_z + d_therm_z + d_extra_z`, where `d_extra_z` comes from the **"Extra PSF shifts"** sheet (column `d_extra_z [µm]`, converted to metres)
-
-The adjusted values are written back to MM_PSF columns I/J (converted to arcsec). If columns I/J are absent from the `MM configuration` sheet the broadening step is silently skipped for the affected MMs.
-
-#### HEW Sigma Broadening (v8)
-
-Per-position HEW degradation is computed from lookup tables (Row #, angle, energy gives HEW arcsec) by interpolation. The broadened sigma is:
-
-```
-sigma_new = sqrt(sigma_base^2 + (HEW / (2*sqrt(2*ln(2))))^2)
-```
-
-Results are written to the **"Extra PSF degradations"** sheet (`sigma_extra`) and MM_PSF columns I/J (degraded sigma).
-
-#### Energy-Dependent Broadening (v8)
-
-After angle-based HEW broadening, an energy scaling factor is applied to both `sigma_rad` and `sigma_azi`.
-
-The factor is read from the **"MM HEW degradation energy"** sheet:
-- Column A: energy (keV)
-- Column B: sigma scaling factor
-
-At runtime, the selected energy is taken from `A_eff!D2` (and propagated to related sheets in batch mode), then the scaling factor is linearly interpolated:
-
-```
-f(E) = interp(E_sel, energies, factors)
-sigma_final = sigma_broadened * f(E)
-```
-
-Combined with the angle-based term, the full model is:
-
-$$
-\sigma_{\text{final}} = \sqrt{\sigma_{\text{base}}^2 + \sigma_{\text{extra}}^2} \times f(E)
-$$
-
-Notes:
-- The reference factor at 1 keV is typically 1.0 (no additional scaling).
-- `np.interp` boundary behavior is used, so values outside the table range are clamped to the nearest edge factor.
-- MM_PSF columns I/J store the final sigma values used by PSF aggregation (after broadening and energy scaling).
-
-### Unit Conventions
-
-- **Arcsec to meters:** `1 arcsec = 12 * pi / 180 / 3600 m`  
-  (chosen to match the NewAthena optical geometry; focal length `f = 12 m`)
-- **HEW to sigma (symmetric Gaussian):** `sigma = HEW / (2*sqrt(2*ln(2))) ~ HEW / 2.3548`
-- **Asymmetric Gaussian:** For an elliptical 2D Gaussian the 50% encircled-energy diameter depends on both `sigma_rad` and `sigma_azi`; there is no closed-form `sigma = HEW/2.355` mapping. Preset table values should already encode the encircled-energy sigma.
-
-**Reference sigma values (arcsec) for common presets:**
-
-| Preset | sigma_rad | sigma_azi |
-|--------|-----------|-----------|
-| Symmetric Gaussian, 4.3 arcsec HEW | 1.826058874 | 1.826058874 |
-| Symmetric Gaussian, 8 arcsec HEW | 3.397323952 | 3.397323952 |
-| Asymmetric Gaussian, 4.3 arcsec HEW, ratio 4:1 | 2.963740901 | 0.740935225 |
-| Asymmetric Gaussian, 8 arcsec HEW, ratio 7:1 | 5.797205089 | 0.828172156 |
-
----
-
-## User Manual
-
-### Standard MM_PSF Presets
-
-The GUI loads predefined distributions from the Excel preset table in the MM_PSF sheet, starting at cell **M1**. This is the source of truth for the "Standard" preset dropdown.
-
-In **Standard mode** the GUI:
-- Reads the preset table from the loaded Excel file
-- Populates `sigma_rad` / `sigma_azi` (and pseudo-voigt `alpha_*`) controls from that row
-- Forces `m_rad` and `m_azi` to **fixed 0** (the standard table does not define them)
-
-In **Free mode**, all parameters are under full manual control.
-
-#### Preset Table Structure (MM_PSF sheet, cell M1)
-
-Columns (left to right):
-1. Preset Name (text)
-2. `sigma_rad` spec
-3. `sigma_azi` spec
-4. `alpha_rad` spec (pseudo-voigt only; use `-` or blank otherwise)
-5. `alpha_azi` spec (pseudo-voigt only; use `-` or blank otherwise)
-
-Each spec cell can be:
-- A plain number — interpreted as **fixed**, e.g. `3.397323952`
-- A Gaussian spec: `gaussian(mean, sigma)`, e.g. `gaussian(3.397, 10%*3.397)`
-- A Uniform spec: `uniform(min, max)`, e.g. `uniform(3.0, 4.0)`
-
-> All values are in **arcsec**.
-
-#### Common Pitfalls
-
-- **You must reload the workbook** in the GUI after editing the preset table in Excel.
-- **Don't leave spec cells blank**: blank `sigma_rad`/`sigma_azi` may trigger fallback behavior.
-- **Use dot decimals**: write `3.397`, not `3,397`.
-- **Alpha columns for Gaussians**: use `-` or leave blank; alpha values are only applied for pseudo-voigt.
-- **Asymmetric Gaussian HEW is not sigma = HEW/2.355**: provide sigma values that match the 50% encircled-energy diameter (see reference table above).
-- **If a pseudo-voigt preset has no alpha**: check that the preset name includes "pseudo-voigt" or "voigt" so it is classified correctly.
-
-#### Adding Custom Presets
-
-1. Open your Excel file in `Distributions/`
-2. Locate the preset table (MM_PSF sheet, starting at cell M1)
-3. Add/edit rows with the desired numeric/spec values
-4. Save the Excel file
-5. In the GUI, reload that file (the dropdown is refreshed on load)
-
----
-
-### Batch Combinations (CLI, v8)
-
-The `--batch-combinations` flag runs automated multi-configuration PSF analysis, sweeping over off-axis angles, X-ray energies, and defocus values.
+Finds the best MM# assignment within each physical row of the mirror, keeping MM positions fixed, to minimise aggregate HEW.
 
 ```bash
-python3 main.py --file Distributions/YourWorkbook.xlsx --batch-combinations --mode coarse
+python3 main.py -f Distributions/input.xlsx --optimize
 ```
 
-**What it does:**
-- Generates all permutations of off-axis, energy, and defocus parameters defined in the workbook
-- For each combination, writes the relevant perturbations to the workbook
-- Runs a full PSF analysis per combination (headless, no GUI blocking)
-- Packages each result into a ZIP under `Exports/`
-- Writes an aggregated results workbook at the end
+Outputs: `Distributions/my_data_optimised.xlsx` and `Figures/E2E_PSF_*_optimised_*.png`.
 
-For full details see [DOCS_FEATURES_APRIL2026.md](DOCS_FEATURES_APRIL2026.md).
+**Placement strategies:**
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `elliptical` | Best MMs near x-axis slots, worst near y-axis (default seed) |
+| `cross` | Best MMs on +/-x/y cross pattern to reduce anisotropy |
+| `x_axis` | Best MMs near +/-x, alternating above/below to avoid clustering |
+| `best_center` | Best MMs closest to optical axis |
+| `worst_center` | Worst MMs at centre, best at edges |
+| `alternating` | Alternates best/worst from centre outward |
+| `random` | Random baseline |
+
+Use `--placement STRATEGY` to apply a placement independently of `--optimize`.
 
 ---
 
-### Export Packages
+## Batch Combinations
 
-Packages are written to `Exports/<TIMESTAMP>/` and include:
+The `--batch-combinations` flag automates multi-configuration runs over off-axis angles, energies, and defocus values defined in a spreadsheet.
+
+```bash
+python3 main.py -f Distributions/base.xlsx --batch-combinations combinations.xlsx --mode coarse
+```
+
+### Combinations File Format
+
+One configuration per row:
+
+| Column | Content | Unit |
+|--------|---------|------|
+| A | Row ID | -- |
+| B | Configuration name (used in output naming) | -- |
+| C | Off-axis angle | arcmin |
+| D | Energy | keV |
+| E | Defocus | mm |
+| F | Run mode (`coarse` / `fine`, optional) | -- |
+
+### Per-Configuration Processing
+
+For each row the tool:
+1. Copies the base workbook with prefix-based naming
+2. Writes off-axis rotations and defocus to the `Extra PSF shifts` sheet
+3. Sets the energy in vignetting and HEW degradation sheets
+4. Runs the full PSF analysis pipeline in headless mode (matplotlib Agg backend)
+5. Creates an export package and ZIP under `Exports/Export_<input>_<timestamp>/`
+
+After all configurations, an aggregated workbook is written containing per-configuration HEW, EEF, A_eff loss, and fit parameters.
+
+---
+
+## Sensitivity Pipeline
+
+A sweep runner under `sensitivity/` generates per-combination input workbooks and optionally executes them.
+
+```bash
+# Generate input workbooks only
+python3 sensitivity/sensitivity_run.py --generate-only --baseline Distributions/TestDistribution.xlsx
+
+# Generate and run all jobs
+python3 sensitivity/sensitivity_run.py --baseline Distributions/TestDistribution.xlsx
+```
+
+- Generated workbooks are written to `sensitivity/input/` (newest 100 kept)
+- Per-job partial results are appended to `sensitivity/results/sensitivity_run_partial.csv` as jobs complete
+- Final consolidated results are written to `sensitivity/results/sensitivity_run_results.xlsx`
+
+**MM_PSF edits during sensitivity runs:**
+- Only per-MM input columns B-H are modified; right-hand template columns are preserved
+- For non-pseudo-voigt presets, `alpha_rad` and `alpha_azi` are set to `-`
+- When a combo sets `Alignment=0`, `Gravity=0`, or `Thermal=0`, the corresponding perturbation columns B-G in the respective sheet are zeroed
+
+---
+
+## Export Packages
+
+Packages written to `Exports/<TIMESTAMP>/` include:
 - Packaged workbook (authoritative source for `Aeff_sum_orig` / `Aeff_sum_mod`)
 - Figures in `Figures/`
 - FITS files in `CustomPSFs/`
 - Aggregated Excel `E2E_EEF_and_fitparams_*.xlsx`
 
-**Verification after package export:**
-- PNGs in `Figures/` (coarse = 320x320 px, fine = 2062x2062 px)
-- FITS in `CustomPSFs/` (grid dimensions = requested pixel size)
+**Verification after export:**
+- PNGs: coarse = 320x320 px, fine = 2062x2062 px
+- FITS dimensions match requested pixel size
 - Aggregated Excel present in the package
-
-The CLI prefers the workbook copied into the package when computing `Aeff_sum_orig` and `Aeff_sum_mod`.
-
----
-
-### A_eff Handling
-
-- GUI export evaluates standard A_eff presets per-MM and writes numeric values to column B of the `A_eff` sheet; column C is cleared.
-- CLI preserves legacy behavior: adjusted/derived A_eff is recorded in column C.
-- When a preset name contains an energy token (e.g. `1 keV`), the GUI parses that energy and writes it into cell `C2` of the vignetting sheets on export.
-- Vignetting application can be enabled via the **"Apply vignetting factors when exporting"** checkbox in the A_eff tab.
-- **Percent-variable presets** (e.g. `Variable 10% 1 keV`) are synthesized to explicit gaussian forms internally so the evaluator can sample correctly.
-
-#### Vignetting
-
-- Two-column format (delta to factor) and per-position column formats are both supported.
-- Vignetting application runs after A_eff initialization with explicit bookkeeping: `aeff_base`, `aeff_adjusted`, and `aeff_vig_factor`.
-- MM300 receives the combined vignette factor when multiple factors apply (e.g. 0.1 x 0.1 = 0.01).
-
----
-
-### Formula Evaluation
-
-Many input workbooks use Excel formulas (VLOOKUP/XLOOKUP or textual preset expressions). When Excel cached numeric values are missing, an internal Python evaluator resolves common patterns.
-
-**VLOOKUP resolver (v8):** A Python-based fallback resolves MM_PSF D/E formula values when openpyxl strips cached values; also persists base sigma as plain numbers for round-trip stability.
-
-**Precomputing A_eff values:**
-
-```bash
-python3 tools/compute_aeff_values.py
-```
-
-This writes numeric A_eff into the `A_eff` sheet so downstream runs do not depend on formula evaluation.
-
----
-
-### Sensitivity Pipeline
-
-The repository includes a sensitivity-run template and driver under `sensitivity/`.
-
-- **Per-combo input workbooks** are written to `sensitivity/input/` as `TIMESTAMP_index_<combo>.xlsx`. The runner prunes that folder to keep only the newest 100 files.
-- **MM_PSF edits:** when writing/expanding the `MM_PSF` sheet, only per-MM input columns `B..H` are modified. Columns to the right (template/tail columns) are preserved.
-- **Alpha masking:** for non-pseudo-voigt presets (Gaussian/Uniform), `alpha_rad` and `alpha_azi` are set to `-` (columns G and H).
-- **Alignment / Thermal / Gravity zeroing:** when a combo requests `Alignment=0`, the runner zeros `d_align_rotazi` and `d_align_rotrad` in the `Alignment` sheet (columns B..G only). Similarly for `Thermal=0` and `Gravity offload=0`.
-- **Partial results:** a per-job summary row is appended to `sensitivity/results/sensitivity_run_partial.csv` as jobs complete. Final consolidated results are written to `sensitivity/results/sensitivity_run_results.xlsx`.
-
-**Run modes:**
-
-```bash
-# Generate input workbooks only (no execution)
-python3 sensitivity/sensitivity_run.py --generate-only --baseline <file>
-
-# Full run (generate inputs + execute all jobs)
-python3 sensitivity/sensitivity_run.py --baseline <file>
-```
-
-For the full guide see [SENSITIVITY_QUICKSTART.txt](SENSITIVITY_QUICKSTART.txt).
-
----
 
 ### Repairing Existing Packages
 
-If you have packages created before recent fixes, use the repair/diagnostic scripts at the repository root:
-
 | Script | Purpose |
 |--------|---------|
-| `.inspect_export.py` | Inspect a package and list mismatches between packaged workbook and recorded aggregated sums |
-| `.diagnose_aeff.py` | Identify formula-only A_eff columns and missing cached values |
-| `.patch_fitparams.py` | Patch per-config `fitparams_aeffloss.xlsx` files inside packages |
+| `.inspect_export.py` | Inspect a package and list mismatches between workbook and aggregated sums |
+| `.diagnose_aeff.py` | Identify formula-only A_eff columns with missing cached values |
+| `.patch_fitparams.py` | Patch per-config `fitparams_aeffloss.xlsx` files inside a package |
 | `.patch_aggregated.py` | Repair aggregated workbook rows that used the wrong A_eff source |
-
-**Example:**
 
 ```bash
 python3 .inspect_export.py Exports/20260416_124558
@@ -912,166 +636,275 @@ python3 .patch_fitparams.py Exports/20260416_124558
 
 ---
 
-### File Formats
+## A_eff and Vignetting
 
-#### Input Excel File Structure
+### A_eff Sheet
 
-Required sheets:
+- Column A: `MM #`
+- Column B: weight (numeric; missing or non-numeric values cause analysis to fail)
 
-**MM configuration:**
-```
-| MM # | Row # | x_MM [m] | y_MM [m] | z_MM [m] | r_MM [m] |
-|------|-------|----------|----------|----------|----------|
-|  1   |   1   |  0.123   |  0.456   |  7.89    |  0.15    |
-```
+**GUI export:** evaluates standard presets per-MM and writes numeric values to column B; clears column C.
+**CLI:** writes adjusted/derived A_eff to column C (legacy behavior preserved).
 
-**MM_PSF** (generated by GUI):
-```
-| MM # | m_rad ["] | m_azi ["] | sigma_rad ["] | sigma_azi ["] | distribution | alpha_rad | alpha_azi |
-|------|-----------|-----------|---------------|---------------|--------------|-----------|----------|
-|  1   |     0     |    5      |     8.2       |     7.8       | pseudo-voigt |   0.77    |   0.29   |
-```
+**Supported A_eff preset expressions:**
+- `J` -- copy value from column letter J
+- `gaussian(J, sigma)` -- sample per-MM around column value
+- `J+gaussian(0, 20%*J)` -- additive Gaussian noise
 
-**Alignment** (optional):
-```
-| Position # | d_align_rad [um] | d_align_azi [um] | d_align_z [um] | d_align_rotz [arcsec] |
-```
+**Percent-variable presets** (e.g. `Variable 10% 1 keV`) are internally synthesized to explicit Gaussian forms for deterministic per-index sampling. Energy tokens like `1 keV` in preset names are parsed and written into cell `C2` of vignetting sheets at export time.
 
-**Gravity offload / Thermal** (optional): same column pattern with `d_grav_*` / `d_therm_*` prefixes.
+### Vignetting
 
-**Axis interpretation:**
-- `x`, `y` — lateral displacements in x and y
-- `z` — axial / focus displacement
-- `rotz` — rotation about the optical axis
-- `rad` — radial direction (positive = outward / higher radius)
-- `azi` — azimuthal direction (positive = clockwise relative to the radial vector)
+Two vignetting sheet formats are supported:
+- **Two-column** (delta -> factor)
+- **Per-position columns**
 
-**Sign conventions:** positive `rotz` rotations introduce positive azimuthal shifts.
+Vignetting is applied after A_eff initialisation with explicit bookkeeping: `aeff_base`, `aeff_adjusted`, `aeff_vig_factor`. All `np.interp()` calls use `abs(rotation_value)` -- tables use non-negative delta values and symmetry is assumed.
 
-#### Output Files
+The GUI's **"Apply vignetting factors when exporting"** checkbox copies the chosen preset column from `Vignetting rotazi` and `Vignetting rotrad` into column B during export.
+
+---
+
+## Excel File Format
+
+### Required Input Sheets
+
+**`MM configuration`**
+
+| Column | Header | Description |
+|--------|--------|-------------|
+| A | `MM #` | Mirror module position number |
+| B | `Row #` | Row assignment |
+| C | `x_MM [m]` | X position (m) |
+| D | `y_MM [m]` | Y position (m) |
+| E | `z_MM [m]` | Z position (m) |
+| F | `r_MM [m]` | Radial position (m) |
+| I | `MM_height [m]` | MM height (used for defocus broadening) |
+| J | `MM_width [m]` | MM width (used for defocus broadening) |
+
+**`MM_PSF`** (generated by GUI)
+
+| Column | Header | Description |
+|--------|--------|-------------|
+| A | `MM #` | Position number |
+| B | `m_rad` | Radial shape parameter |
+| C | `m_azi` | Azimuthal shape parameter |
+| D | `sigma_rad [arcsec]` | Radial sigma (base) |
+| E | `sigma_azi [arcsec]` | Azimuthal sigma (base) |
+| F | `distribution` | `gaussian` or `pseudo-voigt` |
+| G | `alpha_rad` | Radial mixing parameter [0,1] |
+| H | `alpha_azi` | Azimuthal mixing parameter [0,1] |
+| I | `sigma_rad_deg [arcsec]` | Final degraded radial sigma (written by CLI) |
+| J | `sigma_azi_deg [arcsec]` | Final degraded azimuthal sigma (written by CLI) |
+
+**`A_eff`**
+
+| Column | Description |
+|--------|-------------|
+| A | `MM #` |
+| B | Weight (numeric) |
+
+**Optional perturbation sheets:** `Alignment`, `Gravity offload`, `Thermal`, `Extra PSF shifts`, `MM HEW degradation rotazi`, `MM HEW degradation rotrad`, `MM HEW degradation energy`.
+
+### Axis Conventions
+
+- `x`, `y` -- lateral displacements
+- `z` -- axial / focus displacement (positive = towards detector)
+- `rotz` -- rotation about the optical axis (positive introduces positive azimuthal shift)
+- `rad` -- radial direction (positive = outward)
+- `azi` -- azimuthal direction (positive = clockwise relative to radial vector)
+
+### Output Files
 
 | File | Description |
 |------|-------------|
 | `Figures/E2E_PSF_YYYYMMDD_HHMMSS.png` | PSF plot at 300 DPI |
 | `Figures/Encircled_Energy_YYYYMMDD_HHMMSS.png` | EEF plot at 300 DPI |
-| `Figures/E2E_fit.png` | Aggregated radial fit |
-| `CustomPSFs/E2E_EEF_YYYYMMDD_HHMMSS.csv` | EEF CSV |
+| `Figures/E2E_fit.png` | Aggregated radial profile fit |
+| `CustomPSFs/E2E_EEF_YYYYMMDD_HHMMSS.csv` | EEF data as CSV |
 | `CustomPSFs/E2E_aggregated_*.fits` | PSF matrix in FITS format |
 
 ---
 
-### Directory Structure
+## Directory Structure
 
 ```
 NewAthenaE2EPSF/
-├── README.md                      # This file
-├── requirements.txt               # Python dependencies
-├── main.py                        # CLI analyzer and plotter
-├── gui_distributions.py           # Interactive GUI application
-├── distributions_rotated.py       # Core distribution functions
-├── optimize_mm_rows.py            # MM optimizer + placement + Excel writer
-├── Distributions/                 # Excel spreadsheet location
-│   └── TestDistribution.xlsx      # Example file
-├── Figures/                       # Exported plots location
-├── CustomPSFs/                    # FITS and EEF CSV outputs
-├── Exports/                       # Export packages (generated)
-├── sensitivity/                   # Sensitivity pipeline driver and templates
-├── tools/                         # Helper and diagnostic scripts
-└── tests/                         # Unit and integration tests
+├── README.md                        # This file
+├── requirements.txt                 # Python dependencies
+├── main.py                          # CLI analyzer and PSF engine
+├── gui_distributions.py             # Interactive GUI
+├── distributions_rotated.py         # Core distribution functions
+├── optimize_mm_rows.py              # MM optimizer and placement strategies
+├── Distributions/                   # Input Excel workbooks
+├── Figures/                         # Exported plots
+├── CustomPSFs/                      # FITS and EEF CSV outputs
+├── Exports/                         # Export packages
+├── sensitivity/                     # Sensitivity pipeline
+├── tools/                           # Helper and diagnostic scripts
+└── tests/                           # Unit and integration tests
 ```
 
-**Core modules:**
-- `main.py` — CLI entrypoints and Excel I/O helpers. Implements robust readers for `MM_PSF` and `A_eff` tables, spreadsheet-preserving export paths, PSF parameter conversion (arcsec to meters), vignetting application, and headless plot/export options used in CI and batch runs.
-- `gui_distributions.py` — Tkinter GUI for interactive generation and exporting of per-MM distributions. Loads standard presets from the workbook, allows per-data-type distribution editing, previews sampled tables, and performs export with optional vignetting copy.
-- `distributions_rotated.py` — Core distribution functions (Gaussian, Pseudo-Voigt, Pearson4, King).
-- `optimize_mm_rows.py` — MM row optimizer, placement strategies, and Excel write helpers.
+**Core module roles:**
+- `main.py` -- CLI entry points, Excel I/O, perturbation application, PSF aggregation and fitting, export
+- `gui_distributions.py` -- Tkinter GUI for generating and exporting per-MM distribution configurations
+- `distributions_rotated.py` -- Gaussian, Pseudo-Voigt, Pearson4, King distribution functions
+- `optimize_mm_rows.py` -- row-wise MM# optimizer, placement strategies, Excel write helpers
 
 ---
 
-### Troubleshooting
+## Troubleshooting
 
-**GUI won't start:**
+**GUI won't start**
+
 ```bash
 python3 --version            # Must be 3.8+
 pip install -r requirements.txt
+python3 -c "import tkinter"  # Should print nothing if OK
 ```
 
-**File not found errors:**
+If tkinter is missing, install the OS package (see Installation section above).
+
+**File not found errors**
+
+Run from the project root:
+
 ```bash
-cd "/path/to/NewAthenaE2EPSF"
+cd /path/to/NewAthenaE2EPSF
 python3 gui_distributions.py
 ```
 
-**"No MM selected" error:**
-- Go to MM Configuration tab, check at least one MM, click "Apply Selection"
+**"No MM selected" error**
 
-**Parameters don't update after loading a preset:**
-- In Standard mode, switch to the Generate sub-tab after loading the preset
-- In Free mode, ensure you clicked "Generate PSF Data"
+Go to the MM Configuration tab, check at least one MM, and click **Apply Selection**.
 
-**Export fails:**
-- Close the Excel file if it is open in Excel
-- Check file permissions; verify path with `ls -la Distributions/`
+**Parameters don't update after loading a preset**
 
-**Alpha values unexpected:**
-- Values are automatically clamped to [0, 1]
-- Alpha controls are hidden for gaussian distribution type (visible only for pseudo-voigt)
+In Standard mode, switch to the Generate sub-tab after loading. In Free mode, click **Generate PSF Data**.
 
-**Figures not saving:**
+**Export fails**
+
+Close the Excel file if it is open in Excel. Check file permissions with `ls -la Distributions/`.
+
+**Alpha values unexpected**
+
+Values are automatically clamped to [0, 1]. Alpha controls are only visible for pseudo-voigt distribution type.
+
+**Figures not saving**
+
 ```bash
-ls -la Figures/
 mkdir -p Figures
 ```
 
-**Exported package `Aeff_sum_mod` appears incorrect:**
-- Re-run `.inspect_export.py` on the package
-- Check whether the `A_eff` sheet contains formulas without cached values
-- Use `tools/compute_aeff_values.py` or re-export from Excel to populate cached values
+**`Aeff_sum_mod` appears incorrect**
+
+Run `.inspect_export.py` on the package. Check whether the `A_eff` sheet contains uncached formula cells. Use `tools/compute_aeff_values.py` to populate numeric values.
+
+**Thermal perturbations all zero**
+
+This can occur when the `d_therm_*` columns contain Excel formulas without cached values (e.g. `=U2`). The code includes a formula-inspection fallback that resolves the referenced column and uses its numeric data. If thermal data still appears zero, verify the referenced columns in the Thermal sheet contain numeric values.
+
+---
+
+## Contributing
+
+- Run `pytest` before submitting changes
+- Keep changes small and focused; preserve public function signatures where possible
+- Report issues with a short reproduction: commands, stack trace, and a small Excel workbook
+
+**Running tests:**
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+```
+
+**Headless smoke test:**
+
+```bash
+python3 main.py -f Distributions/TestDistribution.xlsx -o /tmp/out.png
+```
 
 ---
 
 ## Author
 
-- **Ivo Ferreira** — primary author and maintainer
-- **Affiliation:** European Space Agency
-- **Contact:** ivo.ferreira@esa.int
-- **ORCID:** https://orcid.org/0000-0002-9501-862X
+**Ivo Ferreira**
+European Space Agency
+ivo.ferreira@esa.int
+ORCID: https://orcid.org/0000-0002-9501-862X
 
 ---
 
 ## Release History
 
-Full release notes are in [RELEASE_NOTES.md](RELEASE_NOTES.md).
-
 ### v9.2 (2026-05-22)
-HEW Contribution Ranking panel and Map added to the interactive MM Selector viewer.
 
-- **Ranking panel** (bottom pane): vectorised leave-one-out analysis ranks all checked MMs by individual HEW contribution in typically < 1 s for the full 600-MM set. Results displayed in a `ttk.Treeview` table with columns Rank / MM # / ΔHEW (″) / Row / Petal; rows coloured red (degrading) or green (improving). Multi-select via Shift-click (range) and Cmd/Ctrl-click (toggle); right-click → *Select in tree* syncs the MM tree checkboxes to the highlighted rows.
-- **HEW Contribution Map**: *Map* button opens a `Toplevel` scatter plot of all MM physical positions read from the `x_MM [m]` / `y_MM [m]` columns of the MM configuration sheet (units: metres). Ranked MMs drawn as colour-coded circles (RdYlGn, symmetric around ΔHEW = 0); unranked MMs drawn as small black crosses. Axis limits fixed to the full MM footprint and do not change with the selection. 98 tests passing.
+- **HEW Contribution Ranking panel** (bottom pane of MM Selector): vectorised leave-one-out analysis ranks all checked MMs by individual HEW contribution in typically < 1 s for the full 600-MM set. Results shown in a sortable table (Rank / MM # / delta-HEW / Row / Petal) coloured red (degrading) or green (improving). Multi-select with Shift-click and Cmd/Ctrl-click; right-click "Select in tree" syncs checkboxes to the highlighted rows.
+- **HEW Contribution Map**: Map button opens a scatter plot of all MM positions colour-coded by delta-HEW (RdYlGn, symmetric around 0); unranked MMs shown as grey crosses; axis limits fixed to the full telescope footprint.
+- Thermal formula-cell resolution fix: if `d_therm_*` columns contain uncached Excel formulas, the referenced TC column is resolved and used instead.
+- 98 tests passing.
 
 ### v9.1 (2026-05-22)
-Vignetting bug-fix patch: `single` and `per_pos` table modes now correctly apply factors in both the row-by-row loop and the final reconcile pass (previously only `per_row_energy` was handled). All `np.interp()` calls in the vignetting path now use `abs(rotation_value)`; tables use non-negative delta values and symmetry is assumed. 98 tests passing (0 failures).
 
-### v9
-Defocusing PSF shape broadening: per-MM `sigma_rad` and `sigma_azi` are adjusted using a linear geometric model — the PSF size (6·sigma) grows linearly with `dz` from best focus to the MM physical dimension at `dz = 12 m` (focal length). Formula: `sigma_adjusted = sigma_initial + (MM_dim − 6·sigma_initial) / 12 × dz / 6`, using `MM_height` (col I) and `MM_width` (col J) from the `MM configuration` sheet. `dz` is signed. Adjusted sigmas written back to MM_PSF cols I/J. 13 new unit tests added (`tests/plots/test_defocus_sigma.py`). Interactive MM Selector viewer (see v9 notes). Full test suite: 98 passed.
+- Vignetting `single` and `per_pos` table modes now correctly apply factors in both the row-by-row loop and the final reconcile pass (previously only `per_row_energy` was handled).
+- All `np.interp()` calls in the vignetting path now use `abs(rotation_value)`; tables use non-negative delta values with symmetry assumed.
+- 98 tests passing.
+
+### v9 (2026-05-22)
+
+- **Interactive MM Selector viewer**: running `main.py` without `--output` or `--export-package` opens a split window with a Row -> Petal -> MM checkbox tree and a live E2E PSF + EEF figure. Select All / None buttons and a partial-row indicator support bulk selection. `--export-package` bypasses the GUI entirely for headless runs.
+- **Defocus PSF shape broadening**: per-MM `sigma_rad`/`sigma_azi` adjusted using a linear geometric model -- PSF size grows linearly with dz from best focus to the MM physical dimension at `dz = 12 m`.
+- `plot_sum()` gains `return_fig` and `figsize` parameters.
+- 98 tests passing (13 new).
 
 ### v8 (2026-04-17)
-Major feature release. Off-axis pointing decomposed into X/Y components; defocus projected to centroid shifts; HEW sigma broadening from per-position lookup tables; Python VLOOKUP resolver for MM_PSF D/E formula values; `--batch-combinations` CLI for automated multi-configuration runs with per-config ZIP packaging and aggregated results workbook; improved A_eff formula evaluation fallback; Pearson4 skipped in coarse mode; preset table shifted from column K to **M** to avoid conflict with new I/J degraded sigma columns. 71 tests pass (20 new integration tests).
+
+- **Off-axis pointing**: angle decomposed into X/Y rotations (`* 60 / sqrt(2)`) and written to the new `Extra PSF shifts` sheet.
+- **Defocus**: written as `d_extra_z [um]` to `Extra PSF shifts`; projected to centroid shift via Z-axis formula.
+- **HEW sigma broadening**: `MM HEW degradation rotazi/rotrad` sheets with per-position angle -> HEW interpolation and quadrature sigma broadening. Results written to `Extra PSF degradations` and MM_PSF I/J.
+- **Energy-dependent sigma scaling**: `MM HEW degradation energy` sheet with energy/factor table applied after HEW broadening.
+- **VLOOKUP resolver**: Python fallback for MM_PSF D/E formula cells; values persisted as plain numbers.
+- **Batch combinations**: `--batch-combinations` CLI for headless multi-configuration runs with per-config ZIP packaging and aggregated results workbook.
+- Preset table shifted from column K to **M** to free I/J columns.
+- Pearson4 skipped in coarse mode.
+- 71 tests passing (20 new).
 
 ### v7 (2026-04-14)
-Repository reorganization and test refactor. Moved utilities to `tools/`, grouped tests by concern under `tests/` subfolders, updated module docstrings. Local test run: 42 passed, 4 warnings.
+
+- Repository reorganisation: tests grouped under `tests/` by concern; utilities moved to `tools/`.
+- Documentation and docstring pass across core modules.
+- 42 tests passing.
 
 ### v6 (2026-04-01)
-GUI polish (macOS combobox click behavior, MM Configuration checkbox reliability). Added `tools/compute_aeff_values.py`. Repo hygiene: removed generated files from repository index, added `.gitignore` entries.
+
+- GUI: improved combobox click behavior on macOS; MM Configuration checkbox toggling improved.
+- Added `tools/compute_aeff_values.py` for caching A_eff numeric columns.
+- Repo hygiene: removed generated artifacts from index; `.gitignore` updates.
 
 ### v5 (2026-02-07)
-GUI A_eff export writes numeric values to column B and clears column C. Percent-variable presets synthesized to gaussian forms. Energy token parsing writes numeric energy to vignetting `C2`. CLI preserves legacy column C behavior.
+
+- GUI A_eff export writes numeric values to column B and clears column C.
+- Percent-variable presets synthesized to explicit Gaussian forms.
+- Preset energy tokens (e.g. `1 keV`) parsed and written to vignetting sheet `C2` at export.
+- CLI preserves legacy column C behavior.
+- Replaced debug prints with Python `logging` calls.
 
 ### v4 (2026-02-03)
-Fixed d_z to d_m projection. Re-ordered vignetting application with explicit bookkeeping (`aeff_base`, `aeff_adjusted`, `aeff_vig_factor`). Improved vignetting parsing for two-column and per-position formats. Extended interactive plot context menu with fit parameters CSV and EEF overlay. 34 tests pass.
+
+- Fixed dz -> dm projection; correct per-MM dz outputs with `--log-dz`.
+- Vignetting application re-ordered after A_eff initialisation with explicit bookkeeping (`aeff_base`, `aeff_adjusted`, `aeff_vig_factor`).
+- Improved vignetting parsing for two-column and per-position formats.
+- GUI: Apply vignetting factors when exporting checkbox in A_eff tab.
+- 34 tests passing.
 
 ### v3 (2026-01-28)
-Repository cleanup. Deterministic per-MM sampling for presets. CSV/Excel parity in generation. Unit tests and pytest configuration added. Renamed `sensivitiy` to `sensitivity`.
+
+- Repository cleanup and removal of legacy tooling.
+- Deterministic per-MM sampling for presets; CSV/Excel export parity.
+- Unit tests and pytest configuration added.
+- Renamed `sensivitiy` to `sensitivity`.
 
 ### v2 (2025-12-15)
-Initial public release. Core PSF generation, placement strategies, Excel I/O. Gaussian and Pseudo-Voigt support. Basic GUI and command-line analysis utilities.
+
+- Initial public release. Core PSF generation, placement strategies, Excel I/O, GUI and CLI analysis utilities, Gaussian and Pseudo-Voigt support.
