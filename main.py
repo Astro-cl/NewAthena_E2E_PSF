@@ -5784,7 +5784,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1.plot(mux_arr * 1e6, muy_arr * 1e6, 'k+', markersize=4, markeredgewidth=0.7,
              linewidth=0, label='MM PSF centres', zorder=5)
     # Mark the minimum with a green cross and coordinates (label updated)
-    plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='center for minimum HEW')
+    plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='center for min HEW')
     plt.text(center_x*1e6, center_y*1e6, f'({center_x*1e6:.2f}, {center_y*1e6:.2f})', color='green', ha='left', va='bottom')
     # Mark (0,0) with a blue cross
     plt.plot(0, 0, 'bx', markersize=10, label='(0,0)')
@@ -6044,7 +6044,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         opt_hew_arcsec = 2 * opt_radius_50 * m_to_arcsec
         opt_eef90_arcsec = 2 * opt_radius_90 * m_to_arcsec if opt_radius_90 is not None else None
         # Mark optimized best focus
-        plt.plot(opt_center_x*1e6, opt_center_y*1e6, 'mx', markersize=10, label='optimized minimum')
+        plt.plot(opt_center_x*1e6, opt_center_y*1e6, 'mx', markersize=10, label='optimized min')
         # HEW circle (magenta dotted) — short label
         label_opt_50 = 'HEW (optimized)'
         circle_opt_50 = plt.Circle((opt_center_x*1e6, opt_center_y*1e6), opt_radius_50*1e6, fill=False, color='magenta', linestyle=':', linewidth=2, label=label_opt_50)
@@ -6061,16 +6061,16 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
 
     focus_order = {
         '(0,0)': 0,
-        'center for minimum HEW': 1,
-        'minimum': 2,
-        'optimized minimum': 3,
+        'center for min HEW': 1,
+        'min': 2,
+        'optimized min': 3,
     }
 
     def _legend_sort_key(label: str) -> tuple[int, int, str]:
         if label in focus_order:
             return (0, focus_order[label], label)
         if label.startswith('HEW'):
-            if 'minimum' in label:
+            if '(min)' in label:
                 return (1, 0, label)
             if '(0,0)' in label:
                 return (1, 1, label)
@@ -6093,7 +6093,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         return (3, 99, label)
 
     order = sorted(range(len(labels)), key=lambda i: _legend_sort_key(labels[i]))
-    # Ensure (0,0) is first and 'center for minimum HEW' is second if present
+    # Ensure (0,0) is first and 'center for min HEW' is second if present
     preferred_first = []
     try:
         idx_00 = next(i for i, lbl in enumerate(labels) if lbl == '(0,0)')
@@ -6101,7 +6101,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     except StopIteration:
         idx_00 = None
     try:
-        idx_center = next(i for i, lbl in enumerate(labels) if lbl == 'center for minimum HEW')
+        idx_center = next(i for i, lbl in enumerate(labels) if lbl == 'center for min HEW')
         # Only add if it's not the same as (0,0)
         if idx_center is not None and idx_center != idx_00:
             preferred_first.append(idx_center)
@@ -6113,14 +6113,34 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     final_order = preferred_first + remaining
     handles_sorted = [handles[i] for i in final_order]
     labels_sorted = [labels[i] for i in final_order]
-    # place compact legend inside the left subplot (upper-left) with 2 columns x 3 rows
+    # Split into two legend boxes: point markers (top-left) and circle entries (top-right)
+    def _apply_split_legend(ax, hs, ls):
+        """Draw two legend boxes on ax: markers top-left, circles top-right."""
+        _lh, _ll, _rh, _rl = [], [], [], []
+        for _h, _l in zip(hs, ls):
+            if _l.startswith('HEW') or _l.startswith('EEF'):
+                _rh.append(_h); _rl.append(_l)
+            else:
+                _lh.append(_h); _ll.append(_l)
+        # Remove all existing legend artists for a clean slate
+        import matplotlib.legend as _mleg
+        for _a in list(ax.get_children()):
+            if isinstance(_a, _mleg.Legend):
+                try:
+                    _a.remove()
+                except Exception:
+                    pass
+        if _lh:
+            _leg1 = ax.legend(_lh, _ll, loc='upper left', fontsize=8, framealpha=0.85,
+                              bbox_to_anchor=(0.02, 0.98), bbox_transform=ax.transAxes)
+            ax.add_artist(_leg1)
+        if _rh:
+            ax.legend(_rh, _rl, loc='upper right', fontsize=8, framealpha=0.85,
+                      bbox_to_anchor=(0.98, 0.98), bbox_transform=ax.transAxes)
     try:
-        ax1.legend(handles_sorted, labels_sorted, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+        _apply_split_legend(ax1, handles_sorted, labels_sorted)
     except Exception:
-        try:
-            ax1.legend(handles_sorted, labels_sorted, loc='upper left', framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
-        except Exception:
-            ax1.legend(handles_sorted, labels_sorted, loc='upper left')
+        ax1.legend(handles_sorted, labels_sorted, loc='upper left')
     
     # Second subplot: encircled energy function (right, 40% width)
     ax2 = plt.subplot(gs[0, 12:])
@@ -6132,13 +6152,13 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     # labels for the EEF subplot — include FWHM values when available
     try:
         if fwhm_x_arcsec is not None and fwhm_y_arcsec is not None:
-            label_best = f'Centered on minimum (FWHM_x={fwhm_x_arcsec:.4f}\", FWHM_y={fwhm_y_arcsec:.4f}\")'
+            label_best = f'Centered on min (FWHM_x={fwhm_x_arcsec:.4f}\", FWHM_y={fwhm_y_arcsec:.4f}\")'
             label_00 = f'Centered on (0,0) (FWHM_x={fwhm_x_arcsec:.4f}\", FWHM_y={fwhm_y_arcsec:.4f}\")'
         else:
-            label_best = 'Centered on minimum'
+            label_best = 'Centered on min'
             label_00 = 'Centered on (0,0)'
     except Exception:
-        label_best = 'Centered on minimum'
+        label_best = 'Centered on min'
         label_00 = 'Centered on (0,0)'
     # Limit plot to 95% percentile
     def limit_percentile(pct, diam, max_pct=95):
@@ -6212,16 +6232,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                         order_now = sorted(range(len(labels_now)), key=lambda i: _legend_sort_key(labels_now[i]))
                         handles_sorted_now = [handles_now[i] for i in order_now]
                         labels_sorted_now = [labels_now[i] for i in order_now]
-                        # place compact legend inside the left subplot to avoid overlap with colorbar
-                        ax1.legend(handles_sorted_now, labels_sorted_now, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+                        _apply_split_legend(ax1, handles_sorted_now, labels_sorted_now)
                     except Exception:
-                        try:
-                            ax1.legend(handles_sorted_now, labels_sorted_now, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
-                        except Exception:
-                            try:
-                                ax1.legend()
-                            except Exception:
-                                pass
+                        pass
                 except Exception:
                     pass
     except Exception:
@@ -6380,7 +6393,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                     ymin, ymax = ax2.get_ylim()
                     yoff = 0.02 * (ymax - ymin)
                     text_y = diam80 - yoff
-                    ax2.text(0, text_y, f'EEF 80% minimum = {diam80:.2f}"', ha='left', va='top', fontsize=9, color='purple')
+                    ax2.text(0, text_y, f'EEF 80% min = {diam80:.2f}"', ha='left', va='top', fontsize=9, color='purple')
                 except Exception:
                     pass
     except Exception:
@@ -6391,7 +6404,7 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         opt_profile_pct = opt_frac_profile * 100
         opt_profile_diam = 2 * opt_r_profile * m_to_arcsec
         opt_profile_pct_95, opt_profile_diam_95 = limit_percentile(opt_profile_pct, opt_profile_diam)
-        label_opt = 'Optimized minimum'
+        label_opt = 'Optimized min'
         plt.plot(opt_profile_pct_95, opt_profile_diam_95, label=label_opt, linestyle=':', linewidth=2.5, color='magenta')
     
     # Create final legend for EEF subplot now that all fit curves have been plotted
@@ -6428,10 +6441,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         try:
             ymin, ymax = ax2.get_ylim()
             yoff = 0.02 * (ymax - ymin)
-            text_y = hew_best_arcsec - yoff
-            ax2.text(0, text_y, f'HEW minimum = {hew_best_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='green')  # Label HEW with value
+            text_y = hew_best_arcsec + yoff
+            ax2.text(0, text_y, f'HEW min = {hew_best_arcsec:.3f}"', ha='left', va='bottom', fontsize=9, color='green')  # Label HEW with value
         except Exception:
-            ax2.text(0, hew_best_arcsec, f'HEW minimum = {hew_best_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='green')
+            ax2.text(0, hew_best_arcsec, f'HEW min = {hew_best_arcsec:.3f}"', ha='left', va='bottom', fontsize=9, color='green')
     # Mark the 50% from (0,0) in blue
     plt.axhline(y=hew_origin_arcsec, linestyle='--', color='blue', linewidth=eef_linewidth)  # Horizontal line at HEW(0,0) diameter
     if hew_origin_arcsec is not None:
@@ -6439,10 +6452,10 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             ymin, ymax = ax2.get_ylim()
             yoff = 0.02 * (ymax - ymin)
             text_y = hew_origin_arcsec - yoff
-            # place near right side (x=100) but slightly below the line
-            ax2.text(100, text_y, f'HEW (0,0) = {hew_origin_arcsec:.3f}"', ha='center', va='top', fontsize=9, color='blue')
+            # place at right side, below the line
+            ax2.text(99, text_y, f'HEW (0,0) = {hew_origin_arcsec:.3f}"', ha='right', va='top', fontsize=9, color='blue')
         except Exception:
-            ax2.text(100, hew_origin_arcsec, f'HEW (0,0) = {hew_origin_arcsec:.3f}"', ha='center', va='top', fontsize=9, color='blue')
+            ax2.text(99, hew_origin_arcsec, f'HEW (0,0) = {hew_origin_arcsec:.3f}"', ha='right', va='top', fontsize=9, color='blue')
     # Mark the 90% encircled energy in red
     if radius_90 is not None:
         plt.axhline(y=eef90_arcsec, linestyle='--', color='red', linewidth=eef_linewidth)  # Horizontal line at EEF90 diameter
@@ -6451,9 +6464,9 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             ymin, ymax = ax2.get_ylim()
             yoff = 0.02 * (ymax - ymin)
             text_y = eef90_arcsec - yoff
-            ax2.text(0, text_y, f'EEF 90% minimum = {eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='red')  # Label 90% with value
+            ax2.text(0, text_y, f'EEF 90% min = {eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='red')  # Label 90% with value
         except Exception:
-            ax2.text(0, eef90_arcsec, f'EEF 90% minimum = {eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='red')
+            ax2.text(0, eef90_arcsec, f'EEF 90% min = {eef90_arcsec:.3f}"', ha='left', va='top', fontsize=9, color='red')
     
     # Add optimized reference lines if provided
     if df_optimized is not None and opt_radius_50 is not None:
@@ -6541,14 +6554,14 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             pass
         handles_all, labels_all = ax1.get_legend_handles_labels()
         preferred = []
-        for name in ['(0,0)', 'center for minimum HEW']:
+        for name in ['(0,0)', 'center for min HEW']:
             if name in labels_all:
                 preferred.append(labels_all.index(name))
         remaining = [i for i in range(len(labels_all)) if i not in preferred]
         final_idx = preferred + remaining
         handles_final = [handles_all[i] for i in final_idx]
         labels_final = [labels_all[i] for i in final_idx]
-        ax1.legend(handles_final, labels_final, loc='upper left', ncol=2, fontsize=8, framealpha=0.85, bbox_to_anchor=(0.02, 0.98), bbox_transform=ax1.transAxes)
+        _apply_split_legend(ax1, handles_final, labels_final)
     except Exception:
         try:
             ax1.legend(loc='upper left', ncol=2, fontsize=8, framealpha=0.85)
@@ -8097,6 +8110,14 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     map_btn = ttk.Button(rnk_btn_col, text="Map", state='disabled')
     map_btn.pack(fill='x', padx=2)
 
+    rnk_mode_var = tk.StringVar(value='min_hew')
+    rnk_mode_row = ttk.Frame(ranking_outer)
+    rnk_mode_row.pack(fill='x', padx=4, pady=(3, 0))
+    ttk.Radiobutton(rnk_mode_row, text='Min HEW (centroid)',
+                    variable=rnk_mode_var, value='min_hew').pack(side='left')
+    ttk.Radiobutton(rnk_mode_row, text='HEW centred on (0,0)',
+                    variable=rnk_mode_var, value='origin').pack(side='left', padx=(10, 0))
+
     rnk_status_var = tk.StringVar(value="Click \u25b6 Rank to compute.")
     ttk.Label(ranking_outer, textvariable=rnk_status_var,
               foreground='gray', wraplength=255,
@@ -8181,7 +8202,8 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
     rnk_tv.bind('<Command-ButtonPress-1>', _rnk_cmd_click)  # macOS Cmd+Click toggle
 
     # Shared store for the last computed ranking; populated inside _update().
-    _rnk_results = []   # [(mm_n, delta, row_n, petal_n), ...]
+    _rnk_results = []    # [(mm_n, delta, row_n, petal_n), ...]
+    _rnk_mode    = ['min_hew']   # last ranking mode; updated by _compute_ranking
 
     def _open_map_window():
         """Open a Toplevel with a colour-coded 2-D scatter of MM positions.
@@ -8255,8 +8277,10 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         norm = _mpl.colors.Normalize(vmin=-abs_max, vmax=abs_max)
         cmap = _mpl.cm.RdYlGn
 
+        _map_mode_lbl = ('Min HEW (centroid)' if _rnk_mode[0] == 'min_hew'
+                        else 'HEW centred on (0,0)')
         top = tk.Toplevel(root)
-        top.title("MM HEW Contribution Map")
+        top.title(f"MM HEW Contribution Map \u2014 {_map_mode_lbl}")
         top.geometry("680x600")
 
         fig = _MapFig(figsize=(6.4, 5.6), dpi=96, tight_layout=True)
@@ -8277,7 +8301,7 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         cb.set_label('\u0394HEW (\u2033)')
         ax.set_xlabel('x\u2009(m)')
         ax.set_ylabel('y\u2009(m)')
-        ax.set_title('HEW contribution map \u2014 red\u2009=\u2009degrading  green\u2009=\u2009improving')
+        ax.set_title(f'HEW contribution map ({_map_mode_lbl}) \u2014 red\u2009=\u2009degrading  green\u2009=\u2009improving')
 
         # Fix axes to cover ALL MM locations regardless of the current selection.
         _pad = max(float((_all_xs.max() - _all_xs.min()) * 0.06),
@@ -8314,6 +8338,7 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
         _mm_col_num = pd.to_numeric(df_full['MM #'], errors='coerce')
         selected_set = set(selected)
         n_sel = len(selected)
+        _mode_now = rnk_mode_var.get()   # capture mode before spawning thread
 
         def _worker():
             try:
@@ -8375,6 +8400,9 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
                 _cx = float(np.dot(_w, _mux));  _cy = float(np.dot(_w, _muy))
                 if not np.isfinite(_cx): _cx = 0.0
                 if not np.isfinite(_cy): _cy = 0.0
+                if _mode_now == 'origin':   # user chose "HEW centred on (0,0)"
+                    _cx = 0.0
+                    _cy = 0.0
                 _max_sig  = max(float(_sigx.max()), float(_sigy.max()))
                 _max_dist = float(np.sqrt((_mux - _cx)**2 + (_muy - _cy)**2).max())
                 _r_max = _max_dist + 5.0 * _max_sig
@@ -8507,8 +8535,10 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
                         rnk_tv.insert('', 'end', tags=(_tag,), values=(
                             rank, int(mm_n), f'{delta:+.3f}', _rv, _pv))
                     _rnk_results[:] = results
+                    _rnk_mode[0] = _mode_now
+                    _mode_lbl = '@ centroid' if _mode_now == 'min_hew' else '@ (0,0)'
                     rnk_status_var.set(
-                        f"Baseline HEW: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
+                        f"Baseline HEW {_mode_lbl}: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
                         f"red=degrading  green=improving")
                     rank_btn.configure(state='normal')
                     map_btn.configure(state='normal')
