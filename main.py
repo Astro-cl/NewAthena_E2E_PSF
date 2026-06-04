@@ -962,6 +962,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     _col_j_val = mm_config_df.iloc[order_i, 9] if mm_config_df.shape[1] > 9 else None
                     _mm_height = float(_col_i_val) if _col_i_val is not None and not pd.isna(_col_i_val) else None
                     _mm_width  = float(_col_j_val) if _col_j_val is not None and not pd.isna(_col_j_val) else None
+
                     mm_config_map[mm_num_i] = {
                         'x_MM': row.get('x_MM [m]', 0),
                         'y_MM': row.get('y_MM [m]', 0),
@@ -1208,7 +1209,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # Read rotazi sheet (A->B interpretation: col0 = delta, col1 = factor)
         # Supported layouts:
         # - Two-column A->B (delta in col0, factor in col1): used for a single
-        #   global vignette curve applied to every position.
+        #   global vignetting curve applied to every position.
         # - Multi-column with numeric column headers: columns after col0 are
         #   interpreted as per-position factor series (header=Position #).
         # - Header-heavy workbooks often still contain the intended A->B mapping
@@ -1263,7 +1264,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             except Exception as e:
                 print(f'VIG sel_energy A_eff D2 scan error: {e}')
             
-            # 1) Fallback: vignette sheet col 'Selected energy [keV]' and C2
+            # 1) Fallback: vignetting sheet col 'Selected energy [keV]' and C2
             #    Only used when A_eff D2 did not provide the energy.
             if sel_energy is None:
                 try:
@@ -1309,7 +1310,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             # 2/3) fallback: detect from A_eff or column name
             try:
                 # Only use the A_eff column name if sel_energy was not
-                # already determined from the vignette sheet itself.
+                # already determined from the vignetting sheet itself.
                 import re as _re
                 if sel_energy is None and aeff_col_name and isinstance(aeff_col_name, str):
                     m = _re.search(r"(\d+(?:\.\d*)?)\s*(?:keV)?", aeff_col_name, flags=_re.IGNORECASE)
@@ -1563,7 +1564,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             xs_rad = ys_rad = None
         # If sel_energy was not determined from the rotazi sheet, try rotrad's
         # selected-energy marker (common exporter sometimes places it only
-        # on one of the vignette sheets). Normalize to float when possible.
+        # on one of the vignetting sheets). Normalize to float when possible.
         try:
             if (sel_energy is None or (isinstance(sel_energy, float) and np.isnan(sel_energy))):
                 # read rotrad sheet C2 explicitly to detect selected energy
@@ -1622,7 +1623,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         #    it into the existing weight. Radial and azimuthal factors both
         #    multiply the weight (order is irrelevant since multiplication is
         #    commutative), but we apply radial first then azimuthal for clarity.
-        # Normalize any per-position vignette series so interpolation
+        # Normalize any per-position vignetting series so interpolation
         # later can assume integer-position keys map to 1D arrays of
         # factors sampled at `xs_azi` / `xs_rad`. This fixes cases
         # where sheets mixed tuple (xs, ys) series and plain ys
@@ -1721,7 +1722,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         if 'weight' in df.columns:
 
             # Helper to find a per-(cfg_row,energy) series robustly. The
-            # vignette sheet may store the energy marker as text or numeric;
+            # vignetting sheet may store the energy marker as text or numeric;
             # prefer numeric match, then named A_eff column, then fallback
             # to any series for the cfg_row.
             def _find_series(ys_map, cfg_row, sel_energy_local, aeff_col_name_local=None):
@@ -1854,7 +1855,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         vig_source_azi[p] = ('per_row' if azi_mode.startswith('per') else 'global')
 
             df.attrs['vignetting_rotrad_applied'] = bool(applied_rad)
-        # Post-pass: recompute per-position vignette values from the
+        # Post-pass: recompute per-position vignetting values from the
         # populated per-(cfg_row,energy) tables to avoid mismatches that
         # can occur during the row-wise application loop. This ensures
         # `vig_vals_azi` / `vig_vals_rad` reflect the intended
@@ -1965,10 +1966,10 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         else:
             print("DEBUG: No aeff_base column - skipping adjusted computation")
 
-        # Attempt to write per-position vignette factors into the workbook's
+        # Attempt to write per-position vignetting factors into the workbook's
         # Vignetting rotazi/rotrad sheets in column B for visibility. This
         # implementation uses openpyxl to update only the specified cells
-        # (column B and C1 on vignette sheets; columns B and C on A_eff)
+        # (column B and C1 on vignetting sheets; columns B and C on A_eff)
         # and saves atomically to avoid corrupting the original workbook.
         try:
             from openpyxl import load_workbook
@@ -1996,8 +1997,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 except Exception as e:
                     print(f"Warning: failed to copy sel_energy to C2: {e}")
 
-            # Derive per-position vignette factors from the DataFrame to ensure
-            # the values written into the vignette sheets exactly reflect the
+            # Derive per-position vignetting factors from the DataFrame to ensure
+            # the values written into the vignetting sheets exactly reflect the
             # factors used to compute `aeff_adjusted`.
             per_pos_rad = {}
             per_pos_azi = {}
@@ -2036,8 +2037,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 per_pos_rad = per_pos_rad if per_pos_rad else {}
                 per_pos_azi = per_pos_azi if per_pos_azi else {}
 
-            # Build per-position vignette dictionaries from the computed
-            # DataFrame values so the values written into the vignette
+            # Build per-position vignetting dictionaries from the computed
+            # DataFrame values so the values written into the vignetting
             # sheets exactly match those used to compute `aeff_adjusted`.
             final_vig_vals_rad = {}
             final_vig_vals_azi = {}
@@ -2080,7 +2081,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             if not final_vig_vals_azi and 'vig_vals_azi' in locals():
                 final_vig_vals_azi = dict(locals().get('vig_vals_azi', {}))
 
-            # VIGNETTE SHEETS: write col B and C1 only
+            # vignetting SHEETS: write col B and C1 only
             _vig_azi_sname = _find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES)
             _vig_rad_sname = _find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES)
             for sname, vig_map in (
@@ -2225,7 +2226,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         pass
                         sys.stdout.flush()
                     pos_int = int(pos_k)
-                    # Prefer recomputed vignette maps first, then DataFrame-derived
+                    # Prefer recomputed vignetting maps first, then DataFrame-derived
                     # values only as a fallback for visibility/writeback.
                     val = None
                     try:
@@ -2295,7 +2296,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 ws_a = wb['A_eff']
                 max_r_a = ws_a.max_row or 0
 
-                # Read vignette factors from workbook (column B of vignette sheets)
+                # Read vignetting factors from workbook (column B of vignetting sheets)
                 vig_rad_sheet = {}
                 vig_azi_sheet = {}
                 _vr_name = _find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES)
@@ -2330,7 +2331,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 pass
 
                 # Update the in-memory dataframe so its per-MM factors and
-                # adjusted A_eff match the vignette values written to the sheets.
+                # adjusted A_eff match the vignetting values written to the sheets.
                 try:
                     # ensure columns exist
                     if 'aeff_vig_factor_rad' not in df.columns:
@@ -2392,7 +2393,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 except Exception:
                     pass
 
-                # Now write A_eff columns using sheet-derived vignette products to
+                # Now write A_eff columns using sheet-derived vignetting products to
                 # ensure A_eff C/B == (rotazi_B * rotrad_B)
                 written_a = 0
                 for r in range(1, max_r_a + 1):
@@ -2517,8 +2518,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                     pass
 
                 # Always save workbook after writing column C
-                # Before saving, reconcile per-position vignette factors so
-                # the values written into the vignette sheets (column B)
+                # Before saving, reconcile per-position vignetting factors so
+                # the values written into the vignetting sheets (column B)
                 # are consistent with the `aeff_adjusted` values computed
                 # for each MM. Compute per-position combined factor from the
                 # DataFrame and adjust rad/azi components accordingly.
@@ -2536,9 +2537,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                                 continue
                             pos_members.setdefault(ppos, []).append(idx_row)
 
-                    # Compute canonical per-position vignette factors directly
+                    # Compute canonical per-position vignetting factors directly
                     # from the vignetting tables (preferred source) so the
-                    # values written into the vignette sheets reflect the
+                    # values written into the vignetting sheets reflect the
                     # same interpolation used for per-position corrections.
                     final_vig_rad = {}
                     final_vig_azi = {}
@@ -2661,7 +2662,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         pass
 
                     # Also write these reconciled per-position factors back into
-                    # the vignette sheets' column B so the workbook reflects the
+                    # the vignetting sheets' column B so the workbook reflects the
                     # exact factors used to compute `aeff_adjusted`.
                     for sname, final_map in ((_find_vig_sheet(wb, VIG_ROT_AZI_CANDIDATES), vig_vals_azi), (_find_vig_sheet(wb, VIG_ROT_RAD_CANDIDATES), vig_vals_rad)):
                         if sname is None or sname not in wb.sheetnames:
@@ -2686,7 +2687,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                         # write reconciled values
                         for pos_k, row_idx in pos_row_map2.items():
                             try:
-                                # Column A on MM vignette sheets is Position #.
+                                # Column A on MM vignetting sheets is Position #.
                                 pos_key = int(pos_k)
                                 val = float(final_map.get(pos_key, 1.0))
                                 ws_w.cell(row=row_idx, column=2, value=val)
@@ -2695,9 +2696,9 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
                 except Exception:
                     pass
 
-                # After reconciling vignette sheet B values, re-write A_eff
-                # column C using the newly-updated vignette B values so the
-                # workbook's A_eff entries are consistent with the vignette
+                # After reconciling vignetting sheet B values, re-write A_eff
+                # column C using the newly-updated vignetting B values so the
+                # workbook's A_eff entries are consistent with the vignetting
                 # factors that will be saved below.
                 try:
                     vig_azi_sheet = {}
@@ -3047,7 +3048,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             # If anything goes wrong, do not raise — vignetting writes are non-fatal.
             pass
             sys.stdout.flush()
-        # Debug summary: print selected vignette source mapping for first positions
+        # Debug summary: print selected vignetting source mapping for first positions
         try:
             debug_env = os.environ.get('VIG_DEBUG', None)
             if debug_env:
@@ -3092,12 +3093,14 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # --- Accumulate breakdown: alignment trans/rotz and all-source rotz ---
         if mm_num in mm_config_map:
             _cfg_bd = mm_config_map[mm_num]
+            
             _x_bd = _cfg_bd['x_MM']; _y_bd = _cfg_bd['y_MM']
             _r_bd = _cfg_bd.get('r_MM', float(np.hypot(_x_bd, _y_bd)))
             if _r_bd == 0:
                 _r_bd = 1e-12
-            _ux_bd = _x_bd / _r_bd;  _uy_bd = _y_bd / _r_bd   # radial
-            _ax_bd = -_y_bd / _r_bd; _ay_bd = _x_bd / _r_bd   # azimuthal
+            # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
+            _ux_bd = -_x_bd / _r_bd;  _uy_bd = _y_bd / _r_bd   # radial
+            _ax_bd = -_y_bd / _r_bd; _ay_bd = -_x_bd / _r_bd   # azimuthal
             _b = _bd_map.setdefault(mm_num, {
                 'MM #': mm_num, 'Position #': pos if pos is not None else '',
                 '_ux': _ux_bd, '_uy': _uy_bd, '_ax': _ax_bd, '_ay': _ay_bd,
@@ -3135,8 +3138,8 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
     # Convert from polar (m_rad, m_azi) to Cartesian (mux, muy)
     # Radial direction: along MM position (x_MM, y_MM)
     # Azimuthal direction: perpendicular to radial, counterclockwise
-    # mux = (x_MM/r_MM)*m_rad - (y_MM/r_MM)*m_azi
-    # muy = (y_MM/r_MM)*m_rad + (x_MM/r_MM)*m_azi
+    # mux = - (x_MM/r_MM)*m_rad - (y_MM/r_MM)*m_azi
+    # muy = (y_MM/r_MM)*m_rad - (x_MM/r_MM)*m_azi
     # This ensures consistent behavior: positive m_rad always moves outward from center
     
     def convert_polar_to_cartesian(row, mm_config_map):
@@ -3144,15 +3147,16 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         mm_num = row['MM #']
         # Use provided mm_config_map or sensible defaults when missing
         config = mm_config_map.get(mm_num, {'x_MM': 1.0, 'y_MM': 0.0, 'r_MM': 1.0})
+        # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
         x_mm = config.get('x_MM', 1.0)
         y_mm = config.get('y_MM', 0.0)
         r_mm = config.get('r_MM', 1.0)  # Avoid division by zero
         
         # Unit vectors
-        u_rad_x = x_mm / r_mm  # Radial unit vector x-component
+        u_rad_x = -x_mm / r_mm  # Radial unit vector x-component
         u_rad_y = y_mm / r_mm  # Radial unit vector y-component
         u_azi_x = -y_mm / r_mm  # Azimuthal unit vector x-component (perpendicular)
-        u_azi_y = x_mm / r_mm   # Azimuthal unit vector y-component
+        u_azi_y = -x_mm / r_mm   # Azimuthal unit vector y-component
         
         m_rad = row['m_rad']
         m_azi = row['m_azi']
@@ -3185,21 +3189,23 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         # Get gravity d_z
         d_grav_z = 0
         if pos is not None and pos in gravity_by_pos:
-            new_mux += gravity_by_pos[pos]['d_grav_x']
+            # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
+            new_mux -= gravity_by_pos[pos]['d_grav_x']
             new_muy += gravity_by_pos[pos]['d_grav_y']
             d_grav_z = gravity_by_pos[pos]['d_grav_z']
             if mm_num in _bd_map:
-                _bd_map[mm_num]['mux_grav_trans'] = gravity_by_pos[pos]['d_grav_x']
+                _bd_map[mm_num]['mux_grav_trans'] = -gravity_by_pos[pos]['d_grav_x']
                 _bd_map[mm_num]['muy_grav_trans'] = gravity_by_pos[pos]['d_grav_y']
         
         # Get thermal d_z
         d_therm_z = 0
         if pos is not None and pos in thermal_by_pos:
-            new_mux += thermal_by_pos[pos]['d_therm_x']
+            # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
+            new_mux -= thermal_by_pos[pos]['d_therm_x']
             new_muy += thermal_by_pos[pos]['d_therm_y']
             d_therm_z = thermal_by_pos[pos]['d_therm_z']
             if mm_num in _bd_map:
-                _bd_map[mm_num]['mux_therm_trans'] = thermal_by_pos[pos]['d_therm_x']
+                _bd_map[mm_num]['mux_therm_trans'] = -thermal_by_pos[pos]['d_therm_x']
                 _bd_map[mm_num]['muy_therm_trans'] = thermal_by_pos[pos]['d_therm_y']
         
         # Get extra d_z (defocus, etc.)
@@ -3211,6 +3217,7 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
         d_z_total = d_align_z + d_grav_z + d_therm_z + d_extra_z
         if mm_num in mm_config_map:
             mm_config = mm_config_map[mm_num]
+            
             x_MM = mm_config['x_MM']
             y_MM = mm_config['y_MM']
             z_MM = mm_config['z_MM']
@@ -3220,19 +3227,21 @@ def load_gaussians_from_excel(path: str, sheet: str | None = None, fast_metrics:
             if denominator != 0 and d_z_total != 0:
                 dm_x = d_z_total * x_MM / denominator
                 dm_y = d_z_total * y_MM / denominator
-                new_mux += dm_x
+                # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
+                new_mux -= dm_x
                 new_muy += dm_y
 
             # Accumulate per-source z-projection breakdown
             if mm_num in _bd_map and denominator != 0:
                 _b = _bd_map[mm_num]
-                _b['mux_align_z']  = d_align_z  * x_MM / denominator
+                # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
+                _b['mux_align_z']  = -d_align_z  * x_MM / denominator
                 _b['muy_align_z']  = d_align_z  * y_MM / denominator
-                _b['mux_grav_z']   = d_grav_z   * x_MM / denominator
+                _b['mux_grav_z']   = -d_grav_z   * x_MM / denominator
                 _b['muy_grav_z']   = d_grav_z   * y_MM / denominator
-                _b['mux_therm_z']  = d_therm_z  * x_MM / denominator
+                _b['mux_therm_z']  = -d_therm_z  * x_MM / denominator
                 _b['muy_therm_z']  = d_therm_z  * y_MM / denominator
-                _b['mux_extra_z']  = d_extra_z  * x_MM / denominator
+                _b['mux_extra_z']  = -d_extra_z  * x_MM / denominator
                 _b['muy_extra_z']  = d_extra_z  * y_MM / denominator
         
         # Apply defocusing (dz) PSF shape adjustment.
@@ -3874,7 +3883,8 @@ def compute_dm_from_dz(mm: dict, row: dict, d_z: float) -> tuple[float, float]:
     uy = 0.0
     r_mm = float(mm.get('r_MM', 0.0) or 0.0)
     if r_mm > 0.0:
-        ux = float(mm.get('x_MM', 0.0)) / r_mm
+        # Note that the x_MM is reversed at this stage since X_MA axis direction is reversed wrt. the X_detector axis direction
+        ux = -float(mm.get('x_MM', 0.0)) / r_mm
         uy = float(mm.get('y_MM', 0.0)) / r_mm
     else:
         theta = row.get('theta_degrees') if isinstance(row, dict) else None
@@ -4021,11 +4031,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
         for i in idxs:
             dlow = dist_arr[i]
             if dlow in ['pseudo-voigt', 'voigt']:
+                # Note that theta is reversed because the X_MA is reversed wrt. X_detector
                 add = pseudo_voigt_2d_rotated(
                     Xg, Yg,
                     muazi=mux_arr[i], murad=muy_arr[i],
                     sigmaazi=sigx_arr[i], sigmarad=sigy_arr[i],
-                    theta=theta_arr[i],
+                    theta=-theta_arr[i],
                     alphaazi=alpha_azi_arr[i],
                     alpharad=alpha_rad_arr[i],
                     amplitude=weight_arr[i],
@@ -4034,11 +4045,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                 )
                 Zc += add
             elif dlow == 'gaussian':
+                # Note that theta is reversed because the X_MA is reversed wrt. X_detector
                 add = gaussian_2d_rotated(
                     Xg, Yg,
                     mux=mux_arr[i], muy=muy_arr[i],
                     sigmax=sigx_arr[i], sigmay=sigy_arr[i],
-                    theta=theta_arr[i],
+                    theta=-theta_arr[i],
                     amplitude=weight_arr[i],
                     normalize=normalize_flag,
                     degrees=True,
@@ -4058,11 +4070,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                             psf = None
                 if psf is None:
                     # If file not found/invalid, fall back to Gaussian to keep plotting running.
+                    # Note that theta is reversed because the X_MA is reversed wrt. X_detector
                     Zc += gaussian_2d_rotated(
                         Xg, Yg,
                         mux=mux_arr[i], muy=muy_arr[i],
                         sigmax=max(sigx_arr[i], 1e-12), sigmay=max(sigy_arr[i], 1e-12),
-                        theta=theta_arr[i],
+                        theta=-theta_arr[i],
                         amplitude=weight_arr[i],
                         normalize=normalize_flag,
                         degrees=True,
@@ -5528,11 +5541,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
             Zc = np.zeros_like(Xg, dtype=float)
             for i in idxs:
                 if opt_dist[i] in ['pseudo-voigt', 'voigt']:
+                    # Note that theta is reversed because the X_MA is reversed wrt. X_detector
                     Zc += pseudo_voigt_2d_rotated(
                         Xg, Yg,
                         muazi=opt_mux[i], murad=opt_muy[i],
                         sigmaazi=opt_sigx[i], sigmarad=opt_sigy[i],
-                        theta=opt_theta[i],
+                        theta=-opt_theta[i],
                         alphaazi=opt_alpha_azi[i],
                         alpharad=opt_alpha_rad[i],
                         amplitude=opt_weight[i],
@@ -5540,11 +5554,12 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
                         degrees=True,
                     )
                 else:
+                    # Note that theta is reversed because the X_MA is reversed wrt. X_detector
                     Zc += gaussian_2d_rotated(
                         Xg, Yg,
                         mux=opt_mux[i], muy=opt_muy[i],
                         sigmax=opt_sigx[i], sigmay=opt_sigy[i],
-                        theta=opt_theta[i],
+                        theta=-opt_theta[i],
                         amplitude=opt_weight[i],
                         normalize=normalize_flag,
                         degrees=True,
@@ -5780,8 +5795,8 @@ def plot_sum(df: pd.DataFrame, xlim=(-10,10), ylim=(-8,8), nx=800, ny=640, norma
     ax1_right.set_ylabel('y [arcsec]', rotation=270, va='bottom')
     
     
-    # Mark the center of each MM PSF with a small black cross
-    ax1.plot(mux_arr * 1e6, muy_arr * 1e6, 'k+', markersize=4, markeredgewidth=0.7,
+    # Mark the center of each MM PSF with a small red cross
+    ax1.plot(mux_arr * 1e6, muy_arr * 1e6, 'r+', markersize=4, markeredgewidth=0.7,
              linewidth=0, label='MM PSF centres', zorder=5)
     # Mark the minimum with a green cross and coordinates (label updated)
     plt.plot(center_x*1e6, center_y*1e6, 'gx', markersize=10, label='center for min HEW')
@@ -8455,7 +8470,7 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
                         _Xp, _Yp,
                         muazi=_mux[_i], murad=_muy[_i],
                         sigmaazi=_sigx[_i], sigmarad=_sigy[_i],
-                        theta=_theta[_i],
+                        theta=-_theta[_i],
                         alphaazi=_a_azi[_i], alpharad=_a_rad[_i],
                         amplitude=_w[_i],
                         normalize=True,
@@ -8533,12 +8548,12 @@ def launch_mm_viewer(df_full: pd.DataFrame, mm_to_row: dict = None,
                         _rv = row_n   if row_n   else '\u2014'
                         _pv = petal_n if petal_n else '\u2014'
                         rnk_tv.insert('', 'end', tags=(_tag,), values=(
-                            rank, int(mm_n), f'{delta:+.3f}', _rv, _pv))
+                            rank, int(mm_n), f'{delta:+.5f}', _rv, _pv))
                     _rnk_results[:] = results
                     _rnk_mode[0] = _mode_now
                     _mode_lbl = '@ centroid' if _mode_now == 'min_hew' else '@ (0,0)'
                     rnk_status_var.set(
-                        f"Baseline HEW {_mode_lbl}: {hew_base:.2f}\" \u00b7 {n_sel} MMs \u00b7 "
+                        f"Baseline HEW {_mode_lbl}: {hew_base:.5f}\" \u00b7 {n_sel} MMs \u00b7 "
                         f"red=degrading  green=improving")
                     rank_btn.configure(state='normal')
                     map_btn.configure(state='normal')
